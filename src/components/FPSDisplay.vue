@@ -1,13 +1,10 @@
 <template>
-  <div>{{ Math.round($modV.store.state.metrics.fps) }}</div>
+  <div>{{ Math.round($modV.store.state.metrics.fps) }} FPS</div>
 </template>
 
 <style scoped>
 div {
   font-family: monospace;
-  position: fixed;
-  top: 0;
-  right: 0;
 
   padding: 10px;
   color: #fff;
