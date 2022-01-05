@@ -2,7 +2,9 @@
   <fragment>
     <c span="1.." class="label-row" :class="{ disabled }" v-if="hasLabelSlot">
       <grid columns="4">
-        <c span="1"><slot name="label"/></c>
+        <c span="1">
+          <slot name="label" />
+        </c>
         <c span="3">
           <Button @mousedown="open = !open">
             <img
