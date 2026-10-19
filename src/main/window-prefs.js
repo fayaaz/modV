@@ -1,5 +1,6 @@
 import { app, dialog, ipcMain, screen, BrowserWindow } from "electron";
 import os from "node:os";
+import fs from "node:fs";
 import { join } from "path";
 
 import store from "./media-manager/store";
@@ -158,6 +159,17 @@ const windowPrefs = {
         event.reply("save-file", "saved");
       });
 
+      ipcMain.on("delete-scene", async (event, { name, project }) => {
+        try {
+          await fs.promises.unlink(
+            join(mm.mediaDirectoryPath, project, "scene", `${name}.json`),
+          );
+          event.reply("delete-scene", "deleted");
+        } catch (e) {
+          event.reply("delete-scene", e);
+        }
+      });
+
       ipcMain.on("current-project", (event, message) => {
         setCurrentProject(message);
         updateMenu();
@@ -217,6 +229,7 @@ const windowPrefs = {
       ipcMain.removeAllListeners("modv-destroy");
       ipcMain.removeAllListeners("get-media-manager-state");
       ipcMain.removeAllListeners("save-file");
+      ipcMain.removeAllListeners("delete-scene");
       ipcMain.removeAllListeners("current-project");
       ipcMain.removeAllListeners("input-update");
       ipcMain.removeHandler("is-modv-ready");

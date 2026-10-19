@@ -86,6 +86,7 @@ function resize({ width, height }, canvasIn) {
 
 function generateUniforms(canvasTexture, uniforms, kick = false, fftTexture) {
   const { dpr } = store.state.size;
+  const bands = store.state.meyda.bands || {};
 
   const date = new Date();
   const time = performance.now();
@@ -113,6 +114,9 @@ function generateUniforms(canvasTexture, uniforms, kick = false, fftTexture) {
     u_delta: time / 1000,
     u_time: time,
     u_kick: kick,
+    u_bass: bands.bass || 0,
+    u_mid: bands.mid || 0,
+    u_treble: bands.treble || 0,
   };
 
   return { ...uniforms, ...defaults };

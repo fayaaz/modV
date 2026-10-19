@@ -15,8 +15,10 @@ import presetReadHandler from "./read-handlers/preset";
 import moduleReadHandler from "./read-handlers/module";
 import isfReadHandler from "./read-handlers/isf";
 import videoReadHandler from "./read-handlers/video";
+import sceneReadHandler from "./read-handlers/scene";
 
 import presetSaveHandler from "./save-handlers/preset";
+import sceneSaveHandler from "./save-handlers/scene";
 
 import path from "path";
 import fs from "fs";
@@ -68,8 +70,10 @@ export default class MediaManager {
     this.addReadHandler({ readHandler: moduleReadHandler });
     this.addReadHandler({ readHandler: isfReadHandler });
     this.addReadHandler({ readHandler: videoReadHandler });
+    this.addReadHandler({ readHandler: sceneReadHandler });
 
     this.addSaveHandler({ saveHandler: presetSaveHandler });
+    this.addSaveHandler({ saveHandler: sceneSaveHandler });
 
     store.subscribe((mutation) => {
       if (mutation.type.split("/")[0] !== "media") {

@@ -32,6 +32,9 @@ export default {
     uniform bool      u_kick;                // beatdetektor kick
     uniform sampler2D u_fft;                 // fft texture
     uniform float     u_fftResolution;       // fft texture width
+    uniform float     u_bass;                // AGC bass band (0..1)
+    uniform float     u_mid;                 // AGC mid band (0..1)
+    uniform float     u_treble;              // AGC treble band (0..1)
 
 
     varying vec2 vUv;
@@ -69,6 +72,9 @@ export default {
     uniform bool      u_kick;                // beatdetektor kick
     uniform sampler2D u_fft;                 // fft texture
     uniform float     u_fftResolution;       // fft texture width
+    uniform float     u_bass;                // AGC bass band (0..1)
+    uniform float     u_mid;                 // AGC mid band (0..1)
+    uniform float     u_treble;              // AGC treble band (0..1)
 
     in vec2 vUv;
     out vec4 outColor;

@@ -21,10 +21,14 @@
       </Select>
     </c>
     <c span="1..">
-      <Button class="light" :disabled="bpmSource !== 'tap'" @mousedown="tap"
-        >TAP</Button
-      >
-      {{ bpm }}
+      <grid columns="4">
+        <c span="2">
+          <Button class="light" :disabled="bpmSource !== 'tap'" @mousedown="tap"
+            >TAP</Button
+          >
+        </c>
+        <c span="2">{{ bpm }} BPM ({{ bpmSource }})</c>
+      </grid>
     </c>
   </grid>
 </template>
@@ -46,7 +50,12 @@ export default {
       },
 
       set(source) {
+        if (!this.bpmSources.includes(source)) {
+          return;
+        }
+
         this.$modV.store.commit("beats/SET_BPM_SOURCE", { source });
+        this.$modV._store.commit("beats/SET_BPM_SOURCE", { source });
       },
     },
 
@@ -56,13 +65,20 @@ export default {
   },
   created() {
     tapTempo.on("tempo", (bpm) => {
-      if (this.bpm === Math.round(bpm)) {
+      const tappedBpm = Math.round(bpm);
+
+      if (this.bpm === tappedBpm) {
         return;
       }
+
       this.$modV.store.dispatch("beats/setBpm", {
-        bpm: Math.round(bpm),
+        bpm: tappedBpm,
         source: "tap",
       });
+
+      if (this.bpmSource === "tap") {
+        this.$modV._store.commit("beats/SET_BPM", { bpm: tappedBpm });
+      }
     });
   },
 

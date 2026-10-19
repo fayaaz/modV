@@ -328,6 +328,13 @@ async function start() {
     if (type === "meyda") {
       setFeatures(payload);
 
+      store.commit("meyda/SET_BANDS", {
+        bass: payload.bass || 0,
+        mid: payload.mid || 0,
+        treble: payload.treble || 0,
+        cells: payload.p10 && payload.p10.cells ? payload.p10.cells : [],
+      });
+
       return;
     }
 
@@ -339,11 +346,13 @@ async function start() {
         // Ensure we have a dedicated auxillary output for this device
         let deviceContext = store.state.outputs.webcams[deviceId];
         if (!deviceContext) {
+          const { videoResolution } = store.state.mediaStream;
+
           const output = await store.dispatch("outputs/getAuxillaryOutput", {
             name: label || `webcam:${deviceId}`,
             reactToResize: false,
-            width: bitmap.width,
-            height: bitmap.height,
+            width: videoResolution?.width || bitmap.width,
+            height: videoResolution?.height || bitmap.height,
             group: "input",
           });
           store.dispatch("outputs/setWebcamOutputForDevice", {
@@ -355,10 +364,26 @@ async function start() {
         }
 
         const { canvas } = deviceContext;
-        if (canvas) {
+        const frameSizeChanged =
+          canvas &&
+          (canvas.width !== bitmap.width || canvas.height !== bitmap.height);
+
+        if (frameSizeChanged) {
           canvas.width = bitmap.width;
           canvas.height = bitmap.height;
+
+          // Keep the stored webcam outputs in sync with the new frame size
+          store.commit("outputs/SET_WEBCAM_OUTPUT_FOR_DEVICE", {
+            deviceId,
+            context: deviceContext,
+            auxId: store.state.outputs.webcamAuxByDeviceId[deviceId],
+          });
+
+          if (store.state.outputs.webcam === deviceContext) {
+            store.commit("outputs/SET_WEBCAM_OUTPUT", deviceContext);
+          }
         }
+
         deviceContext.drawImage(bitmap, 0, 0);
       }
 

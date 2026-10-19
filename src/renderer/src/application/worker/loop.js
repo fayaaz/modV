@@ -43,6 +43,13 @@ async function loop(delta, features, fftOutput) {
     return;
   }
 
+  // Advance scene crossfades / autopilot phrase detection
+  try {
+    await store.dispatch("scenes/tick", { delta });
+  } catch (e) {
+    console.error("scenes/tick threw an error", e);
+  }
+
   // Put fftBuffer on fftCanvas
   const byteFrequencyData =
     features.byteFrequencyData || fallbackByteFrequencyData;

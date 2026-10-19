@@ -6,7 +6,12 @@ let byteFrequencyDataArray;
 let byteTimeDomainDataArray;
 let analyserNode;
 
-async function getMediaStream({ audioSourceId, videoSourceId }) {
+async function getMediaStream({
+  audioSourceId,
+  videoSourceId,
+  videoResolution,
+  videoFrameRate,
+}) {
   const audioConstraints = {};
   const videoConstraints = {};
 
@@ -18,12 +23,19 @@ async function getMediaStream({ audioSourceId, videoSourceId }) {
   }
 
   if (videoSourceId) {
+    const { width, height } = videoResolution || {};
+
     videoConstraints.video = {
       deviceId: videoSourceId,
       frameRate: {
-        ideal: 60,
+        ideal: videoFrameRate || 60,
       },
     };
+
+    if (width && height) {
+      videoConstraints.video.width = { ideal: width };
+      videoConstraints.video.height = { ideal: height };
+    }
   }
 
   /* Ask for user media access */
@@ -33,8 +45,23 @@ async function getMediaStream({ audioSourceId, videoSourceId }) {
   ];
 }
 
-async function setupMedia({ audioId, videoId, useDefaultDevices = false }) {
+async function setupMedia({
+  audioId,
+  videoId,
+  useDefaultDevices = false,
+  videoResolution,
+  videoFrameRate,
+} = {}) {
   const { mediaDeviceManager } = this;
+  const mediaStreamState = this._store.state.mediaStream;
+
+  if (videoResolution === undefined) {
+    videoResolution = mediaStreamState.videoResolution;
+  }
+
+  if (videoFrameRate === undefined) {
+    videoFrameRate = mediaStreamState.videoFrameRate;
+  }
 
   const mediaStreamDevices = await mediaDeviceManager.enumerateDevices();
 
@@ -79,6 +106,8 @@ async function setupMedia({ audioId, videoId, useDefaultDevices = false }) {
     await getMediaStream({
       audioSourceId,
       videoSourceId,
+      videoResolution,
+      videoFrameRate,
     }),
   );
 
@@ -99,6 +128,18 @@ async function setupMedia({ audioId, videoId, useDefaultDevices = false }) {
       // Store ImageCapture per device
       if (!this._imageCaptures) this._imageCaptures = {};
       this._imageCaptures[videoSourceId] = new ImageCapture(track);
+
+      // Report back what the device actually gave us
+      if (typeof track.getSettings === "function") {
+        const { width, height, frameRate } = track.getSettings();
+
+        this._store.commit("mediaStream/SET_APPLIED_VIDEO_SETTINGS", {
+          width,
+          height,
+          frameRate: frameRate ? Math.round(frameRate) : null,
+        });
+      }
+
       // Start async capture loop for this deviceId
       this.startCaptureForDevice && this.startCaptureForDevice(videoSourceId);
     }

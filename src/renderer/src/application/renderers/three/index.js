@@ -1,7 +1,7 @@
 import store from "../../worker/store";
 import { resizeCanvas, clearCanvas, copyCanvas } from "../utils";
-import * as THREEimport from "three/build/three.module.js";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
+import * as THREEimport from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const THREE = { ...THREEimport, GLTFLoader };
 const threeModuleData = {};

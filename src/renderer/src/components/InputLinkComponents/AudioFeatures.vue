@@ -69,6 +69,9 @@ export default {
       features: [
         "none",
         "kick",
+        "bass",
+        "mid",
+        "treble",
         "rms",
         "zcr",
         "energy",

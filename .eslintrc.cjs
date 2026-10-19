@@ -8,6 +8,10 @@ module.exports = {
     "@electron-toolkit",
     "@vue/eslint-config-prettier",
   ],
+  parserOptions: {
+    ecmaVersion: 2023,
+    sourceType: "module",
+  },
   rules: {
     "vue/require-default-prop": "off",
     "vue/multi-word-component-names": "off",
