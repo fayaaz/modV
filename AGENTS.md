@@ -7,11 +7,12 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 - `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
 - `npm run dev` — electron-vite dev with HMR. For CDP attach: `npm run dev -- --remote-debugging-port=9223`.
 - `npm run build` — bundle main / preload / renderer into `out/`.
-- `npm run build:linux` — `build` + `electron-builder --linux` → `dist/modv-vite-<version>.AppImage`, `.deb`, `.snap` (also `dist/linux-unpacked/`).
+- `npm run build:linux` — local `build` + `electron-builder --linux` → `dist/modv-vite-<version>.AppImage`, `.deb`.
+- `npm run build:linux:docker` — Dockerised Linux build (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version.
 - `npm run lint` — `eslint . --fix` (Prettier runs through ESLint).
 - `npm run test:e2e` — Playwright. **Requires `npm run build:linux` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `npx playwright test tests/e2e/spec/<name>.spec.js`.
 
-There is **no lint/test CI workflow** (only `build.yml` on tags, `release.yml`, `browserslist.yml`). CI will not catch lint or test failures — run `npm run lint` locally.
+CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `npm run lint` locally.
 
 ## Architecture (three execution contexts)
 
@@ -68,13 +69,13 @@ Gotchas:
 
 - Renderer has multiple entries and matching preloads (see `electron.vite.config.mjs`); workers build with `worker.format: "es"`.
 - The worker runs with `nodeIntegrationInWorker: true` (`src/main/window-prefs.js`), so worker code may `require("fs")`/`require("path")`.
-- Native deps: `grandiose` (NDI) needs libndi on Linux; `grandiose` and `ffmpeg-fluent` are `asarUnpack`ed (see `electron-builder.yml`). Windows needs the node-gyp toolchain — **WSL/WSL2 is unsupported**.
+- Native deps: `grandiose` (NDI) needs libndi on Linux; `grandiose` and `ffmpeg-fluent` are `asarUnpack`ed (see `electron-builder.yml`). The `Dockerfile` installs the NDI SDK and aliases the `libndi.so.5.6.1` soname to the `libndi.so.5.1.1` its `binding.gyp` pins. Windows needs the node-gyp toolchain — **WSL/WSL2 is unsupported**.
 - `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `yarn remove <pkg>`, run `yarn` again to reapply patches (see issue #554).
-- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`.
+- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `scripts/build-linux-docker.sh` wraps that for local use.
 
 ## Release
 
-`semantic-release` (`.releaserc`) runs on push to `main` using conventional commits (`fix:`/`feat:`/etc. drive the version). Do **not** manually bump `version` in `package.json`. `chore(release)` commits are skipped by the workflow to avoid loops.
+Nightly releases are produced by `.github/workflows/nightly.yml` (Docker build on `main` pushes plus a nightly schedule) and published as the rolling `nightly` prerelease. There is no `semantic-release` workflow; do not manually bump `version` in `package.json` (CI overrides it per build).
 
 ## e2e testing notes
 

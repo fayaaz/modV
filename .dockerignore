@@ -1,0 +1,17 @@
+.git
+.github
+.vscode
+.idea
+node_modules
+out
+dist
+dist_electron
+test-results
+playwright-report
+tests
+*.log
+.env
+.env.*
+.DS_Store
+README.md
+AGENTS.md
