@@ -37,7 +37,6 @@ dmg:
 linux:
   target:
     - AppImage
-    - snap
     - deb
   maintainer: modv.vcync.gl
   category: Graphics

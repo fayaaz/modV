@@ -1,0 +1,62 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Linux nightly
+    runs-on: ubuntu-latest
+    env:
+      YARN_GPG: no
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Install libndi
+        run: |
+          wget -q https://github.com/Palakis/obs-ndi/releases/download/4.9.0/libndi4_4.5.1-1_amd64.deb
+          sudo dpkg -i libndi4_4.5.1-1_amd64.deb
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Set nightly version
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          BASE=$(node -p "require('./package.json').version.split('-')[0]")
+          npm version "$BASE-nightly.$DATE" --no-git-tag-version --allow-same-version
+          echo "NIGHTLY_DATE=$DATE" >> "$GITHUB_ENV"
+
+      - name: Build deb and AppImage
+        run: npm run build:linux
+
+      - name: Publish nightly release
+        run: |
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release create nightly \
+            --target main \
+            --prerelease \
+            --title "Nightly $NIGHTLY_DATE" \
+            --notes "Automated nightly build from \`main\` ($NIGHTLY_DATE). Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            dist/*.AppImage dist/*.deb
