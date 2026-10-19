@@ -7,11 +7,15 @@ import {
   SMOOTHING_STEP,
 } from "../../audio-features";
 import { v4 as uuidv4 } from "uuid";
+import { BAND_FEATURES } from "../../../audio-bands";
 
 const state = {
   features: [
     "buffer",
     "complexSpectrum",
+    "bass",
+    "mid",
+    "treble",
     "rms",
     "zcr",
     "energy",
@@ -26,6 +30,13 @@ const state = {
     "perceptualSharpness",
   ],
   smoothingIds: [],
+  bands: {
+    bass: 0,
+    mid: 0,
+    treble: 0,
+    cells: [],
+  },
+  BAND_FEATURES,
   MAX_SMOOTHING,
   SMOOTHING_STEP,
 };
@@ -71,6 +82,16 @@ const mutations = {
 
     if (index > -1) {
       state.features.splice(index, 1);
+    }
+  },
+
+  SET_BANDS(state, bands) {
+    state.bands.bass = bands.bass || 0;
+    state.bands.mid = bands.mid || 0;
+    state.bands.treble = bands.treble || 0;
+
+    if (bands.cells) {
+      state.bands.cells = bands.cells;
     }
   },
 

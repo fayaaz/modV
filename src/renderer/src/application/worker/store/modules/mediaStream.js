@@ -6,6 +6,21 @@ const state = {
   currentVideoSource: null,
   // Multi-select support: list of selected video deviceIds
   selectedVideoSources: [],
+
+  // Requested webcam capture settings (null = let the device decide)
+  videoResolution: {
+    width: null,
+    height: null,
+  },
+
+  videoFrameRate: null,
+
+  // Settings the camera actually gave us
+  appliedVideoSettings: {
+    width: null,
+    height: null,
+    frameRate: null,
+  },
 };
 
 const mutations = {
@@ -45,6 +60,25 @@ const mutations = {
     if (state.currentVideoSource === videoId) {
       state.currentVideoSource = null;
     }
+  },
+
+  SET_VIDEO_RESOLUTION(state, { width, height }) {
+    state.videoResolution = {
+      width: width || null,
+      height: height || null,
+    };
+  },
+
+  SET_VIDEO_FRAME_RATE(state, { frameRate }) {
+    state.videoFrameRate = frameRate || null;
+  },
+
+  SET_APPLIED_VIDEO_SETTINGS(state, { width, height, frameRate }) {
+    state.appliedVideoSettings = {
+      width: width || null,
+      height: height || null,
+      frameRate: frameRate || null,
+    };
   },
 };
 

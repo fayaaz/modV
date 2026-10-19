@@ -17,7 +17,13 @@ app.commandLine.appendSwitch("max-active-webgl-contexts", 6);
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows", "true");
 app.commandLine.appendSwitch("disable-background-timer-throttling", "true");
 app.commandLine.appendSwitch("disable-renderer-backgrounding", "true");
-app.commandLine.appendSwitch("disable-features", "VizDisplayCompositor");
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+
+// Point10's WebGPU scenes (three.js TSL) need a real adapter, not the
+// software fallback. Vulkan is the backend that works on Linux without the
+// SwiftShader path Electron uses by default.
+app.commandLine.appendSwitch("enable-features", "Vulkan,WebGPU");
+app.commandLine.appendSwitch("enable-unsafe-webgpu");
 
 const isDevelopment = process.env.NODE_ENV !== "production";
 

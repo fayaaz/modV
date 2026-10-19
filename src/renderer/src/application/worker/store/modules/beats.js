@@ -27,10 +27,19 @@ const mutations = {
   },
 
   ADD_BPM_SOURCE(state, { source }) {
-    state.bpmSources.push(source);
+    if (!state.bpmSources.includes(source)) {
+      state.bpmSources.push(source);
+    }
   },
 
   SET_BPM_SOURCE(state, { source }) {
+    if (!state.bpmSources.includes(source)) {
+      console.warn(
+        `beats: "${source}" is not a valid bpm source, ignoring SET_BPM_SOURCE`,
+      );
+      return;
+    }
+
     state.bpmSource = source;
   },
 };

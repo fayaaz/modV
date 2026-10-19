@@ -13,6 +13,12 @@
         </div>
       </template>
 
+      <template #scenes>
+        <div class="glComponent">
+          <Scenes />
+        </div>
+      </template>
+
       <template #module-inspector>
         <div class="glComponent">
           <div
@@ -100,6 +106,7 @@
 <script>
 import Preview from "./components/Preview.vue";
 import Groups from "./components/Groups.vue";
+import Scenes from "./components/Scenes.vue";
 import Gallery from "./components/Gallery.vue";
 import InputConfig from "./components/InputConfig.vue";
 import AudioVideoDeviceConfig from "./components/InputDeviceConfig/AudioVideo.vue";
@@ -132,6 +139,7 @@ export default {
   components: {
     Preview,
     Groups,
+    Scenes,
     Gallery,
     InputConfig,
     AudioVideoDeviceConfig,
@@ -176,6 +184,11 @@ export default {
                       type: ItemType.component,
                       title: "Groups",
                       componentType: "groups",
+                    },
+                    {
+                      type: ItemType.component,
+                      title: "Scenes",
+                      componentType: "scenes",
                     },
                   ],
                 },
@@ -309,6 +322,8 @@ export default {
         this.layoutConfig = JSON.parse(layoutState);
         // Migration: ensure Screen Capture panel exists in older saved layouts
         this.ensureScreenConfig(this.layoutConfig);
+        // Migration: ensure Scenes panel exists in older saved layouts
+        this.ensureScenesConfig(this.layoutConfig);
       } catch (e) {
         this.creationError();
       }
@@ -356,6 +371,50 @@ export default {
               type: ItemType.component,
               title: "Screen Capture",
               componentType: "screen-config",
+            });
+            found = true;
+            return;
+          }
+          // Recurse
+          for (let i = 0; i < content.length; i++) {
+            traverse(content[i]);
+            if (found) return;
+          }
+        }
+      }
+      traverse(config.root || config);
+    },
+    ensureScenesConfig(config) {
+      // Walk the config tree and insert scenes beside groups if missing
+      let found = false;
+      function traverse(node) {
+        if (!node || found === true) return;
+        const content = node.content;
+        if (Array.isArray(content)) {
+          // If this stack already has scenes, mark found
+          if (
+            content.some(
+              (c) =>
+                c &&
+                c.type === ItemType.component &&
+                c.componentType === "scenes",
+            )
+          ) {
+            found = true;
+            return;
+          }
+          // If this stack has groups, insert scenes after it
+          const groupsIndex = content.findIndex(
+            (c) =>
+              c &&
+              c.type === ItemType.component &&
+              c.componentType === "groups",
+          );
+          if (groupsIndex > -1) {
+            content.splice(groupsIndex + 1, 0, {
+              type: ItemType.component,
+              title: "Scenes",
+              componentType: "scenes",
             });
             found = true;
             return;

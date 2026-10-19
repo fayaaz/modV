@@ -22,6 +22,7 @@ import outputs from "./modules/outputs.js";
 import plugins from "./modules/plugins.js";
 import projects from "./modules/projects.js";
 import renderers from "./modules/renderers.js";
+import scenes from "./modules/scenes.js";
 import size from "./modules/size.js";
 import tweens from "./modules/tweens.js";
 import videos from "./modules/videos.js";
@@ -64,6 +65,7 @@ export default createStore({
     plugins,
     projects,
     renderers,
+    scenes,
     size,
     tweens,
     videos,

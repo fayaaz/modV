@@ -38,6 +38,7 @@ function render({
   data,
   osc,
   pipeline,
+  moduleId,
 }) {
   // For pipeline mode, we need the intermediate canvas to avoid feedback loops
   if (pipeline) {
@@ -60,6 +61,7 @@ function render({
       props,
       data,
       osc,
+      moduleId,
     });
     twoDContext.restore();
 
@@ -79,6 +81,7 @@ function render({
       props,
       data,
       osc,
+      moduleId,
     });
     context.restore();
   }

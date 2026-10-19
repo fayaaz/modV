@@ -1,6 +1,10 @@
-let grandiose = require("grandiose");
+let grandiose;
 
-// let grandiose = undefined;
+try {
+  grandiose = require("grandiose");
+} catch (error) {
+  grandiose = undefined;
+}
 let sender = undefined;
 
 export async function setupGrandiose() {
@@ -29,7 +33,7 @@ export async function setupGrandiose() {
   }
 
   // Make sure to set grandiose to undefined as it will be an empty object otherwise
-  if (!grandiose.isSupportedCPU()) {
+  if (grandiose && !grandiose.isSupportedCPU()) {
     grandiose = undefined;
   }
 

@@ -7,9 +7,11 @@ const { ipcRenderer } = window.electron;
 
 import {
   setupMedia,
+  getFloatFrequencyData,
   getByteFrequencyData,
   getByteTimeDomainData,
 } from "./setup-media";
+import { AudioBands, isBandFeature } from "./audio-bands";
 import MediaDeviceManager from "./media-device-manager";
 import setupBeatDetektor from "./setup-beat-detektor";
 import setupMidi from "./setup-midi";
@@ -41,10 +43,14 @@ class ModV {
     this.createWebcodecVideo = createWebcodecVideo;
     this.use = use;
     this.debug = false;
+    this.audioBands = new AudioBands();
     this.features = reactive({
       energy: 0,
       rms: 0,
       zcr: 0,
+      bass: 0,
+      mid: 0,
+      treble: 0,
       spectralCentroid: 0,
       spectralFlatness: 0,
       spectralSlope: 0,
@@ -303,9 +309,33 @@ class ModV {
       meyda: { features: featuresToGet },
     } = this.store.state;
 
-    const features = this.meyda?.get(featuresToGet);
+    // bass/mid/treble are computed from the analyser's own FFT data below, not
+    // by Meyda - keep them out of the Meyda extractor list or it throws on the
+    // unknown feature names.
+    const meydaFeatures = [];
+    for (let i = 0; i < featuresToGet.length; i += 1) {
+      if (!isBandFeature(featuresToGet[i])) {
+        meydaFeatures.push(featuresToGet[i]);
+      }
+    }
+
+    const features = this.meyda?.get(meydaFeatures);
 
     if (features) {
+      const bands = this.audioBands.update({
+        floatFrequencyData: getFloatFrequencyData(),
+        byteTimeDomainData: getByteTimeDomainData(),
+        sampleRate: this.audioContext ? this.audioContext.sampleRate : 44100,
+      });
+
+      features.bass = bands.bass;
+      features.mid = bands.mid;
+      features.treble = bands.treble;
+
+      // full P10 band payload (raw bands, damping lanes, 16-cell grid, beat,
+      // time-domain wave) for the Point10 scene adapter
+      features.p10 = bands;
+
       this.updateBeatDetektor && this.updateBeatDetektor(delta, features);
       features.byteFrequencyData = Array.from(getByteFrequencyData() || []);
       features.byteTimeDomainData = Array.from(getByteTimeDomainData() || []);

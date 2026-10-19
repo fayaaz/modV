@@ -1,3 +1,4 @@
+import modV from "../../application/index";
 import store from "../../application/worker/store";
 
 export const BPMContextMenu = () => {
@@ -8,6 +9,7 @@ export const BPMContextMenu = () => {
     checked: source === currentSource,
     type: "radio",
     click() {
+      modV.store.commit("beats/SET_BPM_SOURCE", { source });
       store.commit("beats/SET_BPM_SOURCE", { source });
     },
   }));

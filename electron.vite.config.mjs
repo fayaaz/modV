@@ -36,9 +36,7 @@ export default defineConfig({
       },
     },
     resolve: {
-      alias: {
-        "@renderer": resolve("src/renderer/src"),
-      },
+      alias: [{ find: "@renderer", replacement: resolve("src/renderer/src") }],
     },
     plugins: [
       vue({
