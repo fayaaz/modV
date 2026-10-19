@@ -1,6 +1,6 @@
 /* eslint-env worker */
 import store from "../";
-import { GROUP_ENABLED } from "../../../constants";
+import constants from "../../../constants";
 import { v4 as uuidv4 } from "uuid";
 import {
   createPhraseState,
@@ -14,10 +14,13 @@ const path = require("path");
 /**
  * @typedef {Object} Scene
  *
+ * A Scene is a snapshot of the Groups tab: every Group, its settings and its
+ * ordered Modules (with their preset data).
+ *
  * @property {String} id       UUID of the Scene
  * @property {String} name     Name of the Scene
- * @property {Array}  layers   Preset data for each Module in the Scene
- * @property {Object} group    Group settings the Scene draws into
+ * @property {Array}  groups   Group snapshots, including their Module ids
+ * @property {Object} modules  Preset data for each Module, keyed by Module id
  */
 
 /**
@@ -32,6 +35,7 @@ function getDefaultState() {
       minSeconds: 8,
       maxSeconds: 24,
       transitionSeconds: 2,
+      transition: "Fade",
     },
     transitioning: false,
   };
@@ -55,7 +59,73 @@ const getters = {
 
   groupBySceneId: (state, getters, rootState) => (sceneId) =>
     rootState.groups.groups.find((group) => group.sceneId === sceneId),
+
+  transitionProgress: () => {
+    if (!transition) {
+      return 1;
+    }
+
+    return Math.min(1, transition.elapsed / transition.duration);
+  },
+
+  currentTransitionName: () => (transition ? transition.name : null),
+
+  transitionGroupIds: () => {
+    if (!transition) {
+      return null;
+    }
+
+    return {
+      from: transition.from.map((item) => item.groupId),
+      to: transition.to.map((item) => item.groupId),
+    };
+  },
 };
+
+function isGalleryGroup(group) {
+  return group.name === constants.GALLERY_GROUP_NAME;
+}
+
+/**
+ * Scenes saved before the Groups snapshot format used a single Group and a
+ * flat `layers` array. Turn those into the current shape when loading.
+ */
+function normalizeScene(scene) {
+  if (!scene || !scene.id) {
+    return null;
+  }
+
+  if (Array.isArray(scene.groups)) {
+    return scene;
+  }
+
+  if (!Array.isArray(scene.layers)) {
+    return null;
+  }
+
+  const modules = {};
+
+  for (let i = 0, len = scene.layers.length; i < len; i++) {
+    const layer = scene.layers[i];
+
+    if (layer && layer.$id) {
+      modules[layer.$id] = layer;
+    }
+  }
+
+  return {
+    id: scene.id,
+    name: scene.name,
+    groups: [
+      {
+        ...(scene.group || {}),
+        name: scene.name,
+        modules: Object.keys(modules),
+      },
+    ],
+    modules,
+  };
+}
 
 async function cleanupPendingGroups() {
   const groupIds = pendingCleanup.splice(0);
@@ -74,10 +144,14 @@ async function cleanupPendingGroups() {
 
 async function completeTransition(commit) {
   if (transition) {
-    store.commit("groups/UPDATE_GROUP", {
-      groupId: transition.toGroupId,
-      data: { alpha: 1 },
-    });
+    for (let i = 0, len = transition.to.length; i < len; i++) {
+      const item = transition.to[i];
+
+      store.commit("groups/UPDATE_GROUP", {
+        groupId: item.groupId,
+        data: { alpha: item.alpha },
+      });
+    }
 
     transition = null;
   }
@@ -88,39 +162,32 @@ async function completeTransition(commit) {
 
 const actions = {
   /**
-   * Snapshots the currently active Modules (preset-style) into a new Scene.
+   * Snapshots every Group in the Groups tab, including each Group's ordered
+   * Modules and their preset data, into a new Scene.
    */
-  async saveCurrentAsScene({ commit, state, rootState }, args = {}) {
+  async saveCurrentAsScene({ commit, state }, args = {}) {
     const name = args.name || `Scene ${state.scenes.length + 1}`;
 
-    const layers = Object.values(
-      await store.dispatch("modules/createPresetData"),
-    );
+    await completeTransition(commit);
 
-    const currentGroup = state.autopilot.currentSceneId
-      ? rootState.groups.groups.find(
-          (group) => group.sceneId === state.autopilot.currentSceneId,
-        )
-      : undefined;
+    const groups = store.state.groups.groups
+      .filter((group) => !isGalleryGroup(group))
+      .map((group) => {
+        const snapshot = { ...group };
+        delete snapshot.context;
+        delete snapshot.sceneId;
+        return snapshot;
+      });
 
-    const group = {
-      name,
-      alpha: 1,
-      enabled: GROUP_ENABLED,
-      clearing: currentGroup ? currentGroup.clearing : true,
-      inherit: currentGroup ? currentGroup.inherit : false,
-      inheritFrom: currentGroup ? currentGroup.inheritFrom : -1,
-      pipeline: currentGroup ? currentGroup.pipeline : false,
-      compositeOperation: currentGroup
-        ? currentGroup.compositeOperation
-        : "normal",
-    };
+    const modules = await store.dispatch("modules/createPresetData");
 
     const scene = {
       id: uuidv4(),
       name,
-      layers,
-      group,
+      minSeconds: state.autopilot.minSeconds,
+      maxSeconds: state.autopilot.maxSeconds,
+      groups: JSON.parse(JSON.stringify(groups)),
+      modules: JSON.parse(JSON.stringify(modules)),
     };
 
     commit("ADD_SCENE", scene);
@@ -128,115 +195,243 @@ const actions = {
     return JSON.parse(JSON.stringify(scene));
   },
 
+  updateSceneName({ commit, state }, { sceneId, name }) {
+    const scene = state.scenes.find((scene) => scene.id === sceneId);
+    const newName = (name || "").trim();
+
+    if (!scene || !newName) {
+      return null;
+    }
+
+    const duplicate = state.scenes.some(
+      (other) =>
+        other.id !== sceneId &&
+        other.name.toLowerCase() === newName.toLowerCase(),
+    );
+
+    if (duplicate) {
+      return null;
+    }
+
+    commit("UPDATE_SCENE", { sceneId, data: { name: newName } });
+
+    return JSON.parse(JSON.stringify(scene));
+  },
+
+  updateSceneTiming({ commit, state }, { sceneId, minSeconds, maxSeconds }) {
+    const scene = state.scenes.find((scene) => scene.id === sceneId);
+
+    if (!scene) {
+      return null;
+    }
+
+    const data = {};
+
+    if (Number.isFinite(minSeconds)) {
+      data.minSeconds = Math.max(1, Math.round(minSeconds * 10) / 10);
+    }
+
+    if (Number.isFinite(maxSeconds)) {
+      data.maxSeconds = Math.max(2, Math.round(maxSeconds * 10) / 10);
+    }
+
+    if (
+      data.minSeconds !== undefined &&
+      data.minSeconds >= (scene.maxSeconds ?? state.autopilot.maxSeconds)
+    ) {
+      data.minSeconds = (scene.maxSeconds ?? state.autopilot.maxSeconds) - 1;
+    }
+
+    if (
+      data.maxSeconds !== undefined &&
+      data.maxSeconds <= (scene.minSeconds ?? state.autopilot.minSeconds)
+    ) {
+      data.maxSeconds = (scene.minSeconds ?? state.autopilot.minSeconds) + 1;
+    }
+
+    commit("UPDATE_SCENE", { sceneId, data });
+
+    return JSON.parse(JSON.stringify(scene));
+  },
+
   /**
-   * Applies a Scene: its Modules are loaded into a dedicated Group (tagged
-   * with sceneId) and crossfaded against the previously applied Scene Group.
-   * Groups belonging to the user (not tagged with sceneId) are left alone.
+   * Applies a Scene by rebuilding all of its Groups and Modules, then
+   * crossfading the previous Groups out and the new Groups in. This replaces
+   * the Groups tab with the saved snapshot.
    */
-  async applyScene({ commit, state, rootState }, { sceneId }) {
+  async applyScene({ commit, state }, { sceneId }) {
     const scene = state.scenes.find((scene) => scene.id === sceneId);
 
     if (!scene) {
       return;
     }
 
+    const normalizedScene = normalizeScene(scene);
+
+    if (!normalizedScene) {
+      return;
+    }
+
     // Finish any in-flight crossfade first so nothing is left orphaned.
     await completeTransition(commit);
 
-    let previousGroup = state.autopilot.currentSceneId
-      ? rootState.groups.groups.find(
-          (group) => group.sceneId === state.autopilot.currentSceneId,
-        )
-      : undefined;
-
-    // Re-applying a Scene rebuilds its Group from scratch.
-    const existingTarget = rootState.groups.groups.find(
-      (group) => group.sceneId === scene.id,
+    const oldGroups = store.state.groups.groups.filter(
+      (group) => !isGalleryGroup(group),
     );
+    const groupSnapshots = normalizedScene.groups || [];
+    const moduleSnapshots = normalizedScene.modules || {};
+    const createdGroups = [];
+    const groupIdMap = {};
 
-    if (existingTarget) {
-      await store.dispatch("groups/removeGroup", {
-        groupId: existingTarget.id,
+    for (let i = 0, len = groupSnapshots.length; i < len; i++) {
+      const snapshot = groupSnapshots[i];
+      const oldGroupId = snapshot.id;
+      const moduleIds = snapshot.modules || [];
+
+      const groupData = { ...snapshot };
+      delete groupData.id;
+      delete groupData.modules;
+      delete groupData.context;
+      delete groupData.sceneId;
+      delete groupData.alphaInputId;
+      delete groupData.enabledInputId;
+      delete groupData.clearingInputId;
+      delete groupData.inheritInputId;
+      delete groupData.compositeOperationInputId;
+      delete groupData.pipelineInputId;
+
+      const targetAlpha = snapshot.alpha ?? 1;
+
+      const group = await store.dispatch("groups/createGroup", {
+        ...groupData,
+        alpha: 0,
+        sceneId: scene.id,
       });
 
-      if (previousGroup && previousGroup.id === existingTarget.id) {
-        previousGroup = undefined;
+      if (oldGroupId) {
+        groupIdMap[oldGroupId] = group.id;
+      }
+
+      createdGroups.push({ groupId: group.id, alpha: targetAlpha });
+
+      for (
+        let j = 0, moduleIdsLength = moduleIds.length;
+        j < moduleIdsLength;
+        j++
+      ) {
+        const moduleId = moduleIds[j];
+        const moduleSnapshot = moduleSnapshots[moduleId];
+
+        if (!moduleSnapshot) {
+          continue;
+        }
+
+        const module = await store.dispatch("modules/makeActiveModule", {
+          moduleName: moduleSnapshot.$moduleName,
+          existingModule: moduleSnapshot,
+          generateNewIds: true,
+        });
+
+        if (!module) {
+          continue;
+        }
+
+        store.commit("groups/ADD_MODULE_TO_GROUP", {
+          moduleId: module.$id,
+          groupId: group.id,
+        });
       }
     }
 
-    const group = await store.dispatch("groups/createGroup", {
-      ...scene.group,
-      name: scene.name,
-      sceneId: scene.id,
-      alpha: 0,
-      enabled: GROUP_ENABLED,
-    });
+    // Remap inheritFrom now that every Group has its new id, so Groups that
+    // appear later in the snapshot still resolve correctly.
+    for (let i = 0, len = groupSnapshots.length; i < len; i++) {
+      const snapshot = groupSnapshots[i];
 
-    const layers = scene.layers || [];
-
-    for (let i = 0, len = layers.length; i < len; i++) {
-      const layer = layers[i];
-
-      const module = await store.dispatch("modules/makeActiveModule", {
-        moduleName: layer.$moduleName,
-        existingModule: layer,
-        generateNewIds: true,
-      });
-
-      if (!module) {
+      if (typeof snapshot.inheritFrom !== "string") {
         continue;
       }
 
-      store.commit("groups/ADD_MODULE_TO_GROUP", {
-        moduleId: module.$id,
-        groupId: group.id,
-      });
+      const groupId = groupIdMap[snapshot.id];
+
+      if (groupId) {
+        store.commit("groups/UPDATE_GROUP", {
+          groupId,
+          data: { inheritFrom: groupIdMap[snapshot.inheritFrom] ?? -1 },
+        });
+      }
     }
 
     commit("UPDATE_AUTOPILOT", { currentSceneId: scene.id });
 
-    if (previousGroup) {
-      const duration = Math.max(0.01, state.autopilot.transitionSeconds);
+    const transitionName = state.autopilot.transition || "Fade";
 
-      transition = {
-        fromGroupId: previousGroup.id,
-        toGroupId: group.id,
-        fromAlpha: previousGroup.alpha,
-        elapsed: 0,
-        duration,
-      };
+    const applyTargetAlphas = () => {
+      for (let i = 0, len = createdGroups.length; i < len; i++) {
+        const { groupId, alpha } = createdGroups[i];
 
-      pendingCleanup.push(previousGroup.id);
-      commit("SET_TRANSITIONING", true);
-    } else {
-      store.commit("groups/UPDATE_GROUP", {
-        groupId: group.id,
-        data: { alpha: 1 },
-      });
+        store.commit("groups/UPDATE_GROUP", {
+          groupId,
+          data: { alpha },
+        });
+      }
+    };
+
+    if (!oldGroups.length) {
+      applyTargetAlphas();
+      return;
     }
+
+    if (transitionName === "None") {
+      applyTargetAlphas();
+
+      const oldGroupIds = oldGroups.map((group) => group.id);
+
+      for (let i = 0, len = oldGroupIds.length; i < len; i++) {
+        await store.dispatch("groups/removeGroup", {
+          groupId: oldGroupIds[i],
+        });
+      }
+
+      return;
+    }
+
+    const duration = Math.max(0.01, state.autopilot.transitionSeconds);
+    const shader = transitionName !== "Fade";
+
+    // Shader transitions composite the two Scenes themselves, so the Groups
+    // need their final opacity straight away.
+    if (shader) {
+      applyTargetAlphas();
+    }
+
+    transition = {
+      name: transitionName,
+      shader,
+      from: oldGroups.map((group) => ({
+        groupId: group.id,
+        alpha: group.alpha,
+      })),
+      to: createdGroups,
+      elapsed: 0,
+      duration,
+    };
+
+    pendingCleanup.push(...oldGroups.map((group) => group.id));
+    commit("SET_TRANSITIONING", true);
   },
 
   async removeScene({ commit, state }, { sceneId }) {
-    const group = store.state.groups.groups.find(
+    await completeTransition(commit);
+
+    const groups = store.state.groups.groups.filter(
       (group) => group.sceneId === sceneId,
     );
 
-    if (group) {
-      if (transition) {
-        if (transition.toGroupId === group.id) {
-          store.commit("groups/UPDATE_GROUP", {
-            groupId: transition.fromGroupId,
-            data: { alpha: 1 },
-          });
-        }
-
-        transition = null;
-        commit("SET_TRANSITIONING", false);
-      }
-
-      pendingCleanup = pendingCleanup.filter((id) => id !== group.id);
-
-      await store.dispatch("groups/removeGroup", { groupId: group.id });
+    for (let i = 0, len = groups.length; i < len; i++) {
+      await store.dispatch("groups/removeGroup", {
+        groupId: groups[i].id,
+      });
     }
 
     if (state.autopilot.currentSceneId === sceneId) {
@@ -268,9 +463,9 @@ const actions = {
         const fileBuffer = await fs.promises.readFile(
           path.join(mediaPath, item.path),
         );
-        const scene = JSON.parse(fileBuffer.toString());
+        const scene = normalizeScene(JSON.parse(fileBuffer.toString()));
 
-        if (scene && scene.id && Array.isArray(scene.layers)) {
+        if (scene) {
           commit("ADD_SCENE", scene);
         }
       } catch (e) {
@@ -306,23 +501,38 @@ const actions = {
       transition.elapsed += dt;
 
       const progress = Math.min(1, transition.elapsed / transition.duration);
-      const eased = progress * progress * (3 - 2 * progress);
 
-      store.commit("groups/UPDATE_GROUP", {
-        groupId: transition.toGroupId,
-        data: { alpha: eased },
-      });
+      if (!transition.shader) {
+        const eased = progress * progress * (3 - 2 * progress);
 
-      store.commit("groups/UPDATE_GROUP", {
-        groupId: transition.fromGroupId,
-        data: { alpha: transition.fromAlpha * (1 - eased) },
-      });
+        for (let i = 0, len = transition.to.length; i < len; i++) {
+          const item = transition.to[i];
+
+          store.commit("groups/UPDATE_GROUP", {
+            groupId: item.groupId,
+            data: { alpha: item.alpha * eased },
+          });
+        }
+
+        for (let i = 0, len = transition.from.length; i < len; i++) {
+          const item = transition.from[i];
+
+          store.commit("groups/UPDATE_GROUP", {
+            groupId: item.groupId,
+            data: { alpha: item.alpha * (1 - eased) },
+          });
+        }
+      }
 
       if (progress >= 1) {
-        store.commit("groups/UPDATE_GROUP", {
-          groupId: transition.toGroupId,
-          data: { alpha: 1 },
-        });
+        for (let i = 0, len = transition.to.length; i < len; i++) {
+          const item = transition.to[i];
+
+          store.commit("groups/UPDATE_GROUP", {
+            groupId: item.groupId,
+            data: { alpha: item.alpha },
+          });
+        }
 
         transition = null;
 
@@ -343,17 +553,19 @@ const actions = {
     const phraseUpdate = updatePhrase(phrase, bass, dt);
     phrase = phraseUpdate.state;
 
+    const currentScene = state.scenes.find(
+      (scene) => scene.id === autopilot.currentSceneId,
+    );
+    const minSeconds = currentScene?.minSeconds ?? autopilot.minSeconds;
+    const maxSeconds = currentScene?.maxSeconds ?? autopilot.maxSeconds;
+
     dwell += dt;
 
-    const chance = switchChance(
-      dwell,
-      autopilot.minSeconds,
-      autopilot.maxSeconds,
-    );
+    const chance = switchChance(dwell, minSeconds, maxSeconds);
     const musical = phraseUpdate.flipped && Math.random() < chance;
-    const forced = dwell >= autopilot.maxSeconds;
+    const forced = dwell >= maxSeconds;
 
-    if (musical || forced) {
+    if ((musical || forced) && !transition) {
       dwell = 0;
       phrase = { ...phrase, t: 0 };
 
@@ -385,6 +597,14 @@ const mutations = {
 
     if (index > -1) {
       state.scenes.splice(index, 1);
+    }
+  },
+
+  UPDATE_SCENE(state, { sceneId, data }) {
+    const scene = state.scenes.find((scene) => scene.id === sceneId);
+
+    if (scene) {
+      Object.assign(scene, data);
     }
   },
 

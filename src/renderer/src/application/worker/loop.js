@@ -5,6 +5,7 @@ import map from "../utils/map";
 import constants, { GROUP_DISABLED, GROUP_ENABLED } from "../constants";
 import NdiWorker from "./ndi-worker.worker.js?worker";
 import { applyWindow } from "meyda/dist/esm/utilities";
+import { renderSceneTransition } from "./scene-transition";
 
 const meyda = { windowing: applyWindow };
 
@@ -309,33 +310,82 @@ async function loop(delta, features, fftOutput) {
   const windowsLength = windowKeys.length;
 
   main.clearRect(0, 0, main.canvas.width, main.canvas.height);
-  // minus one here to skip over the gallery group
-  for (let i = 0; i < groupsLength - 1; ++i) {
-    const group = groups[groupIndexRenderOrder[i]];
 
-    const {
-      compositeOperation,
-      context: { context },
-      alpha,
-      enabled,
-      modules,
-    } = group;
-    const groupModulesLength = modules.length;
-    if (enabled !== GROUP_ENABLED || groupModulesLength < 1 || !(alpha > 0)) {
-      continue;
+  const scenesState = store.state.scenes;
+  const transitionName = store.getters["scenes/currentTransitionName"];
+  const shaderTransition =
+    scenesState.transitioning && transitionName && transitionName !== "Fade";
+
+  let transitionCanvas = null;
+
+  if (shaderTransition) {
+    const fromGroups = [];
+    const toGroups = [];
+    const transitionGroupIds = store.getters["scenes/transitionGroupIds"];
+    const fromIds = new Set(transitionGroupIds ? transitionGroupIds.from : []);
+    const toIds = new Set(transitionGroupIds ? transitionGroupIds.to : []);
+
+    for (let i = 0; i < groupsLength; ++i) {
+      const group = groups[i];
+
+      if (group.name === constants.GALLERY_GROUP_NAME) {
+        continue;
+      }
+
+      if (toIds.has(group.id)) {
+        toGroups.push(group);
+      } else if (fromIds.has(group.id)) {
+        fromGroups.push(group);
+      }
     }
 
-    main.save();
-    if (compositeOperation) {
-      main.globalCompositeOperation = compositeOperation;
-    }
+    transitionCanvas = renderSceneTransition({
+      fromGroups,
+      toGroups,
+      name: transitionName,
+      progress: store.getters["scenes/transitionProgress"],
+      width: main.canvas.width,
+      height: main.canvas.height,
+    });
+  }
 
-    if (alpha < 1) {
-      main.globalAlpha = alpha;
-    }
+  if (transitionCanvas) {
+    main.drawImage(
+      transitionCanvas,
+      0,
+      0,
+      main.canvas.width,
+      main.canvas.height,
+    );
+  } else {
+    // minus one here to skip over the gallery group
+    for (let i = 0; i < groupsLength - 1; ++i) {
+      const group = groups[groupIndexRenderOrder[i]];
 
-    main.drawImage(context.canvas, 0, 0);
-    main.restore();
+      const {
+        compositeOperation,
+        context: { context },
+        alpha,
+        enabled,
+        modules,
+      } = group;
+      const groupModulesLength = modules.length;
+      if (enabled !== GROUP_ENABLED || groupModulesLength < 1 || !(alpha > 0)) {
+        continue;
+      }
+
+      main.save();
+      if (compositeOperation) {
+        main.globalCompositeOperation = compositeOperation;
+      }
+
+      if (alpha < 1) {
+        main.globalAlpha = alpha;
+      }
+
+      main.drawImage(context.canvas, 0, 0);
+      main.restore();
+    }
   }
 
   for (let i = 0; i < windowsLength; ++i) {

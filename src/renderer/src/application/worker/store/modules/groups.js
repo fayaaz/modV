@@ -199,9 +199,13 @@ const actions = {
     commit("REMOVE_GROUP", { id: groupId });
   },
 
-  async cleanUpGroupResources(state, { groupId, readFromSwap }) {
+  async cleanUpGroupResources({ state }, { groupId, readFromSwap }) {
     const readFrom = readFromSwap ? swap : state;
     const group = readFrom.groups.find((group) => group.id === groupId);
+
+    if (!group) {
+      return;
+    }
 
     const inputIds = [
       group.alphaInputId,
