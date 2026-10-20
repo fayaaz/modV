@@ -284,6 +284,26 @@ async function tick(iterations) {
   );
 }
 
+async function waitForMainOutput() {
+  const hasMain = await modVApp.evaluateWorker(
+    () => !!self.store.state.outputs.main,
+  );
+
+  if (hasMain) {
+    return;
+  }
+
+  await modVApp.evaluateWorker(async () => {
+    if (self.store.state.outputs.main) {
+      return;
+    }
+
+    const canvas = new OffscreenCanvas(300, 300);
+
+    await self.store.dispatch("outputs/setMainOutput", canvas.getContext("2d"));
+  });
+}
+
 test("performance mode starts, advances and stops", async () => {
   const name = uniqueName("E2E Performance");
 
@@ -463,6 +483,57 @@ test("a per-scene timing override still switches early", async () => {
   expect(resetTiming.timingOverride).toBe(false);
   expect(resetTiming.minSeconds).toBe(5);
   expect(resetTiming.maxSeconds).toBe(6);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/stopPerformance");
+  });
+  await restoreScenes(previousScenes);
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await ensureUserGroup();
+});
+
+test("performance mode dwell advances in real time", async () => {
+  const name = uniqueName("E2E Real Time Dwell");
+
+  await waitForMainOutput();
+  await ensureUserGroup();
+
+  const sceneA = await saveScene(`${name} A`);
+  const sceneB = await saveScene(`${name} B`);
+  const previousScenes = await isolateScenes([sceneA.id, sceneB.id]);
+
+  await modVApp.evaluateWorker(
+    async ({ sceneAId }) => {
+      await self.store.dispatch("scenes/updatePerformance", {
+        enabled: false,
+        minSeconds: 3,
+        maxSeconds: 4,
+        transitionSeconds: 0.2,
+        allowedTransitions: ["None"],
+        order: "in-order",
+      });
+      await self.store.dispatch("scenes/applyScene", { sceneId: sceneAId });
+      await self.store.dispatch("scenes/startPerformance");
+    },
+    { sceneAId: sceneA.id },
+  );
+
+  // The minimum dwell is 3s. If the render loop passes an absolute timestamp
+  // instead of elapsed time, dwell races ahead and the Scene switches almost
+  // immediately.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  expect(
+    await modVApp.evaluateWorkerState("scenes.performance.currentSceneId"),
+  ).toBe(sceneA.id);
+
+  await expect
+    .poll(
+      () => modVApp.evaluateWorkerState("scenes.performance.currentSceneId"),
+      { timeout: 5000, intervals: [250] },
+    )
+    .toBe(sceneB.id);
 
   await modVApp.evaluateWorker(async () => {
     await self.store.dispatch("scenes/stopPerformance");

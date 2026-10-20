@@ -11,6 +11,7 @@ const meyda = { windowing: applyWindow };
 
 let bufferCanvas;
 let bufferContext;
+let lastScenesTickTime = null;
 const fallbackByteFrequencyData = Array(constants.AUDIO_BUFFER_SIZE).fill(0);
 
 export const ndiWorker = new NdiWorker();
@@ -44,9 +45,16 @@ async function loop(delta, features, fftOutput) {
     return;
   }
 
-  // Advance scene crossfades / performance mode phrase detection
+  // Advance scene crossfades / performance mode phrase detection. The delta
+  // passed to `loop` is the absolute requestAnimationFrame timestamp, so track
+  // the real elapsed time between scene ticks here instead.
+  const scenesTickTime = performance.now();
+  const scenesDelta =
+    lastScenesTickTime === null ? 0 : scenesTickTime - lastScenesTickTime;
+  lastScenesTickTime = scenesTickTime;
+
   try {
-    await store.dispatch("scenes/tick", { delta });
+    await store.dispatch("scenes/tick", { delta: scenesDelta });
   } catch (e) {
     console.error("scenes/tick threw an error", e);
   }
