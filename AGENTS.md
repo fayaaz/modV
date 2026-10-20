@@ -4,16 +4,23 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 
 ## Commands
 
-- `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
-- `yarn dev` — electron-vite dev with HMR. For CDP attach: `yarn dev -- --remote-debugging-port=9223`.
-- `yarn build` — bundle main / preload / renderer into `out/`.
+All yarn work is Dockerised. The host only needs Docker (with Buildx) and make — there is no host Node or Yarn.
+
+- `make docker-deps` — build the `modv-toolchain:local` image from the Dockerfile `toolchain` stage (Node 24 + dependencies + Electron runtime).
+- `make install` — rebuild the toolchain image and reseed `node_modules` (clean `yarn install`; applies `patches/` and fetches the Electron binary).
+- `make dev` — Dockerised `yarn dev` with HMR. On Linux, a Wayland socket is forwarded when available (falling back to X11), along with PulseAudio and `/dev/dri` (GPU); override with `DISPLAY_BACKEND=x11` or `DISPLAY_BACKEND=wayland`. Extend with `DOCKER_RUN_ARGS="..."`. For CDP attach: `make dev ARGS="-- --remote-debugging-port=9223"`.
 - `make build` — **the canonical Linux build** (see `Dockerfile`); empties `dist/` in place and writes the AppImage and `.deb` into it. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`; `make clean` removes `dist/`. Do not use a local `electron-builder` build.
-- `yarn lint` — `eslint . --fix` (Prettier runs through ESLint).
-- `yarn test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `yarn playwright test tests/e2e/spec/<name>.spec.js`.
+- `make yarn ARGS="build"` — bundle main / preload / renderer into `out/`.
+- `make lint` — Dockerised `yarn lint` (`eslint . --fix`, Prettier runs through ESLint).
+- `make format` — Dockerised `yarn format`.
+- `make test-e2e` — Dockerised Playwright. Electron is launched with `--no-sandbox` and the Wayland/X11, PulseAudio and GPU forwarding above. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`.
+- `make yarn ARGS="<args>"` — any other yarn command, e.g. `make yarn ARGS="add three"`.
+- `make docker-reset` — delete the `modv-node-modules` volume; the next yarn target reseeds it from the toolchain image (use after dependency changes if `make install` is not enough).
+- `make shell` — interactive shell in the toolchain container with the repo bind-mounted.
 
-Host tooling is yarn + make; no host npm is required. npm remains the runtime installer for missing module dependencies and is available inside the Docker image.
+Commands run against the repo bind-mounted at `/app`. Dependencies live in the `modv-node-modules` named volume, seeded from the `toolchain` image and chowned to the host UID/GID so generated files stay writable.
 
-CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `yarn lint` locally.
+CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `make lint` locally.
 
 ## Architecture (three execution contexts)
 
@@ -78,8 +85,8 @@ Gotchas:
 - Renderer has multiple entries and matching preloads (see `electron.vite.config.mjs`); workers build with `worker.format: "es"`.
 - The worker runs with `nodeIntegrationInWorker: true` (`src/main/window-prefs.js`), so worker code may `require("fs")`/`require("path")`.
 - Native deps: `grandiose` (NDI) needs libndi on Linux; `grandiose` and `ffmpeg-fluent` are `asarUnpack`ed (see `electron-builder.yml`). The `Dockerfile` installs the NDI SDK and aliases the `libndi.so.5.6.1` soname to the `libndi.so.5.1.1` its `binding.gyp` pins. Windows needs the node-gyp toolchain — **WSL/WSL2 is unsupported**.
-- `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `yarn remove <pkg>`, run `yarn` again to reapply patches (see issue #554).
-- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `make build` is the supported local build. Do not run `electron-builder` locally.
+- `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `make yarn ARGS="remove <pkg>"`, run `make install` again to reapply patches (see issue #554).
+- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`, plus a `toolchain` stage for the Dockerised yarn commands); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `make build` is the supported local build. Do not run `electron-builder` locally.
 
 ## Release
 
