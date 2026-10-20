@@ -13,7 +13,10 @@
         <grid columns="6">
           <c span="2">Performance mode</c>
           <c span="4">
-            <Button class="light scenes__performanceButton" @click="togglePerformance">
+            <Button
+              class="light scenes__performanceButton"
+              @click="togglePerformance"
+            >
               {{ autopilotEnabled ? "Stop performance" : "Start performance" }}
             </Button>
             <Checkbox
@@ -80,17 +83,26 @@
 
       <c span="1..">
         <grid columns="6">
-          <c span="2">Transition</c>
+          <c span="2">Allowed transitions</c>
           <c span="4">
-            <Select v-model="transition" class="scenes__transitionSelect">
-              <option
+            <div class="scenes__transitionList">
+              <div
                 v-for="name in transitionOptions"
                 :key="name"
-                :value="name"
+                class="scenes__transitionOption"
+                @click="setTransitionAllowed(name, !isTransitionAllowed(name))"
               >
-                {{ name }}
-              </option>
-            </Select>
+                <Checkbox
+                  :model-value="isTransitionAllowed(name)"
+                  emit-boolean
+                  @click.stop
+                  @update:model-value="
+                    (allowed) => setTransitionAllowed(name, allowed)
+                  "
+                />
+                <span>{{ name }}</span>
+              </div>
+            </div>
           </c>
         </grid>
       </c>
@@ -286,16 +298,15 @@ export default {
       },
     },
 
-    transition: {
-      get() {
-        return this.autopilot.transition || FADE_TRANSITION;
-      },
+    allowedTransitions() {
+      const allowed = Array.isArray(this.autopilot.allowedTransitions)
+        ? this.autopilot.allowedTransitions
+        : [];
+      const available = allowed.filter((name) =>
+        this.transitionOptions.includes(name),
+      );
 
-      set(value) {
-        this.$modV.store.dispatch("scenes/updateAutopilot", {
-          transition: value,
-        });
-      },
+      return available.length ? available : [FADE_TRANSITION];
     },
 
     transitionOptions() {
@@ -454,6 +465,25 @@ export default {
       });
     },
 
+    isTransitionAllowed(name) {
+      return this.allowedTransitions.includes(name);
+    },
+
+    setTransitionAllowed(name, allowed) {
+      const current = this.allowedTransitions;
+      let next = allowed
+        ? [...new Set([...current, name])]
+        : current.filter((transitionName) => transitionName !== name);
+
+      if (!next.length) {
+        next = [FADE_TRANSITION];
+      }
+
+      this.$modV.store.dispatch("scenes/updateAutopilot", {
+        allowedTransitions: next,
+      });
+    },
+
     nextScene() {
       this.$modV.store.dispatch("scenes/nextScene");
     },
@@ -576,6 +606,24 @@ button.scenes__performanceButton {
 
 select.scenes__orderSelect {
   width: 100%;
+}
+
+div.scenes__transitionList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+div.scenes__transitionOption {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+  cursor: pointer;
+  user-select: none;
 }
 
 div.scene__name {
