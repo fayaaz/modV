@@ -83,6 +83,32 @@ function evictInstances(now) {
   }
 }
 
+// Gallery previews are shown one at a time (GalleryItem focus enables a single
+// scene), but every preview owns a WebGL context. Chromium caps the process at
+// 6 active contexts, so letting previews accumulate force-loses the ISF/three
+// contexts - ISF effects then silently stop rendering. Keep at most one
+// gallery preview alive: the next hovered scene recycles it.
+function evictGalleryInstances(keepId) {
+  const ids = Array.from(instances.keys());
+
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+
+    if (id === keepId) {
+      continue;
+    }
+
+    const instance = instances.get(id);
+
+    if (!instance.gallery || instance.presenting || instance.reading) {
+      continue;
+    }
+
+    disposeInstance(instance);
+    instances.delete(id);
+  }
+}
+
 function createInstance(SceneClass, width, height) {
   const canvas = new OffscreenCanvas(width, height);
   const renderer = new THREE.WebGLRenderer({
@@ -309,14 +335,20 @@ function drawScene({
   features,
   delta,
   props,
+  isGallery,
 }) {
   let instance = instances.get(moduleId);
+
+  if (isGallery) {
+    evictGalleryInstances(moduleId);
+  }
 
   if (!instance) {
     try {
       instance = webgpu
         ? createWebGPUInstance(SceneClass, canvas.width, canvas.height)
         : createInstance(SceneClass, canvas.width, canvas.height);
+      instance.gallery = !!isGallery;
       instances.set(moduleId, instance);
     } catch (error) {
       console.error(`Point10 scene "${moduleId}" failed to initialise:`, error);
@@ -394,7 +426,7 @@ function createPoint10Module({
     // must stay JSON-safe (see the note above)
     data: {},
 
-    draw({ canvas, context, features, delta, props, moduleId }) {
+    draw({ canvas, context, features, delta, props, moduleId, isGallery }) {
       drawScene({
         moduleId: moduleId || key,
         SceneClass,
@@ -404,6 +436,7 @@ function createPoint10Module({
         features,
         delta,
         props,
+        isGallery,
       });
     },
   };
