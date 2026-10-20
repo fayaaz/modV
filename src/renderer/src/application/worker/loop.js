@@ -44,7 +44,7 @@ async function loop(delta, features, fftOutput) {
     return;
   }
 
-  // Advance scene crossfades / autopilot phrase detection
+  // Advance scene crossfades / performance mode phrase detection
   try {
     await store.dispatch("scenes/tick", { delta });
   } catch (e) {

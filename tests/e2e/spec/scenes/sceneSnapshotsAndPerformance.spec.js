@@ -79,13 +79,13 @@ test("a saved Scene restores its Groups and Modules", async () => {
   const moduleId = await addModuleToGroup(groupId, "Ball");
 
   await modVApp.evaluateWorker(async () => {
-    await self.store.dispatch("scenes/updateAutopilot", {
+    await self.store.dispatch("scenes/updatePerformance", {
       transition: "None",
     });
   });
 
   expect(
-    await modVApp.evaluateWorkerState("scenes.autopilot.allowedTransitions"),
+    await modVApp.evaluateWorkerState("scenes.performance.allowedTransitions"),
   ).toEqual(["None"]);
 
   const scene = await saveScene(name);
@@ -126,12 +126,124 @@ test("a saved Scene restores its Groups and Modules", async () => {
   await ensureUserGroup();
 });
 
+test("performance mode exposes its configuration state", async () => {
+  const state = await modVApp.evaluateWorker(() => self.store.state.scenes);
+
+  expect(state.performance).toBeTruthy();
+  expect(state.performance).toEqual(
+    expect.objectContaining({
+      enabled: expect.any(Boolean),
+      minSeconds: expect.any(Number),
+      maxSeconds: expect.any(Number),
+      transitionSeconds: expect.any(Number),
+      allowedTransitions: expect.any(Array),
+      order: expect.any(String),
+    }),
+  );
+  expect(state.autopilot).toBeUndefined();
+});
+
+test("setPerformanceEnabled toggles performance mode", async () => {
+  const result = await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/setPerformanceEnabled", {
+      enabled: true,
+    });
+
+    const enabled = self.store.state.scenes.performance.enabled;
+
+    await self.store.dispatch("scenes/setPerformanceEnabled", {
+      enabled: false,
+    });
+
+    const disabled = self.store.state.scenes.performance.enabled;
+
+    return { enabled, disabled };
+  });
+
+  expect(result.enabled).toBe(true);
+  expect(result.disabled).toBe(false);
+});
+
+test("legacy autopilot settings hydrate into performance mode", async () => {
+  const result = await modVApp.evaluateWorker(async () => {
+    const fs = require("fs");
+    const path = require("path");
+    const filePath = path.join(self.__userData, "scenes.json");
+    let previous = null;
+
+    try {
+      previous = fs.readFileSync(filePath, "utf8");
+    } catch (e) {
+      if (e.code !== "ENOENT") {
+        throw e;
+      }
+    }
+
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        version: 1,
+        defaultsSeeded: true,
+        scenes: [],
+        autopilot: {
+          enabled: true,
+          minSeconds: 11,
+          maxSeconds: 33,
+          transitionSeconds: 4,
+          allowedTransitions: ["Fade"],
+          order: "random",
+        },
+      }),
+    );
+
+    await self.store.dispatch("scenes/hydrateScenes");
+
+    const hydrated = { ...self.store.state.scenes.performance };
+    const hasAutopilot = "autopilot" in self.store.state.scenes;
+
+    await self.store.dispatch("scenes/updatePerformance", {
+      enabled: false,
+      minSeconds: 8,
+      maxSeconds: 24,
+      transitionSeconds: 2,
+      allowedTransitions: [],
+      order: "in-order",
+    });
+    await self.store.dispatch("scenes/persistScenes");
+
+    const written = JSON.parse(fs.readFileSync(filePath, "utf8"));
+
+    if (previous === null) {
+      fs.rmSync(filePath, { force: true });
+    } else {
+      fs.writeFileSync(filePath, previous);
+    }
+
+    return { hydrated, hasAutopilot, written };
+  });
+
+  expect(result.hydrated).toEqual(
+    expect.objectContaining({
+      enabled: true,
+      minSeconds: 11,
+      maxSeconds: 33,
+      transitionSeconds: 4,
+      allowedTransitions: ["Fade"],
+      order: "random",
+    }),
+  );
+  expect(result.hasAutopilot).toBe(false);
+  expect(result.written.performance).toBeTruthy();
+  expect(result.written.autopilot).toBeUndefined();
+});
+
 test("performance mode starts, advances and stops", async () => {
   const name = uniqueName("E2E Performance");
 
   await ensureUserGroup();
   await modVApp.evaluateWorker(async () => {
-    await self.store.dispatch("scenes/updateAutopilot", {
+    await self.store.dispatch("scenes/updatePerformance", {
       allowedTransitions: ["Fade"],
       order: "in-order",
       transitionSeconds: 3,
@@ -141,7 +253,7 @@ test("performance mode starts, advances and stops", async () => {
   });
 
   expect(
-    await modVApp.evaluateWorkerState("scenes.autopilot.allowedTransitions"),
+    await modVApp.evaluateWorkerState("scenes.performance.allowedTransitions"),
   ).toEqual(["Fade"]);
 
   const sceneA = await saveScene(`${name} A`);
@@ -151,8 +263,8 @@ test("performance mode starts, advances and stops", async () => {
     await self.store.dispatch("scenes/startPerformance");
 
     return {
-      enabled: self.store.state.scenes.autopilot.enabled,
-      currentSceneId: self.store.state.scenes.autopilot.currentSceneId,
+      enabled: self.store.state.scenes.performance.enabled,
+      currentSceneId: self.store.state.scenes.performance.currentSceneId,
     };
   });
 
@@ -164,7 +276,7 @@ test("performance mode starts, advances and stops", async () => {
   });
 
   const nextSceneId = await modVApp.evaluateWorkerState(
-    "scenes.autopilot.currentSceneId",
+    "scenes.performance.currentSceneId",
   );
 
   expect(nextSceneId).toBeTruthy();
@@ -180,7 +292,7 @@ test("performance mode starts, advances and stops", async () => {
     await self.store.dispatch("scenes/stopPerformance");
   });
 
-  expect(await modVApp.evaluateWorkerState("scenes.autopilot.enabled")).toBe(
+  expect(await modVApp.evaluateWorkerState("scenes.performance.enabled")).toBe(
     false,
   );
 
