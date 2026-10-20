@@ -2,13 +2,13 @@
   <div
     v-infoView="{ title: iVTitle, body: iVBody, id: 'Scenes Panel' }"
     v-searchTerms="{
-      terms: ['scenes', 'autopilot', 'performance', 'phrase', 'crossfade'],
+      terms: ['scenes', 'performance', 'phrase', 'crossfade'],
       title: 'Scenes',
       type: 'Panel',
     }"
     class="scenes"
   >
-    <grid columns="6" class="scenes__autopilot">
+    <grid columns="6" class="scenes__performance">
       <c span="1..">
         <grid columns="6">
           <c span="2">Performance mode</c>
@@ -17,11 +17,13 @@
               class="light scenes__performanceButton"
               @click="togglePerformance"
             >
-              {{ autopilotEnabled ? "Stop performance" : "Start performance" }}
+              {{
+                performanceEnabled ? "Stop performance" : "Start performance"
+              }}
             </Button>
             <Checkbox
-              v-model="autopilotEnabled"
-              class="scenes__autopilotCheckbox"
+              v-model="performanceEnabled"
+              class="scenes__performanceCheckbox"
             />
           </c>
         </grid>
@@ -124,7 +126,7 @@
         :key="scene.id"
         class="scene"
         :class="{
-          'scene--current': scene.id === autopilot.currentSceneId,
+          'scene--current': scene.id === performance.currentSceneId,
           'scene--disabled': scene.enabled === false,
         }"
       >
@@ -224,8 +226,8 @@ export default {
       return this.$modV.store.state.scenes.scenes;
     },
 
-    autopilot() {
-      return this.$modV.store.state.scenes.autopilot;
+    performance() {
+      return this.$modV.store.state.scenes.performance;
     },
 
     transitioning() {
@@ -234,7 +236,7 @@ export default {
 
     currentScene() {
       return this.scenes.find(
-        (scene) => scene.id === this.autopilot.currentSceneId,
+        (scene) => scene.id === this.performance.currentSceneId,
       );
     },
 
@@ -242,33 +244,35 @@ export default {
       return this.$modV.store.state.projects.currentProject;
     },
 
-    autopilotEnabled: {
+    performanceEnabled: {
       get() {
-        return this.autopilot.enabled;
+        return this.performance.enabled;
       },
 
       set(value) {
-        this.$modV.store.dispatch("scenes/setAutopilot", { enabled: value });
+        this.$modV.store.dispatch("scenes/setPerformanceEnabled", {
+          enabled: value,
+        });
       },
     },
 
     sceneOrder: {
       get() {
-        return this.autopilot.order || "in-order";
+        return this.performance.order || "in-order";
       },
 
       set(value) {
-        this.$modV.store.dispatch("scenes/updateAutopilot", { order: value });
+        this.$modV.store.dispatch("scenes/updatePerformance", { order: value });
       },
     },
 
     minSeconds: {
       get() {
-        return this.autopilot.minSeconds;
+        return this.performance.minSeconds;
       },
 
       set(value) {
-        this.$modV.store.dispatch("scenes/updateAutopilot", {
+        this.$modV.store.dispatch("scenes/updatePerformance", {
           minSeconds: value,
         });
       },
@@ -276,11 +280,11 @@ export default {
 
     maxSeconds: {
       get() {
-        return this.autopilot.maxSeconds;
+        return this.performance.maxSeconds;
       },
 
       set(value) {
-        this.$modV.store.dispatch("scenes/updateAutopilot", {
+        this.$modV.store.dispatch("scenes/updatePerformance", {
           maxSeconds: value,
         });
       },
@@ -288,19 +292,19 @@ export default {
 
     transitionSeconds: {
       get() {
-        return this.autopilot.transitionSeconds;
+        return this.performance.transitionSeconds;
       },
 
       set(value) {
-        this.$modV.store.dispatch("scenes/updateAutopilot", {
+        this.$modV.store.dispatch("scenes/updatePerformance", {
           transitionSeconds: value,
         });
       },
     },
 
     allowedTransitions() {
-      const allowed = Array.isArray(this.autopilot.allowedTransitions)
-        ? this.autopilot.allowedTransitions
+      const allowed = Array.isArray(this.performance.allowedTransitions)
+        ? this.performance.allowedTransitions
         : [];
       const available = allowed.filter((name) =>
         this.transitionOptions.includes(name),
@@ -360,11 +364,11 @@ export default {
     },
 
     sceneMin(scene) {
-      return scene.minSeconds ?? this.autopilot.minSeconds;
+      return scene.minSeconds ?? this.performance.minSeconds;
     },
 
     sceneMax(scene) {
-      return scene.maxSeconds ?? this.autopilot.maxSeconds;
+      return scene.maxSeconds ?? this.performance.maxSeconds;
     },
 
     async setSceneMin(scene, value) {
@@ -479,7 +483,7 @@ export default {
         next = [FADE_TRANSITION];
       }
 
-      this.$modV.store.dispatch("scenes/updateAutopilot", {
+      this.$modV.store.dispatch("scenes/updatePerformance", {
         allowedTransitions: next,
       });
     },
@@ -490,7 +494,7 @@ export default {
 
     togglePerformance() {
       this.$modV.store.dispatch(
-        this.autopilotEnabled
+        this.performanceEnabled
           ? "scenes/stopPerformance"
           : "scenes/startPerformance",
       );
@@ -562,7 +566,7 @@ div.scenes {
   box-sizing: border-box;
 }
 
-grid.scenes__autopilot {
+grid.scenes__performance {
   padding: 8px;
   grid-row-gap: 4px;
 }

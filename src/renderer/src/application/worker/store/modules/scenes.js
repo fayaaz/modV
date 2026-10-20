@@ -36,7 +36,7 @@ function getDefaultState() {
   return {
     scenes: [],
     defaultsSeeded: false,
-    autopilot: {
+    performance: {
       enabled: false,
       currentSceneId: null,
       minSeconds: 8,
@@ -54,7 +54,7 @@ const state = getDefaultState();
 /**
  * Phrase detection, dwell timing and crossfade bookkeeping live outside the
  * store so the per-frame tick doesn't flood the commitQueue with mutations.
- * Only meaningful changes (scene applied, autopilot config) are committed.
+ * Only meaningful changes (scene applied, performance config) are committed.
  */
 let phrase = createPhraseState();
 let dwell = 0;
@@ -120,7 +120,7 @@ function normalizeTransitionList(value) {
   return names;
 }
 
-function normalizeAutopilotData(data) {
+function normalizePerformanceData(data) {
   const normalized = { ...(data || {}) };
   const hasAllowedTransitions = Object.prototype.hasOwnProperty.call(
     normalized,
@@ -163,11 +163,11 @@ function getAvailableTransitionNames() {
   return names;
 }
 
-function pickTransitionName(autopilot) {
+function pickTransitionName(performance) {
   const available = new Set(getAvailableTransitionNames());
-  const allowed = normalizeTransitionList(autopilot.allowedTransitions).filter(
-    (name) => available.has(name),
-  );
+  const allowed = normalizeTransitionList(
+    performance.allowedTransitions,
+  ).filter((name) => available.has(name));
 
   if (!allowed.length) {
     return FADE_TRANSITION;
@@ -281,14 +281,14 @@ async function writeStoredScenes(state) {
     return;
   }
 
-  const autopilot = { ...state.autopilot };
-  delete autopilot.currentSceneId;
+  const performance = { ...state.performance };
+  delete performance.currentSceneId;
 
   const payload = {
     version: 1,
     defaultsSeeded: !!state.defaultsSeeded,
     scenes: JSON.parse(JSON.stringify(state.scenes)),
-    autopilot,
+    performance,
   };
 
   try {
@@ -483,8 +483,8 @@ const actions = {
       id: uuidv4(),
       name,
       enabled: true,
-      minSeconds: state.autopilot.minSeconds,
-      maxSeconds: state.autopilot.maxSeconds,
+      minSeconds: state.performance.minSeconds,
+      maxSeconds: state.performance.maxSeconds,
       groups: JSON.parse(JSON.stringify(groups)),
       modules: JSON.parse(JSON.stringify(modules)),
     };
@@ -536,16 +536,16 @@ const actions = {
 
     if (
       data.minSeconds !== undefined &&
-      data.minSeconds >= (scene.maxSeconds ?? state.autopilot.maxSeconds)
+      data.minSeconds >= (scene.maxSeconds ?? state.performance.maxSeconds)
     ) {
-      data.minSeconds = (scene.maxSeconds ?? state.autopilot.maxSeconds) - 1;
+      data.minSeconds = (scene.maxSeconds ?? state.performance.maxSeconds) - 1;
     }
 
     if (
       data.maxSeconds !== undefined &&
-      data.maxSeconds <= (scene.minSeconds ?? state.autopilot.minSeconds)
+      data.maxSeconds <= (scene.minSeconds ?? state.performance.minSeconds)
     ) {
-      data.maxSeconds = (scene.minSeconds ?? state.autopilot.minSeconds) + 1;
+      data.maxSeconds = (scene.minSeconds ?? state.performance.minSeconds) + 1;
     }
 
     commit("UPDATE_SCENE", { sceneId, data });
@@ -661,9 +661,9 @@ const actions = {
       }
     }
 
-    commit("UPDATE_AUTOPILOT", { currentSceneId: scene.id });
+    commit("UPDATE_PERFORMANCE", { currentSceneId: scene.id });
 
-    const transitionName = pickTransitionName(state.autopilot);
+    const transitionName = pickTransitionName(state.performance);
 
     const applyTargetAlphas = () => {
       for (let i = 0, len = createdGroups.length; i < len; i++) {
@@ -695,7 +695,7 @@ const actions = {
       return;
     }
 
-    const duration = Math.max(0.01, state.autopilot.transitionSeconds);
+    const duration = Math.max(0.01, state.performance.transitionSeconds);
     const shader = transitionName !== "Fade";
 
     // Shader transitions composite the two Scenes themselves, so the Groups
@@ -733,8 +733,8 @@ const actions = {
       });
     }
 
-    if (state.autopilot.currentSceneId === sceneId) {
-      commit("UPDATE_AUTOPILOT", { currentSceneId: null });
+    if (state.performance.currentSceneId === sceneId) {
+      commit("UPDATE_PERFORMANCE", { currentSceneId: null });
     }
 
     commit("REMOVE_SCENE", { sceneId });
@@ -761,10 +761,17 @@ const actions = {
       }
     }
 
-    if (stored.autopilot && typeof stored.autopilot === "object") {
-      commit("UPDATE_AUTOPILOT", {
-        ...normalizeAutopilotData(stored.autopilot),
-        currentSceneId: state.autopilot.currentSceneId,
+    const storedPerformance =
+      stored.performance && typeof stored.performance === "object"
+        ? stored.performance
+        : stored.autopilot && typeof stored.autopilot === "object"
+          ? stored.autopilot
+          : null;
+
+    if (storedPerformance) {
+      commit("UPDATE_PERFORMANCE", {
+        ...normalizePerformanceData(storedPerformance),
+        currentSceneId: state.performance.currentSceneId,
       });
     }
 
@@ -842,18 +849,18 @@ const actions = {
     }
   },
 
-  setAutopilot({ commit }, { enabled }) {
+  setPerformanceEnabled({ commit }, { enabled }) {
     dwell = 0;
     phrase = createPhraseState();
 
-    commit("UPDATE_AUTOPILOT", { enabled });
+    commit("UPDATE_PERFORMANCE", { enabled });
   },
 
   async startPerformance({ commit, state, dispatch }) {
     dwell = 0;
     phrase = createPhraseState();
 
-    commit("UPDATE_AUTOPILOT", { enabled: true });
+    commit("UPDATE_PERFORMANCE", { enabled: true });
 
     const enabledScenes = getEnabledScenes(state.scenes);
 
@@ -862,7 +869,7 @@ const actions = {
     }
 
     const currentSceneEnabled = enabledScenes.some(
-      (scene) => scene.id === state.autopilot.currentSceneId,
+      (scene) => scene.id === state.performance.currentSceneId,
     );
 
     if (!currentSceneEnabled) {
@@ -872,14 +879,14 @@ const actions = {
 
   stopPerformance({ commit }) {
     dwell = 0;
-    commit("UPDATE_AUTOPILOT", { enabled: false });
+    commit("UPDATE_PERFORMANCE", { enabled: false });
   },
 
   async nextScene({ state, dispatch }) {
     const scene = pickNextScene(
       state.scenes,
-      state.autopilot.currentSceneId,
-      state.autopilot.order,
+      state.performance.currentSceneId,
+      state.performance.order,
     );
 
     if (!scene) {
@@ -904,13 +911,13 @@ const actions = {
     return JSON.parse(JSON.stringify(scene));
   },
 
-  updateAutopilot({ commit }, data) {
-    commit("UPDATE_AUTOPILOT", normalizeAutopilotData(data));
+  updatePerformance({ commit }, data) {
+    commit("UPDATE_PERFORMANCE", normalizePerformanceData(data));
   },
 
   /**
    * Runs once per frame from the render loop: advances any active crossfade
-   * and, when the autopilot is on, feeds the phrase detector with the bass
+   * and, when performance mode is on, feeds the phrase detector with the bass
    * band and switches scenes on phrase changes (or when dwell passes
    * maxSeconds).
    *
@@ -964,15 +971,15 @@ const actions = {
       }
     }
 
-    const autopilot = state.autopilot;
+    const performance = state.performance;
     const enabledScenes = getEnabledScenes(state.scenes);
 
-    if (!autopilot.enabled || !enabledScenes.length) {
+    if (!performance.enabled || !enabledScenes.length) {
       return;
     }
 
     const currentScene = state.scenes.find(
-      (scene) => scene.id === autopilot.currentSceneId,
+      (scene) => scene.id === performance.currentSceneId,
     );
 
     if (!currentScene || !isSceneEnabled(currentScene)) {
@@ -993,8 +1000,8 @@ const actions = {
     const phraseUpdate = updatePhrase(phrase, bass, dt);
     phrase = phraseUpdate.state;
 
-    const minSeconds = currentScene?.minSeconds ?? autopilot.minSeconds;
-    const maxSeconds = currentScene?.maxSeconds ?? autopilot.maxSeconds;
+    const minSeconds = currentScene?.minSeconds ?? performance.minSeconds;
+    const maxSeconds = currentScene?.maxSeconds ?? performance.maxSeconds;
 
     dwell += dt;
 
@@ -1039,8 +1046,8 @@ const mutations = {
     }
   },
 
-  UPDATE_AUTOPILOT(state, data) {
-    Object.assign(state.autopilot, data);
+  UPDATE_PERFORMANCE(state, data) {
+    Object.assign(state.performance, data);
   },
 
   SET_TRANSITIONING(state, transitioning) {
