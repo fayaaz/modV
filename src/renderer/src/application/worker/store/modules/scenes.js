@@ -1,4 +1,5 @@
 /* eslint-env worker */
+import { reactive } from "vue";
 import store from "../";
 import constants, { GROUP_ENABLED } from "../../../constants";
 import { v4 as uuidv4 } from "uuid";
@@ -73,18 +74,23 @@ const getters = {
   groupBySceneId: (state, getters, rootState) => (sceneId) =>
     rootState.groups.groups.find((group) => group.sceneId === sceneId),
 
-  transitionProgress: () => {
-    if (!transition) {
+  // `transition` lives outside the store so the per-frame tick doesn't flood
+  // the commitQueue. The transition object is reactive and these getters also
+  // read `state.transitioning`, so Vuex invalidates their cached values when
+  // progress advances or the transition starts/finishes.
+  transitionProgress: (state) => {
+    if (!state.transitioning || !transition) {
       return 1;
     }
 
     return Math.min(1, transition.elapsed / transition.duration);
   },
 
-  currentTransitionName: () => (transition ? transition.name : null),
+  currentTransitionName: (state) =>
+    state.transitioning && transition ? transition.name : null,
 
-  transitionGroupIds: () => {
-    if (!transition) {
+  transitionGroupIds: (state) => {
+    if (!state.transitioning || !transition) {
       return null;
     }
 
@@ -722,7 +728,7 @@ const actions = {
       applyTargetAlphas();
     }
 
-    transition = {
+    transition = reactive({
       name: transitionName,
       shader,
       from: oldGroups.map((group) => ({
@@ -732,7 +738,7 @@ const actions = {
       to: createdGroups,
       elapsed: 0,
       duration,
-    };
+    });
 
     pendingCleanup.push(...oldGroups.map((group) => group.id));
     commit("SET_TRANSITIONING", true);
@@ -948,6 +954,23 @@ const actions = {
         ...normalizePerformanceData(data),
       }),
     );
+  },
+
+  /**
+   * Called by the render loop when a shader transition cannot be created at
+   * runtime. The Scene change has already happened, so keep the same groups
+   * and complete the change with the group-alpha crossfade instead of leaving
+   * the output blank.
+   */
+  fallbackToFade() {
+    if (!transition || !transition.shader) {
+      return false;
+    }
+
+    transition.name = FADE_TRANSITION;
+    transition.shader = false;
+
+    return true;
   },
 
   /**

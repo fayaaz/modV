@@ -20,6 +20,7 @@ const sceneCanvases = {
   from: null,
   to: null,
 };
+let fadeCanvas = null;
 
 function resizeCanvas(target, width, height) {
   if (target.width !== width || target.height !== height) {
@@ -44,6 +45,33 @@ function ensureContext(width, height) {
   }
 
   return gl;
+}
+
+function getFadeCanvas(width, height) {
+  if (!fadeCanvas) {
+    fadeCanvas = new OffscreenCanvas(width, height);
+  } else {
+    resizeCanvas(fadeCanvas, width, height);
+  }
+
+  return fadeCanvas;
+}
+
+function renderFade(from, to, progress, width, height) {
+  const fade = getFadeCanvas(width, height);
+  const context = fade.getContext("2d");
+  const clamped = Math.min(1, Math.max(0, progress));
+  const eased = clamped * clamped * (3 - 2 * clamped);
+
+  context.clearRect(0, 0, width, height);
+  context.save();
+  context.globalAlpha = 1;
+  context.drawImage(from, 0, 0, width, height);
+  context.globalAlpha = eased;
+  context.drawImage(to, 0, 0, width, height);
+  context.restore();
+
+  return fade;
 }
 
 function getSceneCanvas(key, width, height) {
@@ -134,46 +162,51 @@ function getRenderer(definition) {
     return renderers.get(definition.name);
   }
 
-  let fragmentShader = definition.fragmentShader;
-  let vertexShader = definition.vertexShader;
-  const parser = new ISFParser();
+  try {
+    let fragmentShader = definition.fragmentShader;
+    let vertexShader = definition.vertexShader;
+    const parser = new ISFParser();
 
-  parser.parse(fragmentShader, vertexShader);
+    parser.parse(fragmentShader, vertexShader);
 
-  if (parser.error) {
-    console.error(
-      `Could not parse transition "${definition.name}"`,
-      parser.error,
-    );
-    return null;
-  }
-
-  if (parser.isfVersion < 2) {
-    fragmentShader = ISFUpgrader.convertFragment(fragmentShader);
-
-    if (vertexShader) {
-      vertexShader = ISFUpgrader.convertVertex(vertexShader);
+    if (parser.error) {
+      console.error(
+        `Could not parse transition "${definition.name}"`,
+        parser.error,
+      );
+      return null;
     }
-  }
 
-  const renderer = new ISFRenderer(gl, {
-    useWebAudio: false,
-    fftSize: 1024,
-    hasAudio: false,
-  });
+    if (parser.isfVersion < 2) {
+      fragmentShader = ISFUpgrader.convertFragment(fragmentShader);
 
-  renderer.loadSource(fragmentShader, vertexShader);
+      if (vertexShader) {
+        vertexShader = ISFUpgrader.convertVertex(vertexShader);
+      }
+    }
 
-  if (!renderer.valid) {
-    console.error(
-      `Could not compile transition "${definition.name}"`,
-      renderer.errorWithCorrectedLines || renderer.error,
-    );
+    const renderer = new ISFRenderer(gl, {
+      useWebAudio: false,
+      fftSize: 1024,
+      hasAudio: false,
+    });
+
+    renderer.loadSource(fragmentShader, vertexShader);
+
+    if (!renderer.valid) {
+      console.error(
+        `Could not compile transition "${definition.name}"`,
+        renderer.errorWithCorrectedLines || renderer.error,
+      );
+      return null;
+    }
+
+    renderers.set(definition.name, renderer);
+    return renderer;
+  } catch (e) {
+    console.error(`Could not create transition "${definition.name}"`, e);
     return null;
   }
-
-  renderers.set(definition.name, renderer);
-  return renderer;
 }
 
 /**
@@ -187,7 +220,7 @@ function getRenderer(definition) {
  * @param {Number} args.progress   0..1 transition progress
  * @param {Number} args.width
  * @param {Number} args.height
- * @returns {OffscreenCanvas|null}
+ * @returns {{ canvas: OffscreenCanvas, fallback: Boolean }|null}
  */
 export function renderSceneTransition({
   fromGroups,
@@ -201,44 +234,64 @@ export function renderSceneTransition({
     return null;
   }
 
-  const definition = findDefinition(name);
+  let from;
+  let to;
 
-  if (!definition) {
+  try {
+    from = composeGroups(
+      getSceneCanvas("from", width, height),
+      fromGroups,
+      width,
+      height,
+    );
+    to = composeGroups(
+      getSceneCanvas("to", width, height),
+      toGroups,
+      width,
+      height,
+    );
+  } catch (e) {
+    console.error(`Could not compose transition "${name}"`, e);
     return null;
   }
 
+  const fade = () => ({
+    canvas: renderFade(from, to, progress, width, height),
+    fallback: true,
+  });
+
+  const definition = findDefinition(name);
+
+  if (!definition) {
+    console.error(`Could not find transition "${name}"`);
+    return fade();
+  }
+
   if (!ensureContext(width, height)) {
-    return null;
+    console.error(`Could not create a WebGL context for transition "${name}"`);
+    return fade();
   }
 
   const renderer = getRenderer(definition);
 
   if (!renderer) {
-    return null;
+    return fade();
   }
 
-  const from = composeGroups(
-    getSceneCanvas("from", width, height),
-    fromGroups,
-    width,
-    height,
-  );
-  const to = composeGroups(
-    getSceneCanvas("to", width, height),
-    toGroups,
-    width,
-    height,
-  );
+  try {
+    renderer.setValue("startImage", from);
+    renderer.setValue("endImage", to);
+    renderer.setValue("progress", Math.min(1, Math.max(0, progress)));
 
-  renderer.setValue("startImage", from);
-  renderer.setValue("endImage", to);
-  renderer.setValue("progress", Math.min(1, Math.max(0, progress)));
+    gl.viewport(0, 0, width, height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
 
-  gl.viewport(0, 0, width, height);
-  gl.clearColor(0, 0, 0, 0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
+    renderer.draw(canvas);
+  } catch (e) {
+    console.error(`Could not render transition "${name}"`, e);
+    return fade();
+  }
 
-  renderer.draw(canvas);
-
-  return canvas;
+  return { canvas, fallback: false };
 }

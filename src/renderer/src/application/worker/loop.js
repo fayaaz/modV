@@ -339,7 +339,7 @@ async function loop(delta, features, fftOutput) {
       }
     }
 
-    transitionCanvas = renderSceneTransition({
+    const transitionResult = renderSceneTransition({
       fromGroups,
       toGroups,
       name: transitionName,
@@ -347,6 +347,18 @@ async function loop(delta, features, fftOutput) {
       width: main.canvas.width,
       height: main.canvas.height,
     });
+
+    if (transitionResult) {
+      transitionCanvas = transitionResult.canvas;
+
+      // The shader could not be created/compiled. Complete the in-flight
+      // Scene change with the regular group crossfade instead.
+      if (transitionResult.fallback) {
+        await store.dispatch("scenes/fallbackToFade");
+      }
+    } else {
+      await store.dispatch("scenes/fallbackToFade");
+    }
   }
 
   if (transitionCanvas) {
