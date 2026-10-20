@@ -8,7 +8,7 @@
 - [x] Remove any dependancy on npm and use a makefile instead to run docker (done in 71f53588, 15cb412c)
 - [x] In performance mode have a list of allowed transitions to be picked at random (done in 3f18c353)
 - [x] On first startup the screen share picker should not start. It should be instantiated when you go to the share tab and click new. (done in f1b57cfb)
-- [x] Performance mode times seem to not care about the times set in the ui. Sometimes they transition within 4 seconds. (done in 04e9cbf0)
+- [x] Performance mode times seem to not care about the times set in the ui. Sometimes they transition within 4 seconds. (done in 04e9cbf0, 407811eb)
 - [x] Make many more default scenes. Use filters from the default set as well. (done in 129845ce)
 - [x] Transitions don't seem to work at all in performance mode. (done in c3566db1)
 - [x] Remove any reference to autopilot - call it performance mode. The performance mode doesn't change behaviour (done in 3f632f27)
