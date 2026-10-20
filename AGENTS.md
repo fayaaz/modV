@@ -7,9 +7,11 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 - `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
 - `yarn dev` — electron-vite dev with HMR. For CDP attach: `yarn dev -- --remote-debugging-port=9223`.
 - `yarn build` — bundle main / preload / renderer into `out/`.
-- `make build` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`. Do not use a local `electron-builder` build.
+- `make build` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`; `make clean` removes `dist/`. Do not use a local `electron-builder` build.
 - `yarn lint` — `eslint . --fix` (Prettier runs through ESLint).
-- `yarn test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `yarn playwright test tests/e2e/spec/<name>.spec.js`.
+- `yarn test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `yarn playwright test tests/e2e/spec/<name>.spec.js`.
+
+Host tooling is yarn + make; no host npm is required. npm remains the runtime installer for missing module dependencies and is available inside the Docker image.
 
 CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `yarn lint` locally.
 
@@ -22,6 +24,10 @@ CI is the `nightly.yml` release workflow (Docker build on push to `main` and a n
 
 Key wiring: the worker store (`src/renderer/src/application/worker/store/`) is the source of truth. The renderer's `modV.store.commit/dispatch` forwards to the worker via `postMessage`; the worker batches mutations into a `commitQueue` message the renderer replays into its mirror store. `src/renderer/src/application/index.js` exports the `modV` singleton as `window.modV` / `$modV`.
 
+Gallery sections are driven by module `meta.category` (`effects`, `2d-scenes`, `3d-scenes`, `three`) with type-based fallbacks in `src/renderer/src/components/Gallery.vue`: shader/ISF default to Effects, `2d` to 2D Scenes, and `three` to ThreeJS.
+
+Screen capture is lazy: `App.vue` only mounts `dialogs/ScreenPickerDialog.vue` when `dialogs.open` includes `screenPicker`. The Screen Capture panel's "Pick Screen/Window…" button opens it, and sources enumerate on open — nothing captures or prompts at startup.
+
 ## Auto-registration (`import.meta.glob` in `index.worker.js`)
 
 - Vuex store modules: drop a `.js` in `src/renderer/src/application/worker/store/modules/` → namespaced module.
@@ -30,15 +36,15 @@ Key wiring: the worker store (`src/renderer/src/application/worker/store/`) is t
 
 ## Adding a module
 
-Default-export `{ meta, props, ...lifecycle }`. `meta` carries `name`, `author`, `version`, `type` (`2d` | `shader` | `isf` | `three`) and `audioFeatures` (e.g. `["bass", "mid", "treble"]`) for requested audio features. 2D modules implement `init`, `resize`, `update`, `draw({ data, props, context, features })` (see `renderers/2d/modules/Ball.js`). Shader modules provide `fragmentShader`/`vertexShader` with props as uniforms (see `renderers/shader/modules/Bands.js`).
+Default-export `{ meta, props, ...lifecycle }`. `meta` carries `name`, `author`, `version`, `type` (`2d` | `shader` | `isf` | `three`), optional `category` (`effects` | `2d-scenes` | `3d-scenes` | `three`) for the Gallery, and `audioFeatures` (e.g. `["bass", "mid", "treble"]`) for requested audio features. 2D modules implement `init`, `resize`, `update`, `draw({ data, props, context, features })` (see `renderers/2d/modules/Ball.js`). Shader modules provide `fragmentShader`/`vertexShader` with props as uniforms (see `renderers/shader/modules/Bands.js`).
 
 Presets: store modules implement `createPresetData`/`loadPresetData`; the worker assembles/loads them via `generatePreset`/`loadPreset`.
 
-## Point10 (scenes imported from musicvis)
+## Point10 (vendored scenes ported from musicvis)
 
 `src/renderer/src/application/point10/`:
 
-- `adapter.js` — `createPoint10Module({ name, SceneClass, webgpu })`. Each module instance gets its own `OffscreenCanvas` + renderer; the adapter blits into modV's 2D group canvas.
+- `adapter.js` — `createPoint10Module({ name, SceneClass, webgpu, meta })`. Each module instance gets its own `OffscreenCanvas` + renderer; the adapter blits into modV's 2D group canvas. Point10 modules default to the 3D Scenes Gallery category; fullscreen 2D scenes can override `meta.category`.
 - `BaseScene.js` (WebGL, `three`) and `BaseSceneWebGPU.js` (`three/webgpu` + TSL) define the scene contract: `init()`, `ready`, `available`, `update(dt, audioData)`, `render()`, `resize()`, `dispose()`.
 - `audioBridge.js` + `props.js` — the responsiveness levers (`gain`, `smoothing`, `bassGain`, `midGain`, …) are applied in the bridge, **not** inside the vendored scene files, so `scenes/*.js` stay portable with musicvis.
 - `shared/` (`textures.js`, `waterWave.js`, `phraseColor.js`) and `textures/` (Vite assets imported with `?url`).
@@ -58,6 +64,7 @@ Gotchas:
 ## Scenes & autopilot
 
 - `worker/store/modules/scenes.js` — `applyScene`, `removeScene`, `setAutopilot`, `updateAutopilot`, `loadScenesFromDisk`; `worker/loop.js` dispatches `scenes/tick` every frame for crossfades/autopilot.
+- `autopilot.allowedTransitions` is a list of transition names; each scene change picks one at random (legacy single `transition` values migrate to a one-item list). Fade is the fallback when the list is empty or unavailable.
 - Scene JSON lives in the project media directory under `scene/` (read/save handlers in `src/main/media-manager/`, `delete-scene` IPC in `src/main/window-prefs.js`). UI: `src/renderer/src/components/Scenes.vue`.
 
 ## Lint & formatting
@@ -78,4 +85,6 @@ Nightly releases are produced by `.github/workflows/nightly.yml` (Docker build o
 
 ## e2e testing notes
 
-Tests use a singleton page object `modVApp` (`tests/e2e/pageObjectModel/`) that launches the built app once in `beforeAll` and waits for the `is-modv-ready` IPC. Helpers `evaluateMainState`, `evaluateWorkerState` and `checkWorkerAndMainState` read state from both contexts; `evaluateWorkerState` runs in the dedicated worker using `self.store` and `self._get` (lodash.get, exposed for tests). Custom matcher `toBeJSON` is in `tests/e2e/extentions/toBeJSON.js`.
+Tests use a singleton page object `modVApp` (`tests/e2e/pageObjectModel/`) that launches the built app once in `beforeAll` and waits for the `is-modv-ready` IPC. Helpers `evaluateMainState`, `evaluateWorkerState`, `evaluateWorker` and `checkWorkerAndMainState` read state from both contexts; `evaluateWorkerState` runs in the dedicated worker using `self.store` and `self._get` (lodash.get, exposed for tests). Custom matcher `toBeJSON` is in `tests/e2e/extentions/toBeJSON.js`.
+
+Specs under `tests/e2e/spec/{scenes,point10,packaging}/` cover scene snapshots/performance, Point10 effect/transition registration, and the trimmed Linux bundle.
