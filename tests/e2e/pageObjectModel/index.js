@@ -83,12 +83,14 @@ class ModVApp {
       // set the CI environment variable to true
       process.env.CI = "e2e";
 
+      const launchArgs = [];
+      if (process.env.MODV_E2E_NO_SANDBOX === "1") {
+        launchArgs.push("--no-sandbox");
+      }
+      launchArgs.push(appInfo.main);
+
       this.electronApp = await electron.launch({
-        args: [
-          appInfo.main,
-          // "--use-fake-device-for-media-stream",
-          // "--use-fake-ui-for-media-stream",
-        ],
+        args: launchArgs,
         executablePath: appInfo.executable,
         env: {
           ...process.env,
