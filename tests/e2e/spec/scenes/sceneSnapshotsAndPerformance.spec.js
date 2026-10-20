@@ -238,6 +238,52 @@ test("legacy autopilot settings hydrate into performance mode", async () => {
   expect(result.written.autopilot).toBeUndefined();
 });
 
+async function isolateScenes(sceneIds) {
+  return modVApp.evaluateWorker(
+    async ({ sceneIds }) => {
+      const previous = self.store.state.scenes.scenes.map((scene) => ({
+        id: scene.id,
+        enabled: scene.enabled !== false,
+      }));
+
+      for (let i = 0; i < previous.length; i++) {
+        self.store.commit("scenes/UPDATE_SCENE", {
+          sceneId: previous[i].id,
+          data: { enabled: sceneIds.includes(previous[i].id) },
+        });
+      }
+
+      return previous;
+    },
+    { sceneIds },
+  );
+}
+
+async function restoreScenes(previous) {
+  await modVApp.evaluateWorker(
+    async ({ previous }) => {
+      for (let i = 0; i < previous.length; i++) {
+        self.store.commit("scenes/UPDATE_SCENE", {
+          sceneId: previous[i].id,
+          data: { enabled: previous[i].enabled },
+        });
+      }
+    },
+    { previous },
+  );
+}
+
+async function tick(iterations) {
+  await modVApp.evaluateWorker(
+    async ({ iterations }) => {
+      for (let i = 0; i < iterations; i++) {
+        await self.store.dispatch("scenes/tick", { delta: 100 });
+      }
+    },
+    { iterations },
+  );
+}
+
 test("performance mode starts, advances and stops", async () => {
   const name = uniqueName("E2E Performance");
 
@@ -296,6 +342,193 @@ test("performance mode starts, advances and stops", async () => {
     false,
   );
 
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await ensureUserGroup();
+});
+
+test("global performance timing wins for scenes without an override", async () => {
+  const name = uniqueName("E2E Global Timing");
+
+  await ensureUserGroup();
+
+  const sceneA = await saveScene(`${name} A`);
+  const sceneB = await saveScene(`${name} B`);
+  const previousScenes = await isolateScenes([sceneA.id, sceneB.id]);
+
+  expect(sceneA.timingOverride).toBe(false);
+  expect(sceneB.timingOverride).toBe(false);
+
+  await modVApp.evaluateWorker(
+    async ({ sceneAId, sceneBId }) => {
+      await self.store.dispatch("scenes/updatePerformance", {
+        enabled: false,
+        minSeconds: 5,
+        maxSeconds: 6,
+        transitionSeconds: 1,
+        allowedTransitions: ["None"],
+        order: "in-order",
+      });
+
+      // Simulate a legacy/default scene whose scene-level times were copied
+      // before the global timing controls existed.
+      for (const sceneId of [sceneAId, sceneBId]) {
+        self.store.commit("scenes/UPDATE_SCENE", {
+          sceneId,
+          data: { minSeconds: 1, maxSeconds: 1, timingOverride: false },
+        });
+      }
+
+      await self.store.dispatch("scenes/applyScene", { sceneId: sceneAId });
+      await self.store.dispatch("scenes/startPerformance");
+    },
+    { sceneAId: sceneA.id, sceneBId: sceneB.id },
+  );
+
+  await tick(40);
+
+  const afterFourSeconds = await modVApp.evaluateWorkerState(
+    "scenes.performance.currentSceneId",
+  );
+  expect(afterFourSeconds).toBe(sceneA.id);
+
+  await tick(30);
+
+  const afterSevenSeconds = await modVApp.evaluateWorkerState(
+    "scenes.performance.currentSceneId",
+  );
+  expect(afterSevenSeconds).toBe(sceneB.id);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/stopPerformance");
+  });
+  await restoreScenes(previousScenes);
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await ensureUserGroup();
+});
+
+test("a per-scene timing override still switches early", async () => {
+  const name = uniqueName("E2E Override Timing");
+
+  await ensureUserGroup();
+
+  const sceneA = await saveScene(`${name} A`);
+  const sceneB = await saveScene(`${name} B`);
+  const previousScenes = await isolateScenes([sceneA.id, sceneB.id]);
+
+  await modVApp.evaluateWorker(
+    async ({ sceneAId }) => {
+      await self.store.dispatch("scenes/updatePerformance", {
+        enabled: false,
+        minSeconds: 5,
+        maxSeconds: 6,
+        transitionSeconds: 1,
+        allowedTransitions: ["None"],
+        order: "in-order",
+      });
+      await self.store.dispatch("scenes/updateSceneTiming", {
+        sceneId: sceneAId,
+        minSeconds: 1,
+        maxSeconds: 2,
+      });
+      await self.store.dispatch("scenes/applyScene", { sceneId: sceneAId });
+      await self.store.dispatch("scenes/startPerformance");
+    },
+    { sceneAId: sceneA.id },
+  );
+
+  await tick(30);
+
+  const currentSceneId = await modVApp.evaluateWorkerState(
+    "scenes.performance.currentSceneId",
+  );
+  expect(currentSceneId).toBe(sceneB.id);
+
+  const resetTiming = await modVApp.evaluateWorker(
+    async ({ sceneAId }) => {
+      await self.store.dispatch("scenes/resetSceneTiming", {
+        sceneId: sceneAId,
+      });
+
+      return {
+        ...self.store.state.scenes.scenes.find(
+          (scene) => scene.id === sceneAId,
+        ),
+      };
+    },
+    { sceneAId: sceneA.id },
+  );
+
+  expect(resetTiming.timingOverride).toBe(false);
+  expect(resetTiming.minSeconds).toBe(5);
+  expect(resetTiming.maxSeconds).toBe(6);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/stopPerformance");
+  });
+  await restoreScenes(previousScenes);
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await ensureUserGroup();
+});
+
+test("a crossfade does not count towards the next scene's dwell", async () => {
+  const name = uniqueName("E2E Crossfade Timing");
+
+  await ensureUserGroup();
+
+  const sceneA = await saveScene(`${name} A`);
+  const sceneB = await saveScene(`${name} B`);
+  const previousScenes = await isolateScenes([sceneA.id, sceneB.id]);
+
+  await modVApp.evaluateWorker(
+    async ({ sceneAId }) => {
+      await self.store.dispatch("scenes/updatePerformance", {
+        enabled: false,
+        minSeconds: 5,
+        maxSeconds: 6,
+        transitionSeconds: 2,
+        allowedTransitions: ["None"],
+        order: "in-order",
+      });
+      await self.store.dispatch("scenes/applyScene", { sceneId: sceneAId });
+      await self.store.dispatch("scenes/startPerformance");
+      await self.store.dispatch("scenes/updatePerformance", {
+        allowedTransitions: ["Fade"],
+      });
+      await self.store.dispatch("scenes/nextScene");
+    },
+    { sceneAId: sceneA.id },
+  );
+
+  // Finish the 2s crossfade.
+  await tick(25);
+
+  const afterTransition = await modVApp.evaluateWorkerState(
+    "scenes.performance.currentSceneId",
+  );
+  expect(afterTransition).toBe(sceneB.id);
+  expect(await modVApp.evaluateWorkerState("scenes.transitioning")).toBe(false);
+
+  // Under the old behaviour the 2s spent crossfading counted towards the 6s
+  // maximum, so this window would trigger an immediate switch.
+  await tick(40);
+
+  expect(
+    await modVApp.evaluateWorkerState("scenes.performance.currentSceneId"),
+  ).toBe(sceneB.id);
+
+  await tick(30);
+
+  expect(
+    await modVApp.evaluateWorkerState("scenes.performance.currentSceneId"),
+  ).toBe(sceneA.id);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/stopPerformance");
+  });
+  await restoreScenes(previousScenes);
   await removeScene(sceneA.id);
   await removeScene(sceneB.id);
   await ensureUserGroup();

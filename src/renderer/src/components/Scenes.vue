@@ -164,6 +164,14 @@
               @update:model-value="(value) => setSceneMax(scene, value)"
             />
             <span>s</span>
+            <Button
+              v-if="scene.timingOverride"
+              class="light scene__defaultsButton"
+              title="Use the default scene times"
+              @click="resetSceneTiming(scene)"
+            >
+              Defaults
+            </Button>
           </div>
         </div>
         <div class="scene__controls">
@@ -205,6 +213,7 @@ import {
   NONE_TRANSITION,
   NATIVE_TRANSITION_NAMES,
 } from "../application/scene-transition-defs";
+import { resolveSceneTiming } from "../application/worker/scene-timing";
 
 const { ipcRenderer } = window.electron;
 
@@ -364,11 +373,11 @@ export default {
     },
 
     sceneMin(scene) {
-      return scene.minSeconds ?? this.performance.minSeconds;
+      return resolveSceneTiming(scene, this.performance).minSeconds;
     },
 
     sceneMax(scene) {
-      return scene.maxSeconds ?? this.performance.maxSeconds;
+      return resolveSceneTiming(scene, this.performance).maxSeconds;
     },
 
     async setSceneMin(scene, value) {
@@ -392,6 +401,17 @@ export default {
           sceneId: scene.id,
           maxSeconds: value,
         },
+      );
+
+      if (updatedScene) {
+        this.persistScene(updatedScene, 500);
+      }
+    },
+
+    async resetSceneTiming(scene) {
+      const updatedScene = await this.$modV.store.dispatch(
+        "scenes/resetSceneTiming",
+        { sceneId: scene.id },
       );
 
       if (updatedScene) {
@@ -657,6 +677,11 @@ span.scene__timingLabel {
 
 input.scene__timeInput {
   width: 52px;
+}
+
+button.scene__defaultsButton {
+  font-size: 11px;
+  padding: 2px 6px;
 }
 
 div.scene__layers {
