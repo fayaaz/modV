@@ -7,6 +7,11 @@ import {
   switchChance,
   updatePhrase,
 } from "../../phrase-detector";
+import {
+  FADE_TRANSITION,
+  NONE_TRANSITION,
+  NATIVE_TRANSITION_NAMES,
+} from "../../../scene-transition-defs";
 import DEFAULT_SCENES from "../default-scenes";
 
 const fs = require("fs");
@@ -37,7 +42,7 @@ function getDefaultState() {
       minSeconds: 8,
       maxSeconds: 24,
       transitionSeconds: 2,
-      transition: "Fade",
+      allowedTransitions: [],
       order: "in-order",
     },
     transitioning: false,
@@ -95,6 +100,80 @@ function isSceneEnabled(scene) {
 
 function getEnabledScenes(scenes) {
   return scenes.filter(isSceneEnabled);
+}
+
+function normalizeTransitionList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const names = [];
+
+  for (let i = 0, len = value.length; i < len; i++) {
+    const name = value[i];
+
+    if (typeof name === "string" && name && !names.includes(name)) {
+      names.push(name);
+    }
+  }
+
+  return names;
+}
+
+function normalizeAutopilotData(data) {
+  const normalized = { ...(data || {}) };
+  const hasAllowedTransitions = Object.prototype.hasOwnProperty.call(
+    normalized,
+    "allowedTransitions",
+  );
+  const legacyTransition = normalized.transition;
+
+  delete normalized.transition;
+
+  const allowedTransitions = hasAllowedTransitions
+    ? normalizeTransitionList(normalized.allowedTransitions)
+    : [];
+
+  if (allowedTransitions.length) {
+    normalized.allowedTransitions = allowedTransitions;
+  } else if (typeof legacyTransition === "string" && legacyTransition) {
+    normalized.allowedTransitions = [legacyTransition];
+  } else if (hasAllowedTransitions) {
+    normalized.allowedTransitions = [];
+  }
+
+  return normalized;
+}
+
+function getAvailableTransitionNames() {
+  const names = [FADE_TRANSITION, NONE_TRANSITION, ...NATIVE_TRANSITION_NAMES];
+  const registered = store.state.modules.registered || {};
+
+  for (const module of Object.values(registered)) {
+    if (
+      module.props &&
+      module.props.startImage &&
+      module.props.endImage &&
+      module.props.progress
+    ) {
+      names.push(module.meta.name);
+    }
+  }
+
+  return names;
+}
+
+function pickTransitionName(autopilot) {
+  const available = new Set(getAvailableTransitionNames());
+  const allowed = normalizeTransitionList(autopilot.allowedTransitions).filter(
+    (name) => available.has(name),
+  );
+
+  if (!allowed.length) {
+    return FADE_TRANSITION;
+  }
+
+  return allowed[Math.floor(Math.random() * allowed.length)];
 }
 
 function pickNextScene(scenes, currentSceneId, order) {
@@ -584,7 +663,7 @@ const actions = {
 
     commit("UPDATE_AUTOPILOT", { currentSceneId: scene.id });
 
-    const transitionName = state.autopilot.transition || "Fade";
+    const transitionName = pickTransitionName(state.autopilot);
 
     const applyTargetAlphas = () => {
       for (let i = 0, len = createdGroups.length; i < len; i++) {
@@ -684,7 +763,7 @@ const actions = {
 
     if (stored.autopilot && typeof stored.autopilot === "object") {
       commit("UPDATE_AUTOPILOT", {
-        ...stored.autopilot,
+        ...normalizeAutopilotData(stored.autopilot),
         currentSceneId: state.autopilot.currentSceneId,
       });
     }
@@ -826,7 +905,7 @@ const actions = {
   },
 
   updateAutopilot({ commit }, data) {
-    commit("UPDATE_AUTOPILOT", data);
+    commit("UPDATE_AUTOPILOT", normalizeAutopilotData(data));
   },
 
   /**
