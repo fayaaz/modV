@@ -28,7 +28,7 @@ void main() {
   // One waveform spans the whole screen edge to edge (gl_FragCoord.x /
   // resolution.x instead of fract(u) - no tiling, no per-tile repeat).
   float energy = texture2D(waveTex, vec2(gl_FragCoord.x / resolution.x, 0.5)).r;
-  float mul = 0.5 + 0.25 * energy;
+  float mul = 0.75 + 0.5 * energy;
 
   float r = glow.r / abs(p.y + sin((rx + time) * xScale.r) * mul);
   float g = glow.g / abs(p.y + sin((gx + time) * xScale.g) * mul);

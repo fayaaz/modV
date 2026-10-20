@@ -127,9 +127,10 @@ class AudioBands {
     }
 
     const n = Math.min(byteTimeDomainData.length, this.wave.length);
+    const offset = byteTimeDomainData.length - n;
 
     for (let i = 0; i < n; i++) {
-      this.wave[i] = (byteTimeDomainData[i] / 255) * 2 - 1;
+      this.wave[i] = (byteTimeDomainData[offset + i] / 255) * 2 - 1;
     }
   }
 

@@ -18,7 +18,7 @@ import setupMidi from "./setup-midi";
 import store from "./worker/store";
 import windowHandler from "./window-handler";
 import use from "./use";
-import { GROUP_ENABLED } from "./constants";
+import constants, { GROUP_ENABLED } from "./constants";
 import ModVWorker from "./worker/index.worker.js?worker";
 
 // deprecated single-capture buffer kept for compatibility; unused in async pipeline
@@ -330,9 +330,10 @@ class ModV {
     const features = this.meyda?.get(meydaFeatures);
 
     if (features) {
+      const timeDomain = getByteTimeDomainData();
       const bands = this.audioBands.update({
         floatFrequencyData: getFloatFrequencyData(),
-        byteTimeDomainData: getByteTimeDomainData(),
+        byteTimeDomainData: timeDomain,
         sampleRate: this.audioContext ? this.audioContext.sampleRate : 44100,
       });
 
@@ -346,7 +347,11 @@ class ModV {
 
       this.updateBeatDetektor && this.updateBeatDetektor(delta, features);
       features.byteFrequencyData = Array.from(getByteFrequencyData() || []);
-      features.byteTimeDomainData = Array.from(getByteTimeDomainData() || []);
+      // ISF audio inputs expect 512 time-domain values; the analyser now hands
+      // over fftSize samples for AudioBands' wave buffer.
+      features.byteTimeDomainData = Array.from(
+        timeDomain ? timeDomain.slice(-constants.AUDIO_BUFFER_SIZE) : [],
+      );
       this.$worker.postMessage({ type: "meyda", payload: features });
 
       for (let i = 0; i < featuresToGet.length; i += 1) {
