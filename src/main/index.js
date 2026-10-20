@@ -13,6 +13,11 @@ import { createWindow } from "./windows";
 
 require("@electron/remote/main").initialize();
 
+// The package name is "modv-vite", which would otherwise make dev builds use
+// ~/.config/modv-vite. Packaged builds get "modV" from productName, so set it
+// explicitly here to share one userData directory (and its media tree).
+app.setName("modV");
+
 // modV's shader, gallery-shader, ISF, gallery-ISF and three renderers already
 // hold five long-lived WebGL contexts. The old cap of 6 left no room for the
 // Point10 scenes or the transition shader, and Chromium silently force-lost
