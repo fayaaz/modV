@@ -10,6 +10,11 @@ files:
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!tests/*'
   - '!patches/*'
+  # macOS-only haptics ship a 147 MB Xcode DerivedData tree. It is re-included
+  # for mac builds below. The NDI SDK is only needed while compiling grandiose;
+  # at runtime the addon loads the copy in build/Release.
+  - '!node_modules/hapticjs/hapticJS/**'
+  - '!node_modules/grandiose/ndi/**'
 asarUnpack:
   - resources/**
   - node_modules/grandiose
@@ -22,6 +27,8 @@ nsis:
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
+  files:
+    - 'node_modules/hapticjs/hapticJS/**'
   entitlementsInherit: resources/entitlements.mac.plist
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
@@ -40,6 +47,8 @@ linux:
     - deb
   maintainer: modv.vcync.gl
   category: Graphics
+  electronLanguages:
+    - en-US
 appImage:
   artifactName: ${productName}-${version}.${ext}
 deb:
