@@ -7,9 +7,9 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 - `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
 - `npm run dev` — electron-vite dev with HMR. For CDP attach: `npm run dev -- --remote-debugging-port=9223`.
 - `npm run build` — bundle main / preload / renderer into `out/`.
-- `npm run build:linux:docker` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version. Do not use a local `electron-builder` build.
+- `make build` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`. Do not use a local `electron-builder` build.
 - `npm run lint` — `eslint . --fix` (Prettier runs through ESLint).
-- `npm run test:e2e` — Playwright. **Requires `npm run build:linux:docker` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `npx playwright test tests/e2e/spec/<name>.spec.js`.
+- `npm run test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `npx playwright test tests/e2e/spec/<name>.spec.js`.
 
 CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `npm run lint` locally.
 
@@ -70,7 +70,7 @@ Gotchas:
 - The worker runs with `nodeIntegrationInWorker: true` (`src/main/window-prefs.js`), so worker code may `require("fs")`/`require("path")`.
 - Native deps: `grandiose` (NDI) needs libndi on Linux; `grandiose` and `ffmpeg-fluent` are `asarUnpack`ed (see `electron-builder.yml`). The `Dockerfile` installs the NDI SDK and aliases the `libndi.so.5.6.1` soname to the `libndi.so.5.1.1` its `binding.gyp` pins. Windows needs the node-gyp toolchain — **WSL/WSL2 is unsupported**.
 - `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `yarn remove <pkg>`, run `yarn` again to reapply patches (see issue #554).
-- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `npm run build:linux:docker` (wrapping `scripts/build-linux-docker.sh`) is the supported local build. Do not run `electron-builder` locally.
+- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `make build` is the supported local build. Do not run `electron-builder` locally.
 
 ## Release
 

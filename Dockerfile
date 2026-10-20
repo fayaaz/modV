@@ -2,8 +2,11 @@
 
 ARG NODE_VERSION=24
 ARG DEBIAN_RELEASE=trixie
+# Pin the multi-arch manifest so a moving tag cannot silently change the
+# toolchain used for release artifacts.
+ARG NODE_DIGEST=sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
 
-FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim AS base
+FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim@${NODE_DIGEST} AS base
 ENV DEBIAN_FRONTEND=noninteractive \
     ELECTRON_CACHE=/root/.cache/electron \
     ELECTRON_BUILDER_CACHE=/root/.cache/electron-builder \
@@ -25,7 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN corepack enable \
     && corepack prepare yarn@1.22.22 --activate \
-    && npm install --global node-gyp@11
+    && yarn global add node-gyp@11 --prefix /usr/local
 WORKDIR /app
 
 FROM base AS deps
@@ -50,18 +53,20 @@ RUN cd node_modules/grandiose \
         --target="$(node -p "require('/app/node_modules/electron/package.json').version")" \
         --arch=x64 \
         --dist-url=https://electronjs.org/headers
-RUN npx patch-package
+RUN yarn patch-package
 
 FROM deps AS build
 ARG APP_VERSION
 COPY . .
 RUN if [ -n "$APP_VERSION" ]; then \
-      npm version "$APP_VERSION" --no-git-tag-version --allow-same-version; \
+      yarn version --new-version "$APP_VERSION" --no-git-tag-version; \
     fi
-RUN npm run build
+RUN yarn build
 
 FROM build AS package
-RUN npx electron-builder --linux AppImage deb --publish never
+RUN --mount=type=cache,target=/root/.cache/electron \
+    --mount=type=cache,target=/root/.cache/electron-builder \
+    yarn electron-builder --linux AppImage deb --publish never
 
 FROM scratch AS appimage
 COPY --from=package /app/dist/*.AppImage /
