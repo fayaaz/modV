@@ -7,4 +7,4 @@
 - [x] Better categorise items. There should a distinction between effects and 2d/3d scenes. Also make a category for threeJS
 - [x] Remove any dependancy on npm and use a makefile instead to run docker
 - [x] In performance mode have a list of allowed transitions to be picked at random
-- [ ] On first startup the screen share picker should not start. It should be instantiated when you go to the share tab and click new.
+- [x] On first startup the screen share picker should not start. It should be instantiated when you go to the share tab and click new.
