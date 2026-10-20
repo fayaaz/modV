@@ -5,6 +5,7 @@ export default {
     version: "1.0.0",
     audioFeatures: ["zcr", "rms"],
     type: "2d",
+    category: "effects",
     previewWithOutput: true,
   },
 

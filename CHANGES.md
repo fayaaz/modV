@@ -4,7 +4,7 @@
 - [x] Improved audio reactivity. Allow us to link parameters such as bass, mid, treble. (done in 7377b94a)
 - [x] Automatic bpm from audio (done in 5d412b66, 7377b94a)
 - [x] In Scenes tab clicking on a scene shouldn't load it. Only pressing apply. (done in 7377b94a, d5d4d521)
-- [ ] Better categorise items. There should a distinction between effects and 2d/3d scenes. Also make a category for threeJS
+- [x] Better categorise items. There should a distinction between effects and 2d/3d scenes. Also make a category for threeJS
 - [ ] Remove any dependancy on npm and use a makefile instead to run docker
 - [ ] In performance mode have a list of allowed transitions to be picked at random
 - [ ] On first startup the screen share picker should not start. It should be instantiated when you go to the share tab and click new.

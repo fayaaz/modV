@@ -2,6 +2,7 @@ export default {
   meta: {
     name: "Smear",
     type: "2d",
+    category: "effects",
     audioFeatures: ["rms", "energy"],
   },
 

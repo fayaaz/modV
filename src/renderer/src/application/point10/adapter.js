@@ -414,6 +414,7 @@ function createPoint10Module({
       author: "Point10",
       version: "1.0.0",
       type: "2d",
+      category: "3d-scenes",
       audioFeatures: ["bass", "mid", "treble"],
       ...meta,
     },

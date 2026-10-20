@@ -4,4 +4,5 @@ import { ChromaticLine } from "../../../point10/scenes/ChromaticLine.js";
 export default createPoint10Module({
   name: "Point10 Chromatic Line",
   SceneClass: ChromaticLine,
+  meta: { category: "2d-scenes" },
 });

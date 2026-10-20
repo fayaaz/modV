@@ -6,6 +6,7 @@ export default {
     meyda: ["zcr", "rms"],
     previewWithOutput: true,
     type: "2d",
+    category: "effects",
   },
 
   props: {
