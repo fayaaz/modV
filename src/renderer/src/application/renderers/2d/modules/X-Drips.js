@@ -2,6 +2,7 @@ export default {
   meta: {
     type: "2d",
     name: "X Drips",
+    category: "effects",
   },
 
   props: {

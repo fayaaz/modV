@@ -21,23 +21,23 @@
       <c span="1.." class="results">
         <grid columns="4">
           <c
-            v-for="(modules, renderer) in modulesByRenderer"
-            v-show="renderersToShow.indexOf(renderer) > -1"
-            :key="renderer"
+            v-for="category in moduleCategories"
+            v-show="categoriesToShow.indexOf(category.key) > -1"
+            :key="category.key"
             class="renderer"
             span="4"
           >
-            <div class="title">{{ renderer }}</div>
+            <div class="title">{{ category.label }}</div>
             <Container
               behaviour="copy"
               group-name="modules"
               :get-child-payload="
-                (e) => getChildPayload('modulesByRenderer', e, renderer)
+                (e) => getChildPayload('modulesByCategory', e, category.key)
               "
               class="fluid"
             >
               <Draggable
-                v-for="(module, name) in modules"
+                v-for="(module, name) in modulesByCategory[category.key] || {}"
                 v-show="modulesToShow.indexOf(name) > -1"
                 :key="name"
                 ghost-class="ghost"
@@ -62,7 +62,7 @@
             </Container>
           </c>
 
-          <c v-show="!renderersToShow.length && searchTerm.length" span="1..">
+          <c v-show="!categoriesToShow.length && searchTerm.length" span="1..">
             <h2>Couldn't find {{ searchTerm }}.</h2>
           </c>
         </grid>
@@ -75,6 +75,58 @@
 import { Container, Draggable } from "vue3-smooth-dnd";
 import constants from "../application/constants";
 import GalleryItem from "./GalleryItem.vue";
+
+const CATEGORY_ORDER = ["effects", "2d-scenes", "3d-scenes", "three"];
+
+const CATEGORY_LABELS = {
+  effects: "Effects",
+  "2d-scenes": "2D Scenes",
+  "3d-scenes": "3D Scenes",
+  three: "ThreeJS",
+};
+
+const DEFAULT_CATEGORY_BY_TYPE = {
+  "2d": "2d-scenes",
+  "3d": "3d-scenes",
+  shader: "effects",
+  isf: "effects",
+  three: "three",
+};
+
+const CATEGORY_ALIASES = {
+  effect: "effects",
+  effects: "effects",
+  "2d": "2d-scenes",
+  "2d-scene": "2d-scenes",
+  "2d-scenes": "2d-scenes",
+  "3d": "3d-scenes",
+  "3d-scene": "3d-scenes",
+  "3d-scenes": "3d-scenes",
+  three: "three",
+  "three-js": "three",
+  threejs: "three",
+};
+
+function normalizeCategory(category) {
+  if (typeof category !== "string" || !category.trim()) {
+    return null;
+  }
+
+  const key = category
+    .toLowerCase()
+    .trim()
+    .replace(/[\s_]+/g, "-");
+
+  return CATEGORY_ALIASES[key] || null;
+}
+
+function getModuleCategory(meta) {
+  return (
+    normalizeCategory(meta.category) ||
+    DEFAULT_CATEGORY_BY_TYPE[meta.type] ||
+    DEFAULT_CATEGORY_BY_TYPE["2d"]
+  );
+}
 
 export default {
   components: {
@@ -91,7 +143,7 @@ export default {
       groupId: null,
       searchTerm: "",
       renderers: {},
-      renderersToShow: [],
+      categoriesToShow: [],
       modulesToShow: [],
     };
   },
@@ -101,7 +153,14 @@ export default {
       return this.$modV.store.state.modules.registered;
     },
 
-    modulesByRenderer() {
+    moduleCategories() {
+      return CATEGORY_ORDER.map((key) => ({
+        key,
+        label: CATEGORY_LABELS[key],
+      }));
+    },
+
+    modulesByCategory() {
       return Object.keys(this.registeredModules)
         .sort((a, b) =>
           this.registeredModules[a].meta.name.localeCompare(
@@ -110,13 +169,14 @@ export default {
         )
         .reduce((obj, key) => {
           const module = this.registeredModules[key];
-          const { type, name } = module.meta;
+          const { name } = module.meta;
+          const category = getModuleCategory(module.meta);
 
-          if (!(type in obj)) {
-            obj[type] = {};
+          if (!(category in obj)) {
+            obj[category] = {};
           }
 
-          obj[type][name] = module;
+          obj[category][name] = module;
 
           return obj;
         }, {});
@@ -126,13 +186,13 @@ export default {
   watch: {
     registeredModules: {
       handler() {
-        this.updateModulesAndRenderersToShow();
+        this.updateModulesAndCategoriesToShow();
       },
       deep: true,
     },
 
     searchTerm() {
-      this.updateModulesAndRenderersToShow();
+      this.updateModulesAndCategoriesToShow();
     },
   },
 
@@ -146,7 +206,7 @@ export default {
     });
 
     this.groupId = group.id;
-    this.updateModulesAndRenderersToShow();
+    this.updateModulesAndCategoriesToShow();
 
     window.addEventListener("keydown", this.keyDownListener.bind(this));
   },
@@ -157,10 +217,9 @@ export default {
   },
 
   methods: {
-    getChildPayload(group, index, renderer) {
-      const moduleName =
-        this[group][renderer][Object.keys(this[group][renderer])[index]].meta
-          .name;
+    getChildPayload(group, index, category) {
+      const modules = this[group][category];
+      const moduleName = modules[Object.keys(modules)[index]].meta.name;
 
       return { moduleName, collection: "gallery" };
     },
@@ -175,22 +234,23 @@ export default {
       return text.indexOf(term) > -1;
     },
 
-    updateModulesAndRenderersToShow() {
+    updateModulesAndCategoriesToShow() {
       const { search, searchTerm, registeredModules } = this;
       this.modulesToShow = [];
-      this.renderersToShow = [];
+      this.categoriesToShow = [];
 
       const registeredModulesKeys = Object.keys(registeredModules);
       for (let i = 0, len = registeredModulesKeys.length; i < len; i++) {
         const moduleKey = registeredModulesKeys[i];
 
         const module = registeredModules[moduleKey];
-        const { name, type } = module.meta;
+        const { name } = module.meta;
+        const category = getModuleCategory(module.meta);
 
         if (search(name, searchTerm)) {
           this.modulesToShow.push(name);
-          if (this.renderersToShow.indexOf(type) < 0) {
-            this.renderersToShow.push(type);
+          if (this.categoriesToShow.indexOf(category) < 0) {
+            this.categoriesToShow.push(category);
           }
         }
       }
