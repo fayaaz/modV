@@ -84,9 +84,6 @@ export default {
       immediate: true,
     },
   },
-  mounted() {
-    this.enumerateSources();
-  },
   methods: {
     async enumerateSources() {
       try {

@@ -98,7 +98,7 @@
     <StatusBar />
     <Search />
     <FrameRateDialog />
-    <ScreenPickerDialog />
+    <ScreenPickerDialog v-if="screenPickerOpen" />
     <ErrorWatcher />
   </main>
 </template>
@@ -300,6 +300,10 @@ export default {
 
     focusedActiveModule() {
       return this.$store.state["uiModules"].focused;
+    },
+
+    screenPickerOpen() {
+      return this.$store.state.dialogs.open.includes("screenPicker");
     },
   },
 
