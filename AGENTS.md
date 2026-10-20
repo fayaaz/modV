@@ -5,13 +5,13 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 ## Commands
 
 - `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
-- `npm run dev` — electron-vite dev with HMR. For CDP attach: `npm run dev -- --remote-debugging-port=9223`.
-- `npm run build` — bundle main / preload / renderer into `out/`.
+- `yarn dev` — electron-vite dev with HMR. For CDP attach: `yarn dev -- --remote-debugging-port=9223`.
+- `yarn build` — bundle main / preload / renderer into `out/`.
 - `make build` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`. Do not use a local `electron-builder` build.
-- `npm run lint` — `eslint . --fix` (Prettier runs through ESLint).
-- `npm run test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `npx playwright test tests/e2e/spec/<name>.spec.js`.
+- `yarn lint` — `eslint . --fix` (Prettier runs through ESLint).
+- `yarn test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `yarn playwright test tests/e2e/spec/<name>.spec.js`.
 
-CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `npm run lint` locally.
+CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `yarn lint` locally.
 
 ## Architecture (three execution contexts)
 
