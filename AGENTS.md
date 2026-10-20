@@ -7,7 +7,7 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 - `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
 - `yarn dev` — electron-vite dev with HMR. For CDP attach: `yarn dev -- --remote-debugging-port=9223`.
 - `yarn build` — bundle main / preload / renderer into `out/`.
-- `make build` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`; `make clean` removes `dist/`. Do not use a local `electron-builder` build.
+- `make build` — **the canonical Linux build** (see `Dockerfile`); empties `dist/` in place and writes the AppImage and `.deb` into it. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`; `make clean` removes `dist/`. Do not use a local `electron-builder` build.
 - `yarn lint` — `eslint . --fix` (Prettier runs through ESLint).
 - `yarn test:e2e` — Playwright. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `yarn playwright test tests/e2e/spec/<name>.spec.js`.
 
