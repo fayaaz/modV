@@ -64,13 +64,15 @@ export default class MediaManager {
 
     Object.assign(this, defaults, options);
 
-    this.addReadHandler({ readHandler: imageReadHandler });
-    this.addReadHandler({ readHandler: paletteReadHandler });
-    this.addReadHandler({ readHandler: presetReadHandler });
-    this.addReadHandler({ readHandler: moduleReadHandler });
-    this.addReadHandler({ readHandler: isfReadHandler });
-    this.addReadHandler({ readHandler: videoReadHandler });
-    this.addReadHandler({ readHandler: sceneReadHandler });
+    const readHandlerPromises = [
+      this.addReadHandler({ readHandler: imageReadHandler }),
+      this.addReadHandler({ readHandler: paletteReadHandler }),
+      this.addReadHandler({ readHandler: presetReadHandler }),
+      this.addReadHandler({ readHandler: moduleReadHandler }),
+      this.addReadHandler({ readHandler: isfReadHandler }),
+      this.addReadHandler({ readHandler: videoReadHandler }),
+      this.addReadHandler({ readHandler: sceneReadHandler }),
+    ];
 
     this.addSaveHandler({ saveHandler: presetSaveHandler });
     this.addSaveHandler({ saveHandler: sceneSaveHandler });
@@ -87,17 +89,9 @@ export default class MediaManager {
     });
 
     (async () => {
-      try {
-        await fs.promises.access(path.join(this.mediaDirectoryPath));
-      } catch (error) {
-        await mkdirp(this.mediaDirectoryPath);
-      }
-
-      try {
-        await fs.promises.access(path.join(this.mediaDirectoryPath, "default"));
-      } catch (error) {
-        this.fsCreateProfile("default");
-      }
+      await mkdirp(this.mediaDirectoryPath);
+      await Promise.all(readHandlerPromises);
+      await this.fsCreateProfile("default");
     })();
   }
 
@@ -142,15 +136,15 @@ export default class MediaManager {
       );
     }
 
-    await fs.promises.writeFile(
-      path.join(
-        this.mediaDirectoryPath,
-        project,
-        handler.folder,
-        `${name}.${fileType}`,
-      ),
-      payload,
+    const filePath = path.join(
+      this.mediaDirectoryPath,
+      project,
+      handler.folder,
+      `${name}.${fileType}`,
     );
+
+    await mkdirp(path.dirname(filePath));
+    await fs.promises.writeFile(filePath, payload);
 
     return true;
   }

@@ -151,9 +151,10 @@ const windowPrefs = {
 
       ipcMain.on("save-file", async (event, message) => {
         try {
-          mm.saveFile(message);
+          await mm.saveFile(message);
         } catch (e) {
           event.reply("save-file", e);
+          return;
         }
 
         event.reply("save-file", "saved");
