@@ -173,13 +173,14 @@ async function setupMedia({
     // Create new Audio Analyser
     analyserNode = this.audioContext.createAnalyser();
     analyserNode.smoothingTimeConstant = 0;
+    analyserNode.fftSize = 2048;
 
-    // Set up arrays for analyser
+    // Set up arrays for analyser. The time-domain buffer is the analyser's
+    // fftSize (not frequencyBinCount): a shorter array would leave the rest of
+    // AudioBands' wave buffer stale (see audio-bands.js).
     floatFrequencyDataArray = new Float32Array(analyserNode.frequencyBinCount);
     byteFrequencyDataArray = new Uint8Array(analyserNode.frequencyBinCount);
-    byteTimeDomainDataArray = new Uint8Array(
-      analyserNode.frequencyBinCount / 2,
-    );
+    byteTimeDomainDataArray = new Uint8Array(analyserNode.fftSize);
 
     // Create a gain node
     this.gainNode = this.audioContext.createGain();
