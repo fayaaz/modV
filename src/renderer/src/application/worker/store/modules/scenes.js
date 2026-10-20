@@ -13,6 +13,11 @@ import {
   NATIVE_TRANSITION_NAMES,
 } from "../../../scene-transition-defs";
 import DEFAULT_SCENES from "../default-scenes";
+import {
+  normalizePerformanceTiming,
+  normalizeSceneTiming,
+  resolveSceneTiming,
+} from "../../scene-timing";
 
 const fs = require("fs");
 const path = require("path");
@@ -409,6 +414,7 @@ async function buildSceneSnapshot(definition) {
       enabled: definition.enabled !== false,
       minSeconds: definition.minSeconds,
       maxSeconds: definition.maxSeconds,
+      timingOverride: false,
       groups: groupSnapshots,
       modules: moduleSnapshots,
     };
@@ -478,13 +484,15 @@ const actions = {
       });
 
     const modules = await store.dispatch("modules/createPresetData");
+    const timing = normalizePerformanceTiming(state.performance);
 
     const scene = {
       id: uuidv4(),
       name,
       enabled: true,
-      minSeconds: state.performance.minSeconds,
-      maxSeconds: state.performance.maxSeconds,
+      minSeconds: timing.minSeconds,
+      maxSeconds: timing.maxSeconds,
+      timingOverride: false,
       groups: JSON.parse(JSON.stringify(groups)),
       modules: JSON.parse(JSON.stringify(modules)),
     };
@@ -524,31 +532,38 @@ const actions = {
       return null;
     }
 
-    const data = {};
+    const current = resolveSceneTiming(scene, state.performance);
+    const timing = normalizeSceneTiming(
+      {
+        minSeconds: minSeconds === undefined ? current.minSeconds : minSeconds,
+        maxSeconds: maxSeconds === undefined ? current.maxSeconds : maxSeconds,
+        timingOverride: true,
+      },
+      state.performance,
+    );
 
-    if (Number.isFinite(minSeconds)) {
-      data.minSeconds = Math.max(1, Math.round(minSeconds * 10) / 10);
+    commit("UPDATE_SCENE", { sceneId, data: timing });
+
+    return JSON.parse(JSON.stringify(scene));
+  },
+
+  resetSceneTiming({ commit, state }, { sceneId }) {
+    const scene = state.scenes.find((scene) => scene.id === sceneId);
+
+    if (!scene) {
+      return null;
     }
 
-    if (Number.isFinite(maxSeconds)) {
-      data.maxSeconds = Math.max(2, Math.round(maxSeconds * 10) / 10);
-    }
+    const timing = normalizePerformanceTiming(state.performance);
 
-    if (
-      data.minSeconds !== undefined &&
-      data.minSeconds >= (scene.maxSeconds ?? state.performance.maxSeconds)
-    ) {
-      data.minSeconds = (scene.maxSeconds ?? state.performance.maxSeconds) - 1;
-    }
-
-    if (
-      data.maxSeconds !== undefined &&
-      data.maxSeconds <= (scene.minSeconds ?? state.performance.minSeconds)
-    ) {
-      data.maxSeconds = (scene.minSeconds ?? state.performance.minSeconds) + 1;
-    }
-
-    commit("UPDATE_SCENE", { sceneId, data });
+    commit("UPDATE_SCENE", {
+      sceneId,
+      data: {
+        minSeconds: timing.minSeconds,
+        maxSeconds: timing.maxSeconds,
+        timingOverride: false,
+      },
+    });
 
     return JSON.parse(JSON.stringify(scene));
   },
@@ -570,6 +585,9 @@ const actions = {
     if (!normalizedScene) {
       return;
     }
+
+    dwell = 0;
+    phrase = createPhraseState();
 
     // Finish any in-flight crossfade first so nothing is left orphaned.
     await completeTransition(commit);
@@ -751,16 +769,6 @@ const actions = {
       return;
     }
 
-    if (Array.isArray(stored.scenes)) {
-      for (let i = 0, len = stored.scenes.length; i < len; i++) {
-        const scene = normalizeScene(stored.scenes[i]);
-
-        if (scene) {
-          commit("ADD_SCENE", scene);
-        }
-      }
-    }
-
     const storedPerformance =
       stored.performance && typeof stored.performance === "object"
         ? stored.performance
@@ -768,9 +776,27 @@ const actions = {
           ? stored.autopilot
           : null;
 
+    const performanceForTiming = normalizePerformanceTiming({
+      ...state.performance,
+      ...(storedPerformance ? normalizePerformanceData(storedPerformance) : {}),
+    });
+
+    if (Array.isArray(stored.scenes)) {
+      for (let i = 0, len = stored.scenes.length; i < len; i++) {
+        const scene = normalizeScene(stored.scenes[i]);
+
+        if (scene) {
+          commit("ADD_SCENE", {
+            ...scene,
+            ...normalizeSceneTiming(scene, performanceForTiming),
+          });
+        }
+      }
+    }
+
     if (storedPerformance) {
       commit("UPDATE_PERFORMANCE", {
-        ...normalizePerformanceData(storedPerformance),
+        ...performanceForTiming,
         currentSceneId: state.performance.currentSceneId,
       });
     }
@@ -821,7 +847,7 @@ const actions = {
    * The Electron main process (media manager watcher) discovers the files;
    * this reads their contents, mirroring how presets are loaded.
    */
-  async loadScenesFromDisk({ commit, rootState }) {
+  async loadScenesFromDisk({ commit, state, rootState }) {
     const { media, path: mediaPath } = rootState.media;
     const project = rootState.projects.currentProject;
 
@@ -841,7 +867,10 @@ const actions = {
         const scene = normalizeScene(JSON.parse(fileBuffer.toString()));
 
         if (scene) {
-          commit("ADD_SCENE", scene);
+          commit("ADD_SCENE", {
+            ...scene,
+            ...normalizeSceneTiming(scene, state.performance),
+          });
         }
       } catch (e) {
         console.error(`Could not load scene "${item.name}"`, e);
@@ -911,8 +940,14 @@ const actions = {
     return JSON.parse(JSON.stringify(scene));
   },
 
-  updatePerformance({ commit }, data) {
-    commit("UPDATE_PERFORMANCE", normalizePerformanceData(data));
+  updatePerformance({ commit, state }, data) {
+    commit(
+      "UPDATE_PERFORMANCE",
+      normalizePerformanceTiming({
+        ...state.performance,
+        ...normalizePerformanceData(data),
+      }),
+    );
   },
 
   /**
@@ -925,7 +960,10 @@ const actions = {
    * the dwell timer alone cycles scenes at maxSeconds.
    */
   async tick({ commit, state, dispatch }, { delta }) {
-    const dt = Math.min(0.1, (delta || 0) / 1000);
+    const numericDelta = Number(delta);
+    const dt = Number.isFinite(numericDelta)
+      ? Math.max(0, Math.min(0.1, numericDelta / 1000))
+      : 0;
 
     if (transition) {
       transition.elapsed += dt;
@@ -965,10 +1003,16 @@ const actions = {
         }
 
         transition = null;
+        dwell = 0;
+        phrase = createPhraseState();
 
         await cleanupPendingGroups();
         commit("SET_TRANSITIONING", false);
       }
+
+      // Dwell only starts once the crossfade has finished, so time spent
+      // transitioning never counts towards the next Scene's timing window.
+      return;
     }
 
     const performance = state.performance;
@@ -983,9 +1027,7 @@ const actions = {
     );
 
     if (!currentScene || !isSceneEnabled(currentScene)) {
-      if (!transition) {
-        await dispatch("nextScene");
-      }
+      await dispatch("nextScene");
 
       return;
     }
@@ -1000,8 +1042,10 @@ const actions = {
     const phraseUpdate = updatePhrase(phrase, bass, dt);
     phrase = phraseUpdate.state;
 
-    const minSeconds = currentScene?.minSeconds ?? performance.minSeconds;
-    const maxSeconds = currentScene?.maxSeconds ?? performance.maxSeconds;
+    const { minSeconds, maxSeconds } = resolveSceneTiming(
+      currentScene,
+      performance,
+    );
 
     dwell += dt;
 
@@ -1009,7 +1053,7 @@ const actions = {
     const musical = phraseUpdate.flipped && Math.random() < chance;
     const forced = dwell >= maxSeconds;
 
-    if ((musical || forced) && !transition) {
+    if (musical || forced) {
       dwell = 0;
       phrase = { ...phrase, t: 0 };
 
