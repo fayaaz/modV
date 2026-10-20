@@ -114,11 +114,21 @@ async function start() {
       }
     }
 
-    commitQueue.push(mutation);
+    // Snapshot the payload now. Queued payloads reference live store objects
+    // (Group and Module snapshots are mutated by later commits), so serialising
+    // only when the queue is sent replays those later changes on top of the
+    // earlier commit and duplicates entries in the renderer's mirror store.
+    try {
+      commitQueue.push(
+        JSON.stringify({ type: mutationType, payload: mutationPayload }),
+      );
+    } catch (e) {
+      console.error(`Could not serialise ${mutationType} for the renderer`, e);
+    }
   });
 
   function sendCommitQueue() {
-    const commits = JSON.stringify(commitQueue);
+    const commits = `[${commitQueue.join(",")}]`;
     commitQueue.splice(0, commitQueue.length);
 
     self.postMessage({
@@ -126,6 +136,30 @@ async function start() {
       payload: commits,
     });
   }
+
+  // Keep the Scene list in the user data folder so it survives restarts. The
+  // renderer hydrates it on startup; this only writes after mutations settle.
+  let scenesPersistTimer = null;
+
+  store.subscribe((mutation) => {
+    if (!mutation.type.startsWith("scenes/")) {
+      return;
+    }
+
+    if (
+      mutation.type === "scenes/SET_TRANSITIONING" ||
+      mutation.type === "scenes/SET_DEFAULTS_SEEDED"
+    ) {
+      return;
+    }
+
+    clearTimeout(scenesPersistTimer);
+    scenesPersistTimer = setTimeout(() => {
+      store.dispatch("scenes/persistScenes").catch((e) => {
+        console.error("Could not persist Scenes", e);
+      });
+    }, 400);
+  });
 
   store.dispatch("plugins/add", grabCanvasPlugin);
 
@@ -186,7 +220,12 @@ async function start() {
   const shaderModules = import.meta.glob("../renderers/shader/modules/*.js");
   for (const pathKey in shaderModules) {
     const mod = await shaderModules[pathKey]();
-    modulesToRegister.push(mod.default);
+
+    if (Array.isArray(mod.default)) {
+      modulesToRegister.push(...mod.default);
+    } else {
+      modulesToRegister.push(mod.default);
+    }
   }
 
   // Import ISF modules
@@ -523,10 +562,11 @@ async function start() {
 
 function handleDirname(e) {
   const message = e.data;
-  const { type, payload } = message;
+  const { type, payload, userData } = message;
 
   if (type === "__dirname") {
     self.__dirname = payload;
+    self.__userData = userData;
 
     self.removeEventListener("message", handleDirname);
     start();

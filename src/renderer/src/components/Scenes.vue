@@ -13,10 +13,25 @@
         <grid columns="6">
           <c span="2">Performance mode</c>
           <c span="4">
+            <Button class="light scenes__performanceButton" @click="togglePerformance">
+              {{ autopilotEnabled ? "Stop performance" : "Start performance" }}
+            </Button>
             <Checkbox
               v-model="autopilotEnabled"
               class="scenes__autopilotCheckbox"
             />
+          </c>
+        </grid>
+      </c>
+
+      <c span="1..">
+        <grid columns="6">
+          <c span="2">Scene order</c>
+          <c span="4">
+            <Select v-model="sceneOrder" class="scenes__orderSelect">
+              <option value="in-order">In order</option>
+              <option value="random">Random</option>
+            </Select>
           </c>
         </grid>
       </c>
@@ -96,7 +111,10 @@
         v-for="scene in scenes"
         :key="scene.id"
         class="scene"
-        :class="{ 'scene--current': scene.id === autopilot.currentSceneId }"
+        :class="{
+          'scene--current': scene.id === autopilot.currentSceneId,
+          'scene--disabled': scene.enabled === false,
+        }"
       >
         <div class="scene__details">
           <div class="scene__name" @dblclick="startSceneRename(scene)">
@@ -135,6 +153,13 @@
           </div>
         </div>
         <div class="scene__controls">
+          <label class="scene__enabled">
+            <Checkbox
+              :model-value="scene.enabled !== false"
+              @update:model-value="(value) => setSceneEnabled(scene, value)"
+            />
+            <span>Enabled</span>
+          </label>
           <Button class="light" @click="applyScene(scene)">Apply</Button>
           <Button class="light" @click="removeScene(scene)">Delete</Button>
         </div>
@@ -174,7 +199,7 @@ export default {
     return {
       iVTitle: "Scenes",
       iVBody:
-        "Scenes are snapshots of the Groups tab: every Group, its settings and its Modules can be saved and reloaded as a whole. Performance mode switches between Scenes on musical phrase changes detected from the bass audio band, transitioning all Groups between Scenes. Scenes are saved as JSON in the current project's scene folder.",
+        "Scenes are snapshots of the Groups tab: every Group, its settings and its Modules can be saved and reloaded as a whole. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and transitioning all Groups between Scenes. Scenes are saved as JSON in the current project's scene folder.",
       newSceneName: "",
       editingSceneId: null,
       localSceneName: "",
@@ -212,6 +237,16 @@ export default {
 
       set(value) {
         this.$modV.store.dispatch("scenes/setAutopilot", { enabled: value });
+      },
+    },
+
+    sceneOrder: {
+      get() {
+        return this.autopilot.order || "in-order";
+      },
+
+      set(value) {
+        this.$modV.store.dispatch("scenes/updateAutopilot", { order: value });
       },
     },
 
@@ -420,16 +455,26 @@ export default {
     },
 
     nextScene() {
-      if (!this.scenes.length) {
-        return;
-      }
+      this.$modV.store.dispatch("scenes/nextScene");
+    },
 
-      const currentIndex = this.scenes.findIndex(
-        (scene) => scene.id === this.autopilot.currentSceneId,
+    togglePerformance() {
+      this.$modV.store.dispatch(
+        this.autopilotEnabled
+          ? "scenes/stopPerformance"
+          : "scenes/startPerformance",
       );
-      const nextIndex = (currentIndex + 1) % this.scenes.length;
+    },
 
-      this.applyScene(this.scenes[nextIndex]);
+    async setSceneEnabled(scene, enabled) {
+      const updatedScene = await this.$modV.store.dispatch(
+        "scenes/setSceneEnabled",
+        { sceneId: scene.id, enabled },
+      );
+
+      if (updatedScene) {
+        this.persistScene(updatedScene, 300);
+      }
     },
 
     async saveCurrentAsScene() {
@@ -510,6 +555,27 @@ div.scene {
 
 div.scene--current {
   border-left-color: #00c0ff;
+}
+
+div.scene--disabled {
+  opacity: 0.45;
+}
+
+label.scene__enabled {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+  user-select: none;
+}
+
+button.scenes__performanceButton {
+  margin-right: 8px;
+}
+
+select.scenes__orderSelect {
+  width: 100%;
 }
 
 div.scene__name {

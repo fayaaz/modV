@@ -75,6 +75,7 @@ class ModV {
     this.$worker.postMessage({
       type: "__dirname",
       payload: app.getAppPath(),
+      userData: app.getPath("userData"),
     });
 
     this.$worker.addEventListener("message", async (e) => {
@@ -120,6 +121,13 @@ class ModV {
       if (type === "worker-setup-complete") {
         // Make the default group
         this.store.dispatch("groups/createGroup", { enabled: GROUP_ENABLED });
+
+        this.store
+          .dispatch("scenes/hydrateScenes")
+          .then(() => this.store.dispatch("scenes/ensureDefaultScenes"))
+          .catch((e) => {
+            console.error("Could not restore Scenes", e);
+          });
 
         this.store.dispatch("osc/createServer", {
           host: "0.0.0.0",

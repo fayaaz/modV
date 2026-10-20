@@ -1,12 +1,13 @@
 /* eslint-env worker */
 import store from "../";
-import constants from "../../../constants";
+import constants, { GROUP_ENABLED } from "../../../constants";
 import { v4 as uuidv4 } from "uuid";
 import {
   createPhraseState,
   switchChance,
   updatePhrase,
 } from "../../phrase-detector";
+import DEFAULT_SCENES from "../default-scenes";
 
 const fs = require("fs");
 const path = require("path");
@@ -29,6 +30,7 @@ const path = require("path");
 function getDefaultState() {
   return {
     scenes: [],
+    defaultsSeeded: false,
     autopilot: {
       enabled: false,
       currentSceneId: null,
@@ -36,6 +38,7 @@ function getDefaultState() {
       maxSeconds: 24,
       transitionSeconds: 2,
       transition: "Fade",
+      order: "in-order",
     },
     transitioning: false,
   };
@@ -86,6 +89,40 @@ function isGalleryGroup(group) {
   return group.name === constants.GALLERY_GROUP_NAME;
 }
 
+function isSceneEnabled(scene) {
+  return scene.enabled !== false;
+}
+
+function getEnabledScenes(scenes) {
+  return scenes.filter(isSceneEnabled);
+}
+
+function pickNextScene(scenes, currentSceneId, order) {
+  const enabledScenes = getEnabledScenes(scenes);
+
+  if (!enabledScenes.length) {
+    return null;
+  }
+
+  if (enabledScenes.length === 1) {
+    return enabledScenes[0];
+  }
+
+  if (order === "random") {
+    const pool = enabledScenes.filter((scene) => scene.id !== currentSceneId);
+
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  const currentIndex = enabledScenes.findIndex(
+    (scene) => scene.id === currentSceneId,
+  );
+  const nextIndex =
+    currentIndex === -1 ? 0 : (currentIndex + 1) % enabledScenes.length;
+
+  return enabledScenes[nextIndex];
+}
+
 /**
  * Scenes saved before the Groups snapshot format used a single Group and a
  * flat `layers` array. Turn those into the current shape when loading.
@@ -125,6 +162,188 @@ function normalizeScene(scene) {
     ],
     modules,
   };
+}
+
+const SCENES_STORAGE_FILENAME = "scenes.json";
+
+function getScenesStoragePath() {
+  if (!self.__userData) {
+    return null;
+  }
+
+  return path.join(self.__userData, SCENES_STORAGE_FILENAME);
+}
+
+async function readStoredScenes() {
+  const filePath = getScenesStoragePath();
+
+  if (!filePath) {
+    return null;
+  }
+
+  try {
+    const fileBuffer = await fs.promises.readFile(filePath);
+    const stored = JSON.parse(fileBuffer.toString());
+
+    return stored && typeof stored === "object" ? stored : null;
+  } catch (e) {
+    if (e.code !== "ENOENT") {
+      console.error("Could not read the saved Scene list", e);
+    }
+
+    return null;
+  }
+}
+
+async function writeStoredScenes(state) {
+  const filePath = getScenesStoragePath();
+
+  if (!filePath) {
+    return;
+  }
+
+  const autopilot = { ...state.autopilot };
+  delete autopilot.currentSceneId;
+
+  const payload = {
+    version: 1,
+    defaultsSeeded: !!state.defaultsSeeded,
+    scenes: JSON.parse(JSON.stringify(state.scenes)),
+    autopilot,
+  };
+
+  try {
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, JSON.stringify(payload));
+  } catch (e) {
+    console.error("Could not save the Scene list", e);
+  }
+}
+
+/**
+ * Builds a Scene snapshot from a declarative definition by briefly creating the
+ * Groups and Modules in the live store, then tearing them down again. This
+ * keeps the default Scenes independent of the internal Module/Group snapshot
+ * shape: they are produced by the same code path as a user-saved Scene.
+ */
+async function buildSceneSnapshot(definition) {
+  const createdGroupIds = [];
+
+  try {
+    for (let i = 0, len = definition.groups.length; i < len; i++) {
+      const groupDefinition = definition.groups[i];
+      const group = await store.dispatch("groups/createGroup", {
+        name: groupDefinition.name,
+        enabled: GROUP_ENABLED,
+        inherit: groupDefinition.inherit ?? true,
+        inheritFrom: -1,
+        clearing: groupDefinition.clearing ?? true,
+        alpha: groupDefinition.alpha ?? 1,
+        compositeOperation: groupDefinition.compositeOperation || "normal",
+        pipeline: groupDefinition.pipeline ?? false,
+      });
+
+      createdGroupIds.push(group.id);
+
+      const moduleDefinitions = groupDefinition.modules || [];
+
+      for (
+        let j = 0, moduleLen = moduleDefinitions.length;
+        j < moduleLen;
+        j++
+      ) {
+        const moduleDefinition = moduleDefinitions[j];
+
+        if (!store.state.modules.registered[moduleDefinition.name]) {
+          console.warn(
+            `Default Scene "${definition.name}" could not find Module "${moduleDefinition.name}"`,
+          );
+          continue;
+        }
+
+        const module = await store.dispatch("modules/makeActiveModule", {
+          moduleName: moduleDefinition.name,
+          moduleMeta: {
+            enabled: true,
+            ...(moduleDefinition.meta || {}),
+          },
+        });
+
+        if (!module) {
+          continue;
+        }
+
+        store.commit("groups/ADD_MODULE_TO_GROUP", {
+          moduleId: module.$id,
+          groupId: group.id,
+        });
+
+        const propNames = Object.keys(moduleDefinition.props || {});
+
+        for (let k = 0, propLen = propNames.length; k < propLen; k++) {
+          const propName = propNames[k];
+
+          if (!module.$props[propName]) {
+            continue;
+          }
+
+          await store.dispatch("modules/updateProp", {
+            moduleId: module.$id,
+            prop: propName,
+            data: moduleDefinition.props[propName],
+          });
+        }
+      }
+    }
+
+    const groupSnapshots = [];
+    const moduleIds = [];
+
+    for (let i = 0, len = createdGroupIds.length; i < len; i++) {
+      const group = store.getters["groups/getById"](createdGroupIds[i]);
+
+      if (!group) {
+        continue;
+      }
+
+      const snapshot = { ...group };
+      delete snapshot.context;
+      delete snapshot.sceneId;
+      groupSnapshots.push(JSON.parse(JSON.stringify(snapshot)));
+      moduleIds.push(...group.modules);
+    }
+
+    const presetData = await store.dispatch("modules/createPresetData");
+    const moduleSnapshots = {};
+
+    for (let i = 0, len = moduleIds.length; i < len; i++) {
+      const moduleId = moduleIds[i];
+
+      if (presetData[moduleId]) {
+        moduleSnapshots[moduleId] = presetData[moduleId];
+      }
+    }
+
+    return {
+      id: uuidv4(),
+      name: definition.name,
+      enabled: definition.enabled !== false,
+      minSeconds: definition.minSeconds,
+      maxSeconds: definition.maxSeconds,
+      groups: groupSnapshots,
+      modules: moduleSnapshots,
+    };
+  } finally {
+    for (let i = 0, len = createdGroupIds.length; i < len; i++) {
+      try {
+        await store.dispatch("groups/removeGroup", {
+          groupId: createdGroupIds[i],
+        });
+      } catch (e) {
+        console.error("Could not clean up a default Scene Group", e);
+      }
+    }
+  }
 }
 
 async function cleanupPendingGroups() {
@@ -184,6 +403,7 @@ const actions = {
     const scene = {
       id: uuidv4(),
       name,
+      enabled: true,
       minSeconds: state.autopilot.minSeconds,
       maxSeconds: state.autopilot.maxSeconds,
       groups: JSON.parse(JSON.stringify(groups)),
@@ -442,6 +662,75 @@ const actions = {
   },
 
   /**
+   * Restores the Scene list that was persisted to the app's user data folder
+   * by a previous session.
+   */
+  async hydrateScenes({ commit, state }) {
+    const stored = await readStoredScenes();
+
+    if (!stored) {
+      return;
+    }
+
+    if (Array.isArray(stored.scenes)) {
+      for (let i = 0, len = stored.scenes.length; i < len; i++) {
+        const scene = normalizeScene(stored.scenes[i]);
+
+        if (scene) {
+          commit("ADD_SCENE", scene);
+        }
+      }
+    }
+
+    if (stored.autopilot && typeof stored.autopilot === "object") {
+      commit("UPDATE_AUTOPILOT", {
+        ...stored.autopilot,
+        currentSceneId: state.autopilot.currentSceneId,
+      });
+    }
+
+    if (stored.defaultsSeeded) {
+      commit("SET_DEFAULTS_SEEDED", true);
+    }
+  },
+
+  /**
+   * Seeds the ready-to-go music reactive Scenes on first run. The list is
+   * layered into Background / Foreground / Effects Groups, built with the same
+   * snapshot path as a user-saved Scene.
+   */
+  async ensureDefaultScenes({ commit, dispatch, state }) {
+    if (state.defaultsSeeded) {
+      return;
+    }
+
+    commit("SET_DEFAULTS_SEEDED", true);
+
+    if (!state.scenes.length) {
+      for (let i = 0, len = DEFAULT_SCENES.length; i < len; i++) {
+        try {
+          const scene = await buildSceneSnapshot(DEFAULT_SCENES[i]);
+
+          if (scene) {
+            commit("ADD_SCENE", scene);
+          }
+        } catch (e) {
+          console.error(
+            `Could not create default Scene "${DEFAULT_SCENES[i].name}"`,
+            e,
+          );
+        }
+      }
+    }
+
+    await dispatch("persistScenes");
+  },
+
+  async persistScenes({ state }) {
+    await writeStoredScenes(state);
+  },
+
+  /**
    * Reads saved Scene JSON files from the current project's scene folder.
    * The Electron main process (media manager watcher) discovers the files;
    * this reads their contents, mirroring how presets are loaded.
@@ -479,6 +768,61 @@ const actions = {
     phrase = createPhraseState();
 
     commit("UPDATE_AUTOPILOT", { enabled });
+  },
+
+  async startPerformance({ commit, state, dispatch }) {
+    dwell = 0;
+    phrase = createPhraseState();
+
+    commit("UPDATE_AUTOPILOT", { enabled: true });
+
+    const enabledScenes = getEnabledScenes(state.scenes);
+
+    if (!enabledScenes.length) {
+      return;
+    }
+
+    const currentSceneEnabled = enabledScenes.some(
+      (scene) => scene.id === state.autopilot.currentSceneId,
+    );
+
+    if (!currentSceneEnabled) {
+      await dispatch("nextScene");
+    }
+  },
+
+  stopPerformance({ commit }) {
+    dwell = 0;
+    commit("UPDATE_AUTOPILOT", { enabled: false });
+  },
+
+  async nextScene({ state, dispatch }) {
+    const scene = pickNextScene(
+      state.scenes,
+      state.autopilot.currentSceneId,
+      state.autopilot.order,
+    );
+
+    if (!scene) {
+      return;
+    }
+
+    await dispatch("applyScene", { sceneId: scene.id });
+  },
+
+  setSceneEnabled({ commit, state }, { sceneId, enabled }) {
+    const scene = state.scenes.find((item) => item.id === sceneId);
+
+    if (!scene) {
+      return null;
+    }
+
+    commit("UPDATE_SCENE", {
+      sceneId,
+      data: { enabled: !!enabled },
+    });
+
+    return JSON.parse(JSON.stringify(scene));
   },
 
   updateAutopilot({ commit }, data) {
@@ -542,8 +886,25 @@ const actions = {
     }
 
     const autopilot = state.autopilot;
+    const enabledScenes = getEnabledScenes(state.scenes);
 
-    if (!autopilot.enabled || state.scenes.length < 2) {
+    if (!autopilot.enabled || !enabledScenes.length) {
+      return;
+    }
+
+    const currentScene = state.scenes.find(
+      (scene) => scene.id === autopilot.currentSceneId,
+    );
+
+    if (!currentScene || !isSceneEnabled(currentScene)) {
+      if (!transition) {
+        await dispatch("nextScene");
+      }
+
+      return;
+    }
+
+    if (enabledScenes.length < 2) {
       return;
     }
 
@@ -553,9 +914,6 @@ const actions = {
     const phraseUpdate = updatePhrase(phrase, bass, dt);
     phrase = phraseUpdate.state;
 
-    const currentScene = state.scenes.find(
-      (scene) => scene.id === autopilot.currentSceneId,
-    );
     const minSeconds = currentScene?.minSeconds ?? autopilot.minSeconds;
     const maxSeconds = currentScene?.maxSeconds ?? autopilot.maxSeconds;
 
@@ -569,13 +927,7 @@ const actions = {
       dwell = 0;
       phrase = { ...phrase, t: 0 };
 
-      const currentIndex = state.scenes.findIndex(
-        (scene) => scene.id === autopilot.currentSceneId,
-      );
-
-      const nextIndex = (currentIndex + 1) % state.scenes.length;
-
-      await dispatch("applyScene", { sceneId: state.scenes[nextIndex].id });
+      await dispatch("nextScene");
     }
   },
 };
@@ -614,6 +966,10 @@ const mutations = {
 
   SET_TRANSITIONING(state, transitioning) {
     state.transitioning = transitioning;
+  },
+
+  SET_DEFAULTS_SEEDED(state, defaultsSeeded) {
+    state.defaultsSeeded = defaultsSeeded;
   },
 
   RESET_STATE(state) {

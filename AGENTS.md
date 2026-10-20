@@ -7,10 +7,9 @@ modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **
 - `yarn` — install. `postinstall` runs `patch-package && electron-builder install-app-deps`.
 - `npm run dev` — electron-vite dev with HMR. For CDP attach: `npm run dev -- --remote-debugging-port=9223`.
 - `npm run build` — bundle main / preload / renderer into `out/`.
-- `npm run build:linux` — local `build` + `electron-builder --linux` → `dist/modv-vite-<version>.AppImage`, `.deb`.
-- `npm run build:linux:docker` — Dockerised Linux build (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version.
+- `npm run build:linux:docker` — **the canonical Linux build** (see `Dockerfile`); writes the AppImage and `.deb` into `dist/`. Also used by CI. Set `APP_VERSION` to override the version. Do not use a local `electron-builder` build.
 - `npm run lint` — `eslint . --fix` (Prettier runs through ESLint).
-- `npm run test:e2e` — Playwright. **Requires `npm run build:linux` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `npx playwright test tests/e2e/spec/<name>.spec.js`.
+- `npm run test:e2e` — Playwright. **Requires `npm run build:linux:docker` first**: the page object launches the built app from `./dist` via `findLatestBuild`. Single spec: `npx playwright test tests/e2e/spec/<name>.spec.js`.
 
 CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `npm run lint` locally.
 
@@ -47,7 +46,7 @@ Presets: store modules implement `createPresetData`/`loadPresetData`; the worker
 Gotchas:
 
 - WebGPU presentation uses `canvas.transferToImageBitmap()` with a `readRenderTargetPixelsAsync` fallback — full-frame readback costs ~9 ms/frame at 640×480, transfer ~0.3 ms.
-- Chromium caps the process at **6 WebGL contexts** (`max-active-webgl-contexts` in `src/main/index.js`), so the adapter disposes idle scenes (`MAX_LIVE_INSTANCES = 4`, idle > 3 s).
+- `max-active-webgl-contexts` is **16** (`src/main/index.js`). The shared shader/gallery-shader/ISF/gallery-ISF/three renderers already hold five contexts; the old cap of 6 left no room for Point10 and force-lost the ISF contexts, so effects silently stopped applying. The adapter still disposes idle scenes (`MAX_LIVE_INSTANCES = 4`, idle > 3 s).
 - Textures: `import url from "../textures/foo.jpg?url"` then `loadTexture(url)` — `fetch()` in dev, `fs.readFileSync` for `file://` (asar) in the packaged worker.
 - `three` is `^0.185.1` everywhere: WebGL code imports `three`, WebGPU code imports `three/webgpu`, addons come from `three/addons/...`. The main process enables `Vulkan,WebGPU` + `enable-unsafe-webgpu`.
 
@@ -71,7 +70,7 @@ Gotchas:
 - The worker runs with `nodeIntegrationInWorker: true` (`src/main/window-prefs.js`), so worker code may `require("fs")`/`require("path")`.
 - Native deps: `grandiose` (NDI) needs libndi on Linux; `grandiose` and `ffmpeg-fluent` are `asarUnpack`ed (see `electron-builder.yml`). The `Dockerfile` installs the NDI SDK and aliases the `libndi.so.5.6.1` soname to the `libndi.so.5.1.1` its `binding.gyp` pins. Windows needs the node-gyp toolchain — **WSL/WSL2 is unsupported**.
 - `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `yarn remove <pkg>`, run `yarn` again to reapply patches (see issue #554).
-- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `scripts/build-linux-docker.sh` wraps that for local use.
+- electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `npm run build:linux:docker` (wrapping `scripts/build-linux-docker.sh`) is the supported local build. Do not run `electron-builder` locally.
 
 ## Release
 

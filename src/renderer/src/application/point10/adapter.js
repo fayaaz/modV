@@ -19,8 +19,8 @@ import { RESPONSIVENESS_PROPS, readLevers } from "./props.js";
 
 const instances = new Map();
 
-// Every live scene holds its own GPU context (modV caps the process at 6 -
-// src/main/index.js), its own canvas backing store and its own scene graph.
+// Every live scene holds its own GPU context (src/main/index.js allows 16
+// active contexts), its own canvas backing store and its own scene graph.
 // Gallery hovers and removed modules would otherwise accumulate forever, so the
 // adapter keeps only the most recently drawn scenes and disposes the rest.
 const MAX_LIVE_INSTANCES = 4;
@@ -84,10 +84,10 @@ function evictInstances(now) {
 }
 
 // Gallery previews are shown one at a time (GalleryItem focus enables a single
-// scene), but every preview owns a WebGL context. Chromium caps the process at
-// 6 active contexts, so letting previews accumulate force-loses the ISF/three
-// contexts - ISF effects then silently stop rendering. Keep at most one
-// gallery preview alive: the next hovered scene recycles it.
+// scene), but every preview owns a WebGL context. Letting previews accumulate
+// force-loses the shared ISF/three contexts - ISF effects then silently stop
+// rendering. Keep at most one gallery preview alive: the next hovered scene
+// recycles it.
 function evictGalleryInstances(keepId) {
   const ids = Array.from(instances.keys());
 
