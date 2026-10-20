@@ -59,12 +59,14 @@ Gotchas:
 ## Audio
 
 - `src/renderer/src/application/audio-bands.js` — AGC-normalised `bass`/`mid`/`treble` plus 16 log-spaced band cells; published to `store.state.meyda.bands` via `meyda/SET_BANDS`.
-- `src/renderer/src/application/worker/phrase-detector.js` — dependency-free phrase/drop detector used by the scene autopilot.
+- `src/renderer/src/application/worker/phrase-detector.js` — dependency-free phrase/drop detector used by performance mode.
+- `src/renderer/src/application/tempo-detector.js` — onset-envelope/autocorrelation BPM tracker used by `setup-beat-detektor.js`; resolves octave ambiguity so fast (170+ BPM) material is not reported as half time.
 
-## Scenes & autopilot
+## Scenes & performance mode
 
-- `worker/store/modules/scenes.js` — `applyScene`, `removeScene`, `setAutopilot`, `updateAutopilot`, `loadScenesFromDisk`; `worker/loop.js` dispatches `scenes/tick` every frame for crossfades/autopilot.
-- `autopilot.allowedTransitions` is a list of transition names; each scene change picks one at random (legacy single `transition` values migrate to a one-item list). Fade is the fallback when the list is empty or unavailable.
+- `worker/store/modules/scenes.js` — `applyScene`, `removeScene`, `setPerformanceEnabled`, `updatePerformance`, `loadScenesFromDisk`; `worker/loop.js` dispatches `scenes/tick` every frame for crossfades/performance mode.
+- `performance.allowedTransitions` is a list of transition names; each scene change picks one at random (legacy single `transition` values migrate to a one-item list). Fade is the fallback when the list is empty or unavailable.
+- Global performance timing applies to Scenes without an explicit per-Scene override (`timingOverride`); editing a Scene's Time fields creates an override. Dwell only advances while no transition is running.
 - Scene JSON lives in the project media directory under `scene/` (read/save handlers in `src/main/media-manager/`, `delete-scene` IPC in `src/main/window-prefs.js`). UI: `src/renderer/src/components/Scenes.vue`.
 
 ## Lint & formatting
