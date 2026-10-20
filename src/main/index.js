@@ -13,7 +13,14 @@ import { createWindow } from "./windows";
 
 require("@electron/remote/main").initialize();
 
-app.commandLine.appendSwitch("max-active-webgl-contexts", 6);
+// modV's shader, gallery-shader, ISF, gallery-ISF and three renderers already
+// hold five long-lived WebGL contexts. The old cap of 6 left no room for the
+// Point10 scenes or the transition shader, and Chromium silently force-lost
+// the ISF contexts - imported layers rendered but their effects stopped
+// applying. Point10 keeps at most four live scene contexts (see
+// application/point10/adapter.js), so 16 leaves headroom for the layers, the
+// gallery preview and a transition.
+app.commandLine.appendSwitch("max-active-webgl-contexts", 16);
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows", "true");
 app.commandLine.appendSwitch("disable-background-timer-throttling", "true");
 app.commandLine.appendSwitch("disable-renderer-backgrounding", "true");

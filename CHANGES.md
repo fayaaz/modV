@@ -3,3 +3,4 @@
 - Import scenes to be able to use as layers from Point10 - my own custom visualiser (~/Documents/musicvis) - add levers to change music responsiveness
 - Improved audio reactivity. Allow us to link parameters such as bass, mid, treble.
 - Automatic bpm from audio
+- When
