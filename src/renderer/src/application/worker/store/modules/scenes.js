@@ -13,7 +13,12 @@ import {
   NONE_TRANSITION,
   NATIVE_TRANSITION_NAMES,
 } from "../../../scene-transition-defs";
-import DEFAULT_SCENES from "../default-scenes";
+import DEFAULT_SCENES, {
+  DEFAULTS_VERSION,
+  LEGACY_DEFAULTS_VERSION,
+  getDefaultSceneNamesUpTo,
+  getScenesToSeed,
+} from "../default-scenes";
 import {
   normalizePerformanceTiming,
   normalizeSceneTiming,
@@ -38,10 +43,54 @@ const path = require("path");
 /**
  * @returns {Object}
  */
+function getSceneNameKey(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeDefaultSceneNames(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const names = [];
+  const seen = new Set();
+
+  for (let i = 0, len = value.length; i < len; i++) {
+    const name = value[i];
+
+    if (typeof name !== "string" || !name.trim()) {
+      continue;
+    }
+
+    const key = getSceneNameKey(name);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      names.push(name);
+    }
+  }
+
+  return names;
+}
+
+function normalizeDefaultsVersion(value) {
+  const version = Number(value);
+
+  if (!Number.isFinite(version) || version < 0) {
+    return null;
+  }
+
+  return Math.floor(version);
+}
+
 function getDefaultState() {
   return {
     scenes: [],
     defaultsSeeded: false,
+    defaultsVersion: 0,
+    seededDefaultScenes: [],
     performance: {
       enabled: false,
       currentSceneId: null,
@@ -298,6 +347,8 @@ async function writeStoredScenes(state) {
   const payload = {
     version: 1,
     defaultsSeeded: !!state.defaultsSeeded,
+    defaultsVersion: state.defaultsVersion || 0,
+    seededDefaultScenes: [...state.seededDefaultScenes],
     scenes: JSON.parse(JSON.stringify(state.scenes)),
     performance,
   };
@@ -807,39 +858,103 @@ const actions = {
       });
     }
 
-    if (stored.defaultsSeeded) {
+    const storedDefaultsVersion = normalizeDefaultsVersion(
+      stored.defaultsVersion,
+    );
+    const defaultsVersion =
+      storedDefaultsVersion === null
+        ? stored.defaultsSeeded
+          ? LEGACY_DEFAULTS_VERSION
+          : 0
+        : storedDefaultsVersion;
+    let seededDefaultScenes = normalizeDefaultSceneNames(
+      stored.seededDefaultScenes,
+    );
+
+    // Files written before versioned defaults only have `defaultsSeeded`.
+    // Assume every default available at that time was seeded, so a default the
+    // user deleted is not resurrected by the first versioned run.
+    if (!seededDefaultScenes.length && defaultsVersion > 0) {
+      seededDefaultScenes = getDefaultSceneNamesUpTo(defaultsVersion);
+    }
+
+    if (defaultsVersion > 0) {
+      commit("SET_DEFAULTS_VERSION", defaultsVersion);
+    }
+
+    if (seededDefaultScenes.length) {
+      commit("SET_SEEDED_DEFAULT_SCENES", seededDefaultScenes);
+    }
+
+    if (
+      stored.defaultsSeeded ||
+      defaultsVersion > 0 ||
+      seededDefaultScenes.length
+    ) {
       commit("SET_DEFAULTS_SEEDED", true);
     }
   },
 
   /**
-   * Seeds the ready-to-go music reactive Scenes on first run. The list is
-   * layered into Background / Foreground / Effects Groups, built with the same
-   * snapshot path as a user-saved Scene.
+   * Seeds the ready-to-go music reactive Scenes on first run and appends any
+   * defaults introduced since the user's last seeding pass. Seeded names are
+   * remembered so deleting a default Scene does not bring it back.
    */
   async ensureDefaultScenes({ commit, dispatch, state }) {
-    if (state.defaultsSeeded) {
-      return;
-    }
+    const currentVersion = normalizeDefaultsVersion(state.defaultsVersion) || 0;
+    const seededDefaultScenes = normalizeDefaultSceneNames(
+      state.seededDefaultScenes,
+    );
+    const seededKeys = new Set(seededDefaultScenes.map(getSceneNameKey));
+    const existingNames = state.scenes.map((scene) => scene.name);
+    const existingKeys = new Set(existingNames.map(getSceneNameKey));
+    const scenesToSeed = getScenesToSeed({
+      defaultsVersion: currentVersion,
+      seededNames: seededDefaultScenes,
+      existingNames,
+    });
+    let failed = false;
 
-    commit("SET_DEFAULTS_SEEDED", true);
+    for (let i = 0, len = scenesToSeed.length; i < len; i++) {
+      const definition = scenesToSeed[i];
 
-    if (!state.scenes.length) {
-      for (let i = 0, len = DEFAULT_SCENES.length; i < len; i++) {
-        try {
-          const scene = await buildSceneSnapshot(DEFAULT_SCENES[i]);
+      try {
+        const scene = await buildSceneSnapshot(definition);
 
-          if (scene) {
-            commit("ADD_SCENE", scene);
+        if (scene) {
+          commit("ADD_SCENE", scene);
+
+          const key = getSceneNameKey(definition.name);
+
+          if (!seededKeys.has(key)) {
+            seededKeys.add(key);
+            seededDefaultScenes.push(definition.name);
           }
-        } catch (e) {
-          console.error(
-            `Could not create default Scene "${DEFAULT_SCENES[i].name}"`,
-            e,
-          );
         }
+      } catch (e) {
+        failed = true;
+        console.error(`Could not create default Scene "${definition.name}"`, e);
       }
     }
+
+    // A user Scene may already use a default's name. Treat it as seeded so
+    // deleting it later doesn't cause the default to reappear.
+    for (let i = 0, len = DEFAULT_SCENES.length; i < len; i++) {
+      const definition = DEFAULT_SCENES[i];
+      const key = getSceneNameKey(definition.name);
+
+      if (!seededKeys.has(key) && existingKeys.has(key)) {
+        seededKeys.add(key);
+        seededDefaultScenes.push(definition.name);
+      }
+    }
+
+    commit("SET_SEEDED_DEFAULT_SCENES", seededDefaultScenes);
+    commit("SET_DEFAULTS_SEEDED", true);
+    commit(
+      "SET_DEFAULTS_VERSION",
+      failed ? currentVersion : Math.max(DEFAULTS_VERSION, currentVersion),
+    );
 
     await dispatch("persistScenes");
   },
@@ -1123,6 +1238,14 @@ const mutations = {
 
   SET_DEFAULTS_SEEDED(state, defaultsSeeded) {
     state.defaultsSeeded = defaultsSeeded;
+  },
+
+  SET_DEFAULTS_VERSION(state, defaultsVersion) {
+    state.defaultsVersion = normalizeDefaultsVersion(defaultsVersion) || 0;
+  },
+
+  SET_SEEDED_DEFAULT_SCENES(state, names) {
+    state.seededDefaultScenes = normalizeDefaultSceneNames(names);
   },
 
   RESET_STATE(state) {
