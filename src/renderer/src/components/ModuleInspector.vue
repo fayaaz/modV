@@ -1,6 +1,6 @@
 <template>
   <grid
-    v-if="module.props"
+    v-if="module && module.props"
     :id="`module-inspector-${module.$id}`"
     ref="moduleInspector"
   >
