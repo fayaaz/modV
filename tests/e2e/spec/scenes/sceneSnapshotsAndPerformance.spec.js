@@ -73,6 +73,46 @@ async function ensureUserGroup() {
   );
 }
 
+// Earlier specs share this app instance, so remove any Groups (and their
+// modules/WebGL contexts) they left behind before saving new Scenes.
+async function resetUserGroups() {
+  await modVApp.evaluateWorker(
+    async ({ galleryGroupName, enabled }) => {
+      await self.store.dispatch("scenes/stopPerformance");
+
+      const userGroups = self.store.state.groups.groups.filter(
+        (group) => group.name !== galleryGroupName,
+      );
+
+      for (let i = 0; i < userGroups.length; i++) {
+        await self.store.dispatch("groups/removeGroup", {
+          groupId: userGroups[i].id,
+        });
+      }
+
+      // Modules can outlive their Group (e.g. gallery previews). They keep
+      // renderer resources alive, so remove anything not in a Group.
+      const groupModuleIds = new Set(
+        self.store.state.groups.groups.flatMap((group) => group.modules),
+      );
+
+      for (const module of Object.values(self.store.state.modules.active)) {
+        if (!groupModuleIds.has(module.$id) && !module.meta.isGallery) {
+          await self.store.dispatch("modules/removeActiveModule", {
+            moduleId: module.$id,
+          });
+        }
+      }
+
+      await self.store.dispatch("groups/createGroup", { enabled });
+    },
+    {
+      galleryGroupName: constants.GALLERY_GROUP_NAME,
+      enabled: GROUP_ENABLED,
+    },
+  );
+}
+
 test("a saved Scene restores its Groups and Modules", async () => {
   const name = uniqueName("E2E Snapshot");
   const groupId = await createGroup(name);
@@ -361,6 +401,7 @@ test("performance mode starts, advances and stops", async () => {
   expect(await modVApp.evaluateWorkerState("scenes.performance.enabled")).toBe(
     false,
   );
+  expect(await modVApp.evaluateWorkerState("scenes.transitioning")).toBe(false);
 
   await removeScene(sceneA.id);
   await removeScene(sceneB.id);
@@ -497,7 +538,7 @@ test("performance mode dwell advances in real time", async () => {
   const name = uniqueName("E2E Real Time Dwell");
 
   await waitForMainOutput();
-  await ensureUserGroup();
+  await resetUserGroups();
 
   const sceneA = await saveScene(`${name} A`);
   const sceneB = await saveScene(`${name} B`);
@@ -541,7 +582,7 @@ test("performance mode dwell advances in real time", async () => {
   await restoreScenes(previousScenes);
   await removeScene(sceneA.id);
   await removeScene(sceneB.id);
-  await ensureUserGroup();
+  await resetUserGroups();
 });
 
 test("a crossfade does not count towards the next scene's dwell", async () => {

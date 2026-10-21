@@ -12,7 +12,12 @@ XAUTHORITY ?= $(HOME)/.Xauthority
 PULSE_SOCKET ?= $(XDG_RUNTIME_DIR)/pulse/native
 WAYLAND_DISPLAY ?= wayland-0
 WAYLAND_SOCKET ?= $(XDG_RUNTIME_DIR)/$(WAYLAND_DISPLAY)
-DRI_ARGS ?= $(if $(wildcard /dev/dri/renderD* /dev/dri/card*),--device /dev/dri)
+# Containers run as the host UID/GID and do not inherit supplementary groups,
+# so the GPU device nodes stay unreadable unless their GIDs are added. Without
+# this Chromium's GPU process aborts under load and takes the renderers with it.
+DRI_GIDS ?= $(shell stat -c '%g' /dev/dri/card0 2>/dev/null) $(shell stat -c '%g' /dev/dri/renderD128 2>/dev/null)
+DRI_GROUPS ?= $(foreach gid,$(sort $(DRI_GIDS)),--group-add $(gid))
+DRI_ARGS ?= $(if $(wildcard /dev/dri/renderD* /dev/dri/card*),--device /dev/dri $(DRI_GROUPS))
 
 # Prefer a Wayland socket when the host has one, otherwise fall back to X11.
 DISPLAY_BACKEND ?= auto
@@ -37,10 +42,10 @@ else
   GUI_AUDIO := $(if $(wildcard $(PULSE_SOCKET)),-e PULSE_SERVER=unix:/tmp/pulse-native -v "$(PULSE_SOCKET):/tmp/pulse-native")
 endif
 
-GUI_RUN_ARGS := --net=host --shm-size=1g $(DRI_ARGS) $(GUI_ENV) $(GUI_MOUNTS) $(GUI_AUDIO)
+GUI_RUN_ARGS := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(GUI_ENV) $(GUI_MOUNTS) $(GUI_AUDIO)
 
 .DEFAULT_GOAL := build
-.PHONY: build clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e yarn shell
+.PHONY: build clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-unit yarn shell
 
 build:
 	mkdir -p "$(DIST_DIR)"
@@ -107,6 +112,9 @@ format: docker-node-modules
 test-e2e: DOCKER_RUN_ARGS += $(GUI_RUN_ARGS) -e MODV_E2E_NO_SANDBOX=1
 test-e2e: docker-node-modules
 	$(call run-yarn,test:e2e $(ARGS))
+
+test-unit: docker-node-modules
+	$(call run-yarn,test:unit $(ARGS))
 
 yarn: docker-node-modules
 	$(call run-yarn,$(ARGS))

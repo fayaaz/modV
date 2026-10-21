@@ -67,6 +67,7 @@ class ModVApp {
   constructor() {
     this.electronApp = null;
     this.page = null;
+    this.lastCrash = null;
 
     test.beforeAll(async () => {
       // find the latest build in the out directory
@@ -87,6 +88,7 @@ class ModVApp {
       if (process.env.MODV_E2E_NO_SANDBOX === "1") {
         launchArgs.push("--no-sandbox");
       }
+
       launchArgs.push(appInfo.main);
 
       this.electronApp = await electron.launch({
@@ -94,24 +96,48 @@ class ModVApp {
         executablePath: appInfo.executable,
         env: {
           ...process.env,
+          ELECTRON_ENABLE_LOGGING: "1",
           XDG_CONFIG_HOME: configDir,
         },
       });
 
-      this.electronApp.on("window", async (page) => {
-        // capture errors
+      // Surface Chromium/Electron fatal errors from the main process, which
+      // otherwise disappear when a renderer crashes mid-suite.
+      this.electronApp.process()?.stderr?.on("data", (data) => {
+        process.stderr.write(`[electron] ${data}`);
+      });
+
+      const diagnosedPages = new WeakSet();
+      const attachDiagnostics = (page) => {
+        if (diagnosedPages.has(page)) {
+          return;
+        }
+
+        diagnosedPages.add(page);
+
         page.on("pageerror", (error) => {
-          console.error(error);
+          console.error(`[renderer pageerror] ${error.stack || error}`);
         });
 
-        // capture console messages
         page.on("console", (msg) => {
           console.log(msg.text());
         });
-      });
+
+        page.on("crash", () => {
+          this.lastCrash = new Date().toISOString();
+          console.error(`[renderer crashed] ${page.url()}`);
+        });
+
+        page.on("close", () => {
+          console.error(`[renderer closed] ${page.url()}`);
+        });
+      };
+
+      this.electronApp.on("window", attachDiagnostics);
 
       // console.info("  ℹ    Waiting for modV to become ready…");
       this.page = await modVApp.electronApp.firstWindow();
+      attachDiagnostics(this.page);
       await this.waitUntilModVReady();
     });
 
@@ -156,6 +182,34 @@ class ModVApp {
     resolver();
   }
 
+  async getWorker(timeout = 10000) {
+    const { page } = this;
+    const deadline = Date.now() + timeout;
+
+    while (Date.now() < deadline) {
+      if (page.isClosed()) {
+        break;
+      }
+
+      const workers = page.workers();
+
+      if (workers.length) {
+        return workers[0];
+      }
+
+      await page.waitForTimeout(100);
+    }
+
+    const reason = this.lastCrash
+      ? `renderer crashed at ${this.lastCrash}`
+      : "renderer worker unavailable";
+
+    throw new Error(
+      `Cannot evaluate in the worker: ${reason}. ` +
+        "The app may still be reloading; re-run the spec to confirm.",
+    );
+  }
+
   async evaluateMainState(propertyPath) {
     const { page } = this;
 
@@ -176,8 +230,7 @@ class ModVApp {
   }
 
   async evaluateWorkerState(propertyPath) {
-    const { page } = this;
-    const worker = page.workers()[0];
+    const worker = await this.getWorker();
 
     if (propertyPath) {
       return worker.evaluate(
@@ -190,8 +243,8 @@ class ModVApp {
   }
 
   async evaluateWorker(fn, arg) {
-    const { page } = this;
-    return page.workers()[0].evaluate(fn, arg);
+    const worker = await this.getWorker();
+    return worker.evaluate(fn, arg);
   }
 
   async checkWorkerAndMainState(checks = [], propertyPath) {
