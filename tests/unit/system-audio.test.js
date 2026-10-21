@@ -8,6 +8,10 @@ import {
   isMonitorDeviceLabel,
   isSystemAudioSource,
 } from "../../src/renderer/src/application/system-audio.js";
+import {
+  createPipeWireCapture,
+  interleavedToPlanar,
+} from "../../src/renderer/src/application/system-audio-pipewire.js";
 
 class FakeTrack {
   constructor(kind, label = "") {
@@ -257,7 +261,7 @@ describe("SystemAudioCapture", () => {
     await expect(capture.capture()).rejects.toThrow(
       /System audio capture is not available on this system/,
     );
-    await expect(capture.capture()).rejects.toThrow(/pactl load-module/);
+    await expect(capture.capture()).rejects.toThrow(/pw-record/);
   });
 
   it("rejects when the monitor source has no live audio track", async () => {
@@ -319,5 +323,244 @@ describe("SystemAudioCapture", () => {
     capture.stop(stream);
 
     expect(audioTrack.stopped).toBe(true);
+  });
+});
+
+describe("interleavedToPlanar", () => {
+  it("deinterleaves f32 PCM into per-channel planes", () => {
+    const interleaved = new Float32Array([1, 2, 3, 4, 5, 6]);
+    const planar = interleavedToPlanar(new Uint8Array(interleaved.buffer), 2);
+
+    expect(Array.from(planar)).toEqual([1, 3, 5, 2, 4, 6]);
+  });
+
+  it("ignores a trailing partial frame", () => {
+    const interleaved = new Float32Array([1, 2, 3, 4, 5]);
+    const planar = interleavedToPlanar(new Uint8Array(interleaved.buffer), 2);
+
+    expect(Array.from(planar)).toEqual([1, 3, 2, 4]);
+  });
+});
+
+describe("SystemAudioCapture native PipeWire fallback", () => {
+  it("uses a native PipeWire capture when no monitor device is exposed", async () => {
+    const track = new FakeTrack("audio", "System Audio (PipeWire)");
+    const stream = new FakeStream([track]);
+    const nativeCapture = {
+      start: vi.fn(async () => ({
+        stream,
+        sampleRate: 48000,
+        channels: 2,
+        label: "System Audio (PipeWire monitor)",
+        backend: "pipewire",
+      })),
+      stop: vi.fn(),
+    };
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => [
+          { deviceId: "mic-1", kind: "audioinput", label: "USB Microphone" },
+        ]),
+      },
+      platform: "linux",
+      logger: silentLogger,
+      nativeCapture,
+    });
+
+    const result = await capture.capture();
+
+    expect(nativeCapture.start).toHaveBeenCalledTimes(1);
+    expect(result.stream).toBe(stream);
+    expect(result.backend).toBe("pipewire");
+    expect(result.label).toBe("System Audio (PipeWire monitor)");
+  });
+
+  it("falls back to the native label when the capture omits one", async () => {
+    const stream = new FakeStream([new FakeTrack("audio")]);
+    const nativeCapture = {
+      start: vi.fn(async () => ({ stream })),
+    };
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => []),
+      },
+      platform: "linux",
+      logger: silentLogger,
+      nativeCapture,
+    });
+
+    const result = await capture.capture();
+
+    expect(result.label).toBe(SYSTEM_AUDIO_SOURCE_LABEL);
+  });
+
+  it("does not try the native capture on other platforms", async () => {
+    const nativeCapture = { start: vi.fn() };
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => []),
+        getDisplayMedia: vi.fn(async () => {
+          throw new Error("cancelled");
+        }),
+      },
+      platform: "darwin",
+      logger: silentLogger,
+      nativeCapture,
+    });
+
+    await expect(capture.capture()).rejects.toThrow("cancelled");
+    expect(nativeCapture.start).not.toHaveBeenCalled();
+  });
+
+  it("keeps the unavailable error when native capture is unavailable", async () => {
+    const nativeCapture = {
+      start: vi.fn(async () => ({
+        available: false,
+        reason: "pw-record is not installed",
+      })),
+    };
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => []),
+      },
+      platform: "linux",
+      logger: silentLogger,
+      nativeCapture,
+    });
+
+    await expect(capture.capture()).rejects.toThrow(
+      /System audio capture is not available on this system/,
+    );
+  });
+
+  it("stops the native capture with the stream", async () => {
+    const track = new FakeTrack("audio");
+    const stream = new FakeStream([track]);
+    const stop = vi.fn();
+    const nativeCapture = {
+      start: vi.fn(async () => ({ stream })),
+      stop,
+    };
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => []),
+      },
+      platform: "linux",
+      logger: silentLogger,
+      nativeCapture,
+    });
+
+    const result = await capture.capture();
+
+    capture.stop(result.stream);
+
+    expect(track.stopped).toBe(true);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createPipeWireCapture", () => {
+  it("streams native PCM chunks into a generated audio track", async () => {
+    const listeners = new Map();
+    const invoke = vi.fn(async (channel) =>
+      channel === "system-audio:start"
+        ? {
+            available: true,
+            backend: "pipewire",
+            sampleRate: 48000,
+            channels: 2,
+          }
+        : { stopped: true },
+    );
+    const ipcRenderer = {
+      invoke,
+      on: (channel, listener) => listeners.set(channel, listener),
+      removeListener: (channel) => listeners.delete(channel),
+    };
+    const track = new FakeTrack("audio");
+    const stream = new FakeStream([track]);
+    const pcm = { stream, push: vi.fn(), close: vi.fn() };
+    const capture = createPipeWireCapture({
+      ipcRenderer,
+      createStream: () => pcm,
+    });
+
+    const captured = await capture.start();
+
+    expect(captured.stream).toBe(stream);
+    expect(captured.backend).toBe("pipewire");
+    expect(captured.label).toBe("System Audio (PipeWire monitor)");
+
+    const chunk = new Uint8Array([1, 2, 3, 4]);
+
+    listeners.get("system-audio:chunk")(null, chunk);
+    expect(pcm.push).toHaveBeenCalledWith(chunk);
+
+    capture.stop();
+
+    expect(pcm.close).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("system-audio:stop");
+    expect(listeners.has("system-audio:chunk")).toBe(false);
+  });
+
+  it("keeps chunks that arrive before the stream is ready", async () => {
+    const listeners = new Map();
+    const early = new Uint8Array([9, 9, 9, 9]);
+    const invoke = vi.fn(async (channel) => {
+      if (channel === "system-audio:start") {
+        listeners.get("system-audio:chunk")(null, early);
+
+        return {
+          available: true,
+          sampleRate: 48000,
+          channels: 2,
+        };
+      }
+
+      return { stopped: true };
+    });
+    const ipcRenderer = {
+      invoke,
+      on: (channel, listener) => listeners.set(channel, listener),
+      removeListener: (channel) => listeners.delete(channel),
+    };
+    const stream = new FakeStream([new FakeTrack("audio")]);
+    const pcm = { stream, push: vi.fn(), close: vi.fn() };
+    const capture = createPipeWireCapture({
+      ipcRenderer,
+      createStream: () => pcm,
+    });
+
+    await capture.start();
+
+    expect(pcm.push).toHaveBeenCalledWith(early);
+  });
+
+  it("does not create a stream when native capture is unavailable", async () => {
+    const createStream = vi.fn();
+    const capture = createPipeWireCapture({
+      ipcRenderer: {
+        invoke: vi.fn(async () => ({
+          available: false,
+          reason: "pw-record is not installed",
+        })),
+        on: vi.fn(),
+        removeListener: vi.fn(),
+      },
+      createStream,
+    });
+
+    const result = await capture.start();
+
+    expect(result).toEqual({
+      available: false,
+      reason: "pw-record is not installed",
+    });
+    expect(createStream).not.toHaveBeenCalled();
   });
 });

@@ -10,6 +10,7 @@ import {
 import { APP_SCHEME } from "./background-constants";
 import { createLogger, getLogDirectory } from "./logger";
 import { openFile } from "./open-file";
+import { registerSystemAudioIpc } from "./system-audio";
 import { createWindow } from "./windows";
 
 require("@electron/remote/main").initialize();
@@ -146,6 +147,8 @@ function setupColorPickerUIMessageChannels(mainWindow, colorPickerWindow) {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.on("ready", async () => {
+  registerSystemAudioIpc();
+
   protocol.handle(APP_SCHEME, (request) => {
     const newPath =
       "file://" +

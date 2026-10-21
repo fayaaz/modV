@@ -219,6 +219,10 @@ const actions = {
     for (let i = 0; i < inputIds.length; i += 1) {
       const inputId = inputIds[i];
 
+      await store.dispatch("inputs/removeInputLink", {
+        inputId,
+      });
+
       await store.dispatch("inputs/removeInput", {
         inputId,
       });

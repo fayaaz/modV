@@ -1,14 +1,16 @@
 // AGC-smoothed bass/mid/treble bands, ported from the Point10 audio engine
 // (musicvis src/audio/AudioEngine.js + src/plane9/P9Audio.js semantics).
 //
-// Band values are linear FFT magnitudes normalized by a time-domain AGC:
-// silence reads ~0, a full-scale tone reads ~1, dense music keeps its natural
-// ~0.2-0.5 shape. The 16 log-spaced band cells follow the P10 band grid
-// (bass = cells 0-4, mid = 5-9, treble = 10-15) low-passed with the lane-1
-// damping hint (tau ~0.05s).
+// Raw band values are linear FFT magnitudes normalized by a time-domain AGC.
+// The exposed bass/mid/treble features are then mapped onto a -60..0 dB
+// perceptual scale so treble reads comparably to bass; the payload's bands,
+// lanes and cells (consumed by Point10 scenes) stay linear. The 16 log-spaced
+// band cells follow the P10 band grid (bass = cells 0-4, mid = 5-9, treble =
+// cells 10-15, starting at 2 kHz) low-passed with the lane-1 damping hint
+// (tau ~0.05s).
 
 const BAND_EDGES = [
-  30, 50, 80, 130, 200, 300, 450, 700, 1000, 1500, 2200, 3300, 5000, 7500,
+  30, 50, 80, 130, 200, 300, 450, 700, 1000, 1500, 2000, 3300, 5000, 7500,
   11000, 16000, 20000,
 ];
 
@@ -30,6 +32,22 @@ const BAND_FEATURES = ["bass", "mid", "treble"];
 
 const clamp01 = (x) => (x > 1 ? 1 : x > 0 ? x : 0);
 
+// The exposed features use a perceptual dB scale (-60 dB .. 0 dB -> 0..1) so
+// musically-present treble is not dwarfed by bass under a pink-ish spectrum.
+// Only bass/mid/treble go through this; the raw linear grid/lanes stay as-is
+// for the Point10 scenes.
+const FEATURE_DB_FLOOR = -60;
+
+function featureValue(magnitude) {
+  if (!(magnitude > 0)) {
+    return 0;
+  }
+
+  const db = 20 * Math.log10(magnitude);
+
+  return clamp01((db - FEATURE_DB_FLOOR) / -FEATURE_DB_FLOOR);
+}
+
 function isBandFeature(feature) {
   return BAND_FEATURES.indexOf(feature) > -1;
 }
@@ -46,6 +64,7 @@ class AudioBands {
     this.beatEnv = 0;
     this.bassSmoothed = 0;
     this.wave = new Float32Array(1024);
+    this.byteFrequencyData = new Uint8Array(0);
     this.cells = null;
     this.cellKey = "";
     this.lastT = 0;
@@ -134,10 +153,11 @@ class AudioBands {
     }
   }
 
-  // The payload the Point10 adapter consumes: the raw 3-band values, the four
-  // damping lanes, the 16-cell grid, the beat envelope and the normalized
-  // time-domain wave. `raw` is the same signal with the AGC gain divided back
-  // out, for modules that opt out of automatic gain control.
+  // The payload the Point10 adapter consumes: the dB-mapped bass/mid/treble
+  // features, the raw 3-band values, the four damping lanes, the 16-cell grid,
+  // the beat envelope and the normalized time-domain wave. `raw` is the same
+  // signal with the AGC gain divided back out, for modules that opt out of
+  // automatic gain control.
   _payload(gain, sampleRate) {
     const bands = [];
     const rawBands = [];
@@ -162,15 +182,16 @@ class AudioBands {
     }
 
     return {
-      bass: clamp01(this.smoothed[0]),
-      mid: clamp01(this.smoothed[1]),
-      treble: clamp01(this.smoothed[2]),
+      bass: featureValue(this.smoothed[0]),
+      mid: featureValue(this.smoothed[1]),
+      treble: featureValue(this.smoothed[2]),
       bands,
       lanes,
       cells,
       beat: clamp01(this.beatEnv),
       wave: this.wave,
       freqMag: this.freqMag,
+      byteFrequencyData: this.byteFrequencyData,
       raw: {
         bands: rawBands,
         lanes: rawLanes,
@@ -180,12 +201,18 @@ class AudioBands {
     };
   }
 
-  update({ floatFrequencyData, byteTimeDomainData, sampleRate = 44100 }) {
+  update({
+    floatFrequencyData,
+    byteTimeDomainData,
+    byteFrequencyData,
+    sampleRate = 44100,
+  }) {
     const now = performance.now();
     const dt = Math.min(0.1, (now - (this.lastT || now)) / 1000);
     this.lastT = now;
 
     this._fillWave(byteTimeDomainData);
+    this.byteFrequencyData = byteFrequencyData || new Uint8Array(0);
 
     if (!floatFrequencyData || !floatFrequencyData.length) {
       const k = Math.exp(-dt * 8);

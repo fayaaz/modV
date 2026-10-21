@@ -20,6 +20,15 @@ class Point10AudioBridge {
     this.wave = new Float32Array(1024);
     this.freqMag = new Float32Array(1024);
     this.sampleRate = 44100;
+    // P9Audio engine aliases: the vendored plane9 helper reads the raw engine
+    // shape (freqArray/dataArray/freqMagL/freqMagR/ctx). modV's payload is
+    // mono, so the stereo arrays share the mono FFT; dataArray is the byte
+    // waveform P9Audio converts back to -1..1.
+    this.freqArray = this.freqMag;
+    this.freqMagL = this.freqMag;
+    this.freqMagR = this.freqMag;
+    this.dataArray = new Uint8Array(1024);
+    this.ctx = { sampleRate: this.sampleRate };
     this.spectrum = new Uint8Array(0);
     this._spectrumKey = "";
     this._binBand = null;
@@ -63,6 +72,7 @@ class Point10AudioBridge {
 
     this.hasAudio = true;
     this.sampleRate = payload.sampleRate || 44100;
+    this.ctx.sampleRate = this.sampleRate;
 
     const src = levers.useAgc ? payload : payload.raw;
     const bandGain = [
@@ -100,6 +110,7 @@ class Point10AudioBridge {
     for (let i = 0; i < this.wave.length; i++) {
       const v = (payload.wave[i] || 0) * waveGain;
       this.wave[i] = v > 1 ? 1 : v < -1 ? -1 : v;
+      this.dataArray[i] = Math.round(((this.wave[i] + 1) / 2) * 255);
     }
 
     const magGain = Math.min(4, levers.gain);

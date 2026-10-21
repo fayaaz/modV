@@ -1,10 +1,11 @@
 import { createLogger } from "./logger";
+import { createPipeWireCapture } from "./system-audio-pipewire";
 
 export const SYSTEM_AUDIO_SOURCE_ID = "modv:system-audio";
 export const SYSTEM_AUDIO_SOURCE_LABEL = "System Audio (loopback)";
 
 export const SYSTEM_AUDIO_UNAVAILABLE_MESSAGE =
-  "System audio capture is not available on this system. On Linux, expose a PulseAudio/PipeWire monitor source as an input device (for example with `pactl load-module module-remap-source master=<sink>.monitor source_name=modv_loopback source_properties=device.description=modV_Loopback`).";
+  "System audio capture is not available on this system. On Linux, install PipeWire so that `pw-record` and `wpctl` are available, or expose a PulseAudio/PipeWire monitor source as an input device.";
 
 const MONITOR_LABEL_PATTERN = /monitor|system audio|loopback/i;
 
@@ -13,6 +14,7 @@ const MONITOR_LABEL_PATTERN = /monitor|system audio|loopback/i;
 // been observed to take the browser process down, so the system audio is
 // captured from a PulseAudio/PipeWire monitor source there instead.
 const DISPLAY_LOOPBACK_PLATFORMS = ["darwin", "win32"];
+const NATIVE_CAPTURE_PLATFORMS = ["linux"];
 
 function getDefaultMediaDevices() {
   if (typeof navigator === "undefined") {
@@ -28,6 +30,18 @@ function getDefaultMediaStream() {
   }
 
   return window.MediaStream;
+}
+
+function getDefaultNativeCapture(platform = getDefaultPlatform()) {
+  if (!NATIVE_CAPTURE_PLATFORMS.includes(platform)) {
+    return null;
+  }
+
+  if (typeof window === "undefined" || !window.electron?.ipcRenderer) {
+    return null;
+  }
+
+  return createPipeWireCapture({ ipcRenderer: window.electron.ipcRenderer });
 }
 
 function getDefaultPlatform() {
@@ -114,11 +128,13 @@ export class SystemAudioCapture {
     mediaDevices = getDefaultMediaDevices(),
     monitorDeviceId = null,
     platform = getDefaultPlatform(),
+    nativeCapture = getDefaultNativeCapture(platform),
     logger = createLogger("renderer:system-audio"),
   } = {}) {
     this.mediaDevices = mediaDevices;
     this.monitorDeviceId = monitorDeviceId;
     this.platform = platform;
+    this.nativeCapture = nativeCapture;
     this.logger = logger;
     this._displayStream = null;
   }
@@ -159,6 +175,35 @@ export class SystemAudioCapture {
       logger.info("no monitor source was found", {
         devices: await this._describeDevices(),
       });
+
+      if (
+        NATIVE_CAPTURE_PLATFORMS.includes(this.platform) &&
+        this.nativeCapture
+      ) {
+        try {
+          const captured = await this.nativeCapture.start();
+
+          if (captured?.stream) {
+            logger.info("capturing the system audio with native PipeWire", {
+              sampleRate: captured.sampleRate,
+              channels: captured.channels,
+              label: captured.label,
+            });
+
+            return {
+              stream: captured.stream,
+              label: captured.label || SYSTEM_AUDIO_SOURCE_LABEL,
+              backend: captured.backend || "pipewire",
+            };
+          }
+
+          logger.warn("native PipeWire capture is unavailable", {
+            reason: captured?.reason,
+          });
+        } catch (e) {
+          logger.error("native PipeWire capture failed", e);
+        }
+      }
 
       if (!SystemAudioCapture.isSupported(this.mediaDevices)) {
         logger.warn("getDisplayMedia is not available");
@@ -213,6 +258,7 @@ export class SystemAudioCapture {
 
   stop(stream) {
     this._stopStream(stream);
+    this.nativeCapture?.stop?.();
 
     if (this._displayStream && this._displayStream !== stream) {
       this._stopStream(this._displayStream);

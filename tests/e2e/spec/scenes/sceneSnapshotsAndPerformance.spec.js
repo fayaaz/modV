@@ -166,6 +166,122 @@ test("a saved Scene restores its Groups and Modules", async () => {
   await ensureUserGroup();
 });
 
+test("a saved Scene restores its Input Links and Tween data", async () => {
+  const name = uniqueName("E2E Input Links");
+  const groupId = await createGroup(name);
+  const moduleId = await addModuleToGroup(groupId, "Ball");
+
+  const inputIds = await modVApp.evaluateWorker(
+    async ({ moduleId }) => {
+      const module = self.store.state.modules.active[moduleId];
+      const bassInputId = module.$props.intensity.id;
+      const tweenInputId = module.$props.speed.id;
+
+      await self.store.dispatch("inputs/createInputLink", {
+        inputId: bassInputId,
+        type: "getter",
+        location: "meyda/getFeature",
+        source: "meyda",
+        args: ["bass"],
+        min: 0,
+        max: 1,
+      });
+
+      await self.store.dispatch("dataTypes/createType", {
+        type: "tween",
+        args: {
+          id: tweenInputId,
+          data: [[0], [1]],
+          duration: 1000,
+          direction: "alternate",
+          easing: "linear",
+          loop: true,
+          useBpm: true,
+          bpmDivision: 8,
+        },
+      });
+
+      await self.store.dispatch("inputs/createInputLink", {
+        inputId: tweenInputId,
+        type: "state",
+        location: `tweens.tweens['${tweenInputId}'].value[0]`,
+        source: "tween",
+        min: 0,
+        max: 1,
+      });
+
+      return { bassInputId, tweenInputId };
+    },
+    { moduleId },
+  );
+
+  const scene = await saveScene(name);
+
+  expect(scene.inputLinks[inputIds.bassInputId]).toEqual(
+    expect.objectContaining({ source: "meyda", args: ["bass"] }),
+  );
+  expect(scene.inputLinks[inputIds.tweenInputId]).toEqual(
+    expect.objectContaining({ source: "tween" }),
+  );
+  expect(scene.tweens[inputIds.tweenInputId]).toEqual(
+    expect.objectContaining({ useBpm: true, bpmDivision: 8 }),
+  );
+
+  await modVApp.evaluateWorker(
+    async ({ groupId }) => {
+      await self.store.dispatch("groups/removeGroup", { groupId });
+    },
+    { groupId },
+  );
+
+  const restored = await modVApp.evaluateWorker(
+    async ({ sceneId, sceneName, oldBassInputId, oldTweenInputId }) => {
+      await self.store.dispatch("scenes/applyScene", { sceneId });
+
+      const group = self.store.state.groups.groups.find(
+        (item) => item.name === sceneName,
+      );
+      const module = self.store.state.modules.active[group.modules[0]];
+      const bassInputId = module.$props.intensity.id;
+      const tweenInputId = module.$props.speed.id;
+
+      return {
+        bassInputId,
+        tweenInputId,
+        oldBassInputId,
+        oldTweenInputId,
+        bassLink: self.store.state.inputs.inputLinks[bassInputId],
+        tweenLink: self.store.state.inputs.inputLinks[tweenInputId],
+        tween: self.store.state.tweens.tweens[tweenInputId],
+      };
+    },
+    {
+      sceneId: scene.id,
+      sceneName: name,
+      oldBassInputId: inputIds.bassInputId,
+      oldTweenInputId: inputIds.tweenInputId,
+    },
+  );
+
+  expect(restored.bassInputId).not.toBe(restored.oldBassInputId);
+  expect(restored.tweenInputId).not.toBe(restored.oldTweenInputId);
+  expect(restored.bassLink).toEqual(
+    expect.objectContaining({ source: "meyda", args: ["bass"] }),
+  );
+  expect(restored.tweenLink).toEqual(
+    expect.objectContaining({
+      source: "tween",
+      location: `tweens.tweens['${restored.tweenInputId}'].value[0]`,
+    }),
+  );
+  expect(restored.tween).toEqual(
+    expect.objectContaining({ useBpm: true, bpmDivision: 8 }),
+  );
+
+  await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
 test("performance mode exposes its configuration state", async () => {
   const state = await modVApp.evaluateWorker(() => self.store.state.scenes);
 

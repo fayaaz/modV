@@ -158,6 +158,22 @@ describe("default scenes", () => {
     expect(foregroundOnly.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("does not use Dirty Lens in any default scene", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Dirty Lens"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("does not use the removed Point10 Disco Ball module", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Point10 Disco Ball"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
   it("dims at least one foreground module with a meta override", () => {
     const dimmed = newBatch.filter((scene) =>
       (getGroup(scene, "Foreground")?.modules || []).some(

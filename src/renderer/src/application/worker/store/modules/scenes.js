@@ -85,6 +85,500 @@ function normalizeDefaultsVersion(value) {
   return Math.floor(version);
 }
 
+const GROUP_INPUT_NAMES = [
+  "alpha",
+  "enabled",
+  "clearing",
+  "inherit",
+  "compositeOperation",
+  "pipeline",
+];
+
+const MODULE_META_INPUT_NAMES = ["alpha", "enabled", "compositeOperation"];
+
+const BASS_PROP_PREFERENCE = [
+  "intensity",
+  "amount",
+  "brightness",
+  "colorize",
+  "bleedAmount",
+  "grainLevel",
+  "level",
+  "strength",
+  "saturation",
+  "softness",
+  "blurAmount",
+  "spacing",
+  "line_width",
+  "scale",
+  "radius",
+  "size",
+  "strobeRate",
+  "gain",
+];
+
+const BPM_PROP_PREFERENCE = [
+  "rotation",
+  "rotationSpeed",
+  "rotateSpeed",
+  "angle",
+  "hue",
+  "shift",
+  "offset",
+  "phase",
+  "speed",
+  "rate",
+  "count",
+  "sides",
+  "numColors",
+  "width",
+];
+
+function getDataTypeInputKeys(type) {
+  const dataType = store.state.dataTypes && store.state.dataTypes[type];
+
+  if (dataType && typeof dataType.inputs === "function") {
+    return Object.keys(dataType.inputs());
+  }
+
+  return [];
+}
+
+function addModuleInputIds(module, inputIds) {
+  for (let i = 0, len = MODULE_META_INPUT_NAMES.length; i < len; i++) {
+    const inputId =
+      module.meta && module.meta[`${MODULE_META_INPUT_NAMES[i]}InputId`];
+
+    if (inputId) {
+      inputIds.add(inputId);
+    }
+  }
+
+  const props = module.$props || {};
+
+  for (const prop of Object.values(props)) {
+    if (!prop || !prop.id) {
+      continue;
+    }
+
+    inputIds.add(prop.id);
+
+    const inputKeys = getDataTypeInputKeys(prop.type);
+
+    for (let i = 0, len = inputKeys.length; i < len; i++) {
+      inputIds.add(`${prop.id}-${inputKeys[i]}`);
+    }
+  }
+}
+
+function collectSceneInputIds(groups, modules) {
+  const inputIds = new Set();
+
+  for (let i = 0, len = groups.length; i < len; i++) {
+    const group = groups[i];
+
+    for (let j = 0, inputLen = GROUP_INPUT_NAMES.length; j < inputLen; j++) {
+      const inputId = group[`${GROUP_INPUT_NAMES[j]}InputId`];
+
+      if (inputId) {
+        inputIds.add(inputId);
+      }
+    }
+  }
+
+  const moduleValues = Object.values(modules || {});
+
+  for (let i = 0, len = moduleValues.length; i < len; i++) {
+    addModuleInputIds(moduleValues[i], inputIds);
+  }
+
+  return inputIds;
+}
+
+function serializeTween(tween) {
+  return JSON.parse(
+    JSON.stringify({
+      data: tween.data,
+      duration: tween.duration,
+      direction: tween.direction,
+      easing: tween.easing,
+      loop: tween.loop,
+      useBpm: tween.useBpm,
+      bpmDivision: tween.bpmDivision,
+      durationAsTotalTime: tween.durationAsTotalTime,
+      steps: tween.steps,
+    }),
+  );
+}
+
+/**
+ * Captures every Input Link (the yellow highlights in the Module/Group
+ * inspectors) that belongs to the given Groups and Modules, along with the
+ * Tween data needed to rebuild tween-backed links. Input IDs are only stable
+ * inside a live store, so the caller remaps them when applying the Scene.
+ */
+function snapshotSceneInputs(groups, modules) {
+  const inputIds = collectSceneInputIds(groups, modules);
+  const inputLinks = {};
+  const tweens = {};
+
+  for (const inputId of inputIds) {
+    const link = store.state.inputs.inputLinks[inputId];
+
+    if (!link) {
+      continue;
+    }
+
+    inputLinks[inputId] = JSON.parse(JSON.stringify(link));
+
+    if (link.source === "tween") {
+      const tween =
+        store.state.tweens.tweens[link.id] ||
+        store.state.tweens.tweens[inputId];
+
+      if (tween) {
+        tweens[inputId] = serializeTween(tween);
+      }
+    }
+  }
+
+  return { inputLinks, tweens };
+}
+
+function mapGroupInputIds(oldGroup, newGroup, inputIdMap) {
+  for (let i = 0, len = GROUP_INPUT_NAMES.length; i < len; i++) {
+    const key = `${GROUP_INPUT_NAMES[i]}InputId`;
+    const oldInputId = oldGroup[key];
+    const newInputId = newGroup[key];
+
+    if (oldInputId && newInputId) {
+      inputIdMap[oldInputId] = newInputId;
+    }
+  }
+}
+
+function mapModuleInputIds(oldModule, newModule, inputIdMap) {
+  for (let i = 0, len = MODULE_META_INPUT_NAMES.length; i < len; i++) {
+    const key = `${MODULE_META_INPUT_NAMES[i]}InputId`;
+    const oldInputId = oldModule.meta && oldModule.meta[key];
+    const newInputId = newModule.meta && newModule.meta[key];
+
+    if (oldInputId && newInputId) {
+      inputIdMap[oldInputId] = newInputId;
+    }
+  }
+
+  const oldProps = oldModule.$props || {};
+  const newProps = newModule.$props || {};
+  const propNames = Object.keys(oldProps);
+
+  for (let i = 0, len = propNames.length; i < len; i++) {
+    const propName = propNames[i];
+    const oldProp = oldProps[propName];
+    const newProp = newProps[propName];
+
+    if (!oldProp || !oldProp.id || !newProp || !newProp.id) {
+      continue;
+    }
+
+    inputIdMap[oldProp.id] = newProp.id;
+
+    const inputKeys = new Set([
+      ...getDataTypeInputKeys(oldProp.type),
+      ...getDataTypeInputKeys(newProp.type),
+    ]);
+
+    for (const key of inputKeys) {
+      inputIdMap[`${oldProp.id}-${key}`] = `${newProp.id}-${key}`;
+    }
+  }
+}
+
+async function restoreSceneInputs(scene, inputIdMap) {
+  const inputLinks = scene.inputLinks || {};
+  const tweens = scene.tweens || {};
+  const inputIds = Object.keys(inputLinks);
+
+  for (let i = 0, len = inputIds.length; i < len; i++) {
+    const oldInputId = inputIds[i];
+    const newInputId = inputIdMap[oldInputId];
+
+    if (!newInputId) {
+      continue;
+    }
+
+    const link = { ...inputLinks[oldInputId] };
+
+    if (link.source === "tween") {
+      const tween = tweens[oldInputId];
+
+      if (!tween) {
+        continue;
+      }
+
+      await store.dispatch("dataTypes/createType", {
+        type: "tween",
+        args: { ...tween, id: newInputId },
+      });
+
+      // Tween input links point at the Tween by its input ID, which changes
+      // every time the Scene is applied.
+      link.location = `tweens.tweens['${newInputId}'].value[0]`;
+    }
+
+    await store.dispatch("inputs/createInputLink", {
+      inputId: newInputId,
+      ...link,
+    });
+  }
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getPropRange(module, propName) {
+  const prop = (module.$props && module.$props[propName]) || {};
+  const min = Number(prop.min);
+  const max = Number(prop.max);
+
+  if (Number.isFinite(min) && Number.isFinite(max) && max > min) {
+    return { min, max };
+  }
+
+  return { min: 0, max: 1 };
+}
+
+function getBassLinkRange(module, propName) {
+  const { min, max } = getPropRange(module, propName);
+  const span = max - min;
+  const current = Number(module.props && module.props[propName]);
+  let linkMin;
+  let linkMax;
+
+  if (Number.isFinite(current) && current > 0) {
+    linkMin = clamp(current * 0.6, min, max);
+    linkMax = clamp(current * 1.4, min, max);
+  } else {
+    linkMin = min + span * 0.05;
+    linkMax = min + span * 0.35;
+  }
+
+  if (linkMax <= linkMin) {
+    return { min, max };
+  }
+
+  return { min: linkMin, max: linkMax };
+}
+
+function getBpmLinkRange(module, propName) {
+  const { min, max } = getPropRange(module, propName);
+  const span = max - min;
+  const current = Number(module.props && module.props[propName]);
+  let linkMin;
+  let linkMax;
+
+  if (Number.isFinite(current)) {
+    linkMin = clamp(current - span * 0.2, min, max);
+    linkMax = clamp(current + span * 0.2, min, max);
+  } else {
+    linkMin = min;
+    linkMax = max;
+  }
+
+  if (linkMax <= linkMin) {
+    return { min, max };
+  }
+
+  return { min: linkMin, max: linkMax };
+}
+
+function isNumericProp(prop) {
+  return !!prop && (prop.type === "int" || prop.type === "float");
+}
+
+function pickLinkProp(module, preference, excludedInputIds) {
+  const props = module.$props || {};
+  const isAvailable = (name) =>
+    isNumericProp(props[name]) && !excludedInputIds.has(props[name].id);
+
+  for (let i = 0, len = preference.length; i < len; i++) {
+    if (isAvailable(preference[i])) {
+      return preference[i];
+    }
+  }
+
+  const propNames = Object.keys(props);
+
+  for (let i = 0, len = propNames.length; i < len; i++) {
+    if (isAvailable(propNames[i])) {
+      return propNames[i];
+    }
+  }
+
+  return null;
+}
+
+function getGroupsInPriority(groups, priority) {
+  const ordered = [];
+
+  for (let i = 0, len = priority.length; i < len; i++) {
+    for (let j = 0, groupLen = groups.length; j < groupLen; j++) {
+      if (groups[j].name === priority[i] && !ordered.includes(groups[j])) {
+        ordered.push(groups[j]);
+      }
+    }
+  }
+
+  for (let i = 0, len = groups.length; i < len; i++) {
+    if (!ordered.includes(groups[i])) {
+      ordered.push(groups[i]);
+    }
+  }
+
+  return ordered;
+}
+
+function findModuleLinkTarget(
+  groups,
+  moduleEntries,
+  priority,
+  preference,
+  excludedInputIds,
+) {
+  const orderedGroups = getGroupsInPriority(groups, priority);
+
+  for (let i = 0, len = orderedGroups.length; i < len; i++) {
+    const group = orderedGroups[i];
+
+    for (let j = 0, entryLen = moduleEntries.length; j < entryLen; j++) {
+      const entry = moduleEntries[j];
+
+      if (!group.modules.includes(entry.module.$id)) {
+        continue;
+      }
+
+      const propName = pickLinkProp(entry.module, preference, excludedInputIds);
+
+      if (!propName) {
+        continue;
+      }
+
+      return {
+        inputId: entry.module.$props[propName].id,
+        module: entry.module,
+        propName,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function createBassLink({ inputId, module, propName, group }) {
+  const range = module
+    ? getBassLinkRange(module, propName)
+    : { min: 0.55, max: 1 };
+
+  await store.dispatch("inputs/createInputLink", {
+    inputId: inputId || group.alphaInputId,
+    type: "getter",
+    location: "meyda/getFeature",
+    source: "meyda",
+    args: ["bass"],
+    min: range.min,
+    max: range.max,
+  });
+}
+
+async function createBpmTweenLink({ inputId, module, propName, group }) {
+  const targetInputId = inputId || group.alphaInputId;
+  const range = module
+    ? getBpmLinkRange(module, propName)
+    : { min: 0.4, max: 1 };
+
+  await store.dispatch("dataTypes/createType", {
+    type: "tween",
+    args: {
+      id: targetInputId,
+      data: [[0], [1]],
+      duration: 1000,
+      direction: "alternate",
+      easing: "linear",
+      loop: true,
+      useBpm: true,
+      bpmDivision: 8,
+      durationAsTotalTime: false,
+      steps: 0,
+    },
+  });
+
+  await store.dispatch("inputs/createInputLink", {
+    inputId: targetInputId,
+    type: "state",
+    location: `tweens.tweens['${targetInputId}'].value[0]`,
+    source: "tween",
+    min: range.min,
+    max: range.max,
+  });
+}
+
+/**
+ * Gives the ready-made Scenes a musical starting point: at least one control
+ * follows the bass band and one follows a BPM-synced Tween. The targets are
+ * picked from the Modules the Scene already uses, falling back to a Group's
+ * alpha when a Scene has no suitable numeric control.
+ */
+async function applyDefaultSceneInputLinks(groups, moduleEntries) {
+  const excludedInputIds = new Set();
+  let bassTarget = findModuleLinkTarget(
+    groups,
+    moduleEntries,
+    ["Effects", "Foreground", "Background"],
+    BASS_PROP_PREFERENCE,
+    excludedInputIds,
+  );
+
+  if (!bassTarget) {
+    const group = groups.find((item) => item.name === "Effects") || groups[0];
+
+    if (group) {
+      bassTarget = { inputId: group.alphaInputId, group };
+    }
+  }
+
+  if (bassTarget) {
+    await createBassLink(bassTarget);
+    excludedInputIds.add(bassTarget.inputId);
+  }
+
+  let bpmTarget = findModuleLinkTarget(
+    groups,
+    moduleEntries,
+    ["Effects", "Foreground", "Background"],
+    BPM_PROP_PREFERENCE,
+    excludedInputIds,
+  );
+
+  if (!bpmTarget) {
+    const candidateGroups = ["Foreground", "Background", "Effects"]
+      .map((name) => groups.find((group) => group.name === name))
+      .filter(Boolean)
+      .concat(groups);
+    const group = candidateGroups.find(
+      (item) => !excludedInputIds.has(item.alphaInputId),
+    );
+
+    if (group) {
+      bpmTarget = { inputId: group.alphaInputId, group };
+    }
+  }
+
+  if (bpmTarget) {
+    await createBpmTweenLink(bpmTarget);
+  }
+}
+
 function getDefaultState() {
   return {
     scenes: [],
@@ -369,6 +863,7 @@ async function writeStoredScenes(state) {
  */
 async function buildSceneSnapshot(definition) {
   const createdGroupIds = [];
+  const createdModules = [];
 
   try {
     for (let i = 0, len = definition.groups.length; i < len; i++) {
@@ -434,8 +929,16 @@ async function buildSceneSnapshot(definition) {
             data: moduleDefinition.props[propName],
           });
         }
+
+        createdModules.push({ module });
       }
     }
+
+    const createdGroups = createdGroupIds
+      .map((groupId) => store.getters["groups/getById"](groupId))
+      .filter(Boolean);
+
+    await applyDefaultSceneInputLinks(createdGroups, createdModules);
 
     const groupSnapshots = [];
     const moduleIds = [];
@@ -465,6 +968,11 @@ async function buildSceneSnapshot(definition) {
       }
     }
 
+    const { inputLinks, tweens } = snapshotSceneInputs(
+      groupSnapshots,
+      moduleSnapshots,
+    );
+
     return {
       id: uuidv4(),
       name: definition.name,
@@ -474,6 +982,8 @@ async function buildSceneSnapshot(definition) {
       timingOverride: false,
       groups: groupSnapshots,
       modules: moduleSnapshots,
+      inputLinks,
+      tweens,
     };
   } finally {
     for (let i = 0, len = createdGroupIds.length; i < len; i++) {
@@ -542,6 +1052,7 @@ const actions = {
 
     const modules = await store.dispatch("modules/createPresetData");
     const timing = normalizePerformanceTiming(state.performance);
+    const { inputLinks, tweens } = snapshotSceneInputs(groups, modules);
 
     const scene = {
       id: uuidv4(),
@@ -552,6 +1063,8 @@ const actions = {
       timingOverride: false,
       groups: JSON.parse(JSON.stringify(groups)),
       modules: JSON.parse(JSON.stringify(modules)),
+      inputLinks,
+      tweens,
     };
 
     commit("ADD_SCENE", scene);
@@ -656,6 +1169,7 @@ const actions = {
     const moduleSnapshots = normalizedScene.modules || {};
     const createdGroups = [];
     const groupIdMap = {};
+    const inputIdMap = {};
 
     for (let i = 0, len = groupSnapshots.length; i < len; i++) {
       const snapshot = groupSnapshots[i];
@@ -686,6 +1200,8 @@ const actions = {
         groupIdMap[oldGroupId] = group.id;
       }
 
+      mapGroupInputIds(snapshot, group, inputIdMap);
+
       createdGroups.push({ groupId: group.id, alpha: targetAlpha });
 
       for (
@@ -710,12 +1226,16 @@ const actions = {
           continue;
         }
 
+        mapModuleInputIds(moduleSnapshot, module, inputIdMap);
+
         store.commit("groups/ADD_MODULE_TO_GROUP", {
           moduleId: module.$id,
           groupId: group.id,
         });
       }
     }
+
+    await restoreSceneInputs(normalizedScene, inputIdMap);
 
     // Remap inheritFrom now that every Group has its new id, so Groups that
     // appear later in the snapshot still resolve correctly.
