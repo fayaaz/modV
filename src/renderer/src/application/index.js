@@ -13,6 +13,7 @@ import {
 } from "./setup-media";
 import { AudioBands, isBandFeature } from "./audio-bands";
 import MediaDeviceManager from "./media-device-manager";
+import { SystemAudioCapture } from "./system-audio";
 import setupBeatDetektor from "./setup-beat-detektor";
 import setupMidi from "./setup-midi";
 import store from "./worker/store";
@@ -37,6 +38,7 @@ class ModV {
     // Bind subsystems and defaults
     this.setupMedia = setupMedia;
     this.mediaDeviceManager = new MediaDeviceManager();
+    this.systemAudioCapture = new SystemAudioCapture();
     this.setupBeatDetektor = setupBeatDetektor;
     this.setupMidi = setupMidi;
     this.windowHandler = windowHandler;

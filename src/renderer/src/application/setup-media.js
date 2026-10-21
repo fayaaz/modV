@@ -1,5 +1,6 @@
 import Meyda from "meyda";
 import constants from "./constants";
+import { isSystemAudioSource } from "./system-audio";
 
 let floatFrequencyDataArray;
 let byteFrequencyDataArray;
@@ -11,11 +12,12 @@ async function getMediaStream({
   videoSourceId,
   videoResolution,
   videoFrameRate,
+  audioStream,
 }) {
   const audioConstraints = {};
   const videoConstraints = {};
 
-  if (audioSourceId) {
+  if (audioSourceId && !audioStream && !isSystemAudioSource(audioSourceId)) {
     audioConstraints.audio = {
       echoCancellation: { exact: false },
       deviceId: audioSourceId,
@@ -40,7 +42,10 @@ async function getMediaStream({
 
   /* Ask for user media access */
   return [
-    audioSourceId && navigator.mediaDevices.getUserMedia(audioConstraints),
+    audioStream ||
+      (audioConstraints.audio
+        ? navigator.mediaDevices.getUserMedia(audioConstraints)
+        : false),
     videoSourceId && navigator.mediaDevices.getUserMedia(videoConstraints),
   ];
 }
@@ -51,6 +56,7 @@ async function setupMedia({
   useDefaultDevices = false,
   videoResolution,
   videoFrameRate,
+  audioStream,
 } = {}) {
   const { mediaDeviceManager } = this;
   const mediaStreamState = this._store.state.mediaStream;
@@ -67,9 +73,16 @@ async function setupMedia({
 
   let audioSourceId = audioId;
   let videoSourceId = videoId;
+  const isSystemAudio = isSystemAudioSource(audioId);
 
   if (!audioId && useDefaultDevices && mediaStreamDevices.audio.length > 0) {
-    audioSourceId = mediaStreamDevices.audio[0].deviceId;
+    const defaultAudioDevice = mediaStreamDevices.audio.find(
+      (device) => !device.isSystemAudio,
+    );
+
+    if (defaultAudioDevice) {
+      audioSourceId = defaultAudioDevice.deviceId;
+    }
   }
 
   if (!videoId && useDefaultDevices && mediaStreamDevices.video.length > 0) {
@@ -81,6 +94,12 @@ async function setupMedia({
   if (audioId) {
     // When switching audio device, stop the previous audio stream
     streams.push(this._audioMediaStream);
+
+    // A previously captured system audio stream is not a device, so it is
+    // tracked separately and stopped here too.
+    if (this._systemAudioStream) {
+      streams.push(this._systemAudioStream);
+    }
   }
 
   // For video, do not stop existing streams when adding a new device
@@ -102,12 +121,17 @@ async function setupMedia({
     }
   }
 
+  if (audioId && this._systemAudioStream) {
+    this._systemAudioStream = null;
+  }
+
   const [audioMediaStream, videoMediaStream] = await Promise.all(
     await getMediaStream({
       audioSourceId,
       videoSourceId,
       videoResolution,
       videoFrameRate,
+      audioStream,
     }),
   );
 
@@ -213,6 +237,15 @@ async function setupMedia({
 
   this._audioMediaStream = audioMediaStream || this._audioMediaStream;
   this._videoMediaStream = videoMediaStream || this._videoMediaStream;
+
+  if (isSystemAudio) {
+    if (audioMediaStream) {
+      this._systemAudioStream = audioMediaStream;
+    } else {
+      // No stream was captured, so there is no audio to feed the analyser.
+      this._audioMediaStream = null;
+    }
+  }
 
   return [audioMediaStream, videoMediaStream];
 }
