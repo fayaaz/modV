@@ -158,6 +158,11 @@ async function loop(delta, features, fftOutput) {
   const groupsLength = groupIndexRenderOrder.length;
   for (let i = 0; i < groupsLength; ++i) {
     const group = groups[groupIndexRenderOrder[i]];
+
+    if (!group) {
+      continue;
+    }
+
     const isGalleryGroup = group.name === constants.GALLERY_GROUP_NAME;
 
     const groupModulesLength = group.modules.length;
@@ -167,8 +172,19 @@ async function loop(delta, features, fftOutput) {
 
     const { clearing, inherit, inheritFrom, pipeline } = group;
 
-    const aux = group.drawToCanvasId && auxillary[group.drawToCanvasId].context;
-    const groupContext = group.context.context;
+    // A Group can lose its output (e.g. a Scene restore replaced the Group
+    // list) and a Group can point at an auxiliary output that is gone. Skip
+    // those Groups instead of throwing on every frame.
+    const aux =
+      group.drawToCanvasId && auxillary[group.drawToCanvasId]
+        ? auxillary[group.drawToCanvasId].context
+        : null;
+    const groupContext = group.context ? group.context.context : null;
+
+    if (!groupContext) {
+      continue;
+    }
+
     let drawTo = groupContext;
 
     if (aux) {
@@ -189,28 +205,35 @@ async function loop(delta, features, fftOutput) {
     }
 
     if (inherit) {
+      const inheritedGroup =
+        inheritFrom === -1
+          ? null
+          : groups.find((group) => group.id === inheritFrom);
       const canvasToInherit =
         inheritFrom === -1
           ? lastCanvas
-          : groups.find((group) => group.id === inheritFrom).context.context
-              .canvas;
+          : inheritedGroup && inheritedGroup.context
+            ? inheritedGroup.context.context.canvas
+            : null;
 
-      drawTo.drawImage(
-        canvasToInherit,
-        0,
-        0,
-        drawTo.canvas.width,
-        drawTo.canvas.height,
-      );
-
-      if (pipeline && !isGalleryGroup) {
-        bufferContext.drawImage(
+      if (canvasToInherit) {
+        drawTo.drawImage(
           canvasToInherit,
           0,
           0,
           drawTo.canvas.width,
           drawTo.canvas.height,
         );
+
+        if (pipeline && !isGalleryGroup) {
+          bufferContext.drawImage(
+            canvasToInherit,
+            0,
+            0,
+            drawTo.canvas.width,
+            drawTo.canvas.height,
+          );
+        }
       }
     }
 
@@ -235,6 +258,10 @@ async function loop(delta, features, fftOutput) {
         canvas = drawTo.canvas;
         firstModuleDrawn = true;
       } else if (isGalleryGroup) {
+        if (!aux) {
+          continue;
+        }
+
         canvas = aux.canvas;
       }
 
@@ -246,6 +273,12 @@ async function loop(delta, features, fftOutput) {
       const { props, data } = module;
       const moduleDefinition = registered[module.$moduleName];
       let moduleData = data;
+
+      if (!moduleDefinition) {
+        // The module was removed or unregistered while the Group still
+        // referenced it. Skip it instead of throwing on every frame.
+        continue;
+      }
 
       if (moduleDefinition.update) {
         moduleData = renderers[module.meta.type].updateModule({
