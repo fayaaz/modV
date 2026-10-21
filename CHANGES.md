@@ -13,3 +13,5 @@
 - [x] Transitions don't seem to work at all in performance mode. (done in c3566db1)
 - [x] Remove any reference to autopilot - call it performance mode. The performance mode doesn't change behaviour (done in 3f632f27)
 - [x] Beatdetektor gets the bpm wrong all the time. Especially with drum n bass around 170bpm+. Possibly look at what mixxx uses now or a more modern BPM detector. (done in c2ef4f5f)
+- [x] Loopback audio capture (e.g. capture of now playing desktop audio) - this is already possible in firefox as an audio device. Consider a pipewire capture (done in 1c09269c)
+- [x] Add many more default scenes making use of audio controlled glitch effects, effects sometimes only on the foreground. Kaleidoscope and twirled geometric shapes are good. (done in fc4c82e1)
