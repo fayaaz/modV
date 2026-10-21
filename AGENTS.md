@@ -13,6 +13,7 @@ All yarn work is Dockerised. The host only needs Docker (with Buildx) and make �
 - `make yarn ARGS="build"` — bundle main / preload / renderer into `out/`.
 - `make lint` — Dockerised `yarn lint` (`eslint . --fix`, Prettier runs through ESLint).
 - `make format` — Dockerised `yarn format`.
+- `make test-unit` — Dockerised Vitest unit tests (`tests/unit/**/*.test.js`, Node environment). Single file: `make test-unit ARGS="tests/unit/<name>.test.js"`. Watch mode: `make yarn ARGS="test:unit:watch"`.
 - `make test-e2e` — Dockerised Playwright. Electron is launched with `--no-sandbox` and the Wayland/X11, PulseAudio and GPU forwarding above. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`.
 - `make yarn ARGS="<args>"` — any other yarn command, e.g. `make yarn ARGS="add three"`.
 - `make docker-reset` — delete the `modv-node-modules` volume; the next yarn target reseeds it from the toolchain image (use after dependency changes if `make install` is not enough).
@@ -21,6 +22,16 @@ All yarn work is Dockerised. The host only needs Docker (with Buildx) and make �
 Commands run against the repo bind-mounted at `/app`. Dependencies live in the `modv-node-modules` named volume, seeded from the `toolchain` image and chowned to the host UID/GID so generated files stay writable.
 
 CI is the `nightly.yml` release workflow (Docker build on push to `main` and a nightly schedule) plus `browserslist.yml`. There is **no lint/test CI workflow** — run `make lint` locally.
+
+## Test-driven development
+
+Follow TDD for all changes. Write a failing test first, then the minimum implementation to make it pass, then refactor. Do not consider a task complete while its tests are absent, failing, or skipped.
+
+- Prefer a unit test for pure logic (audio analysis, detectors, data transforms): add `tests/unit/<area>.test.js` and run `make test-unit ARGS="tests/unit/<area>.test.js"`.
+- Use an e2e spec for behaviour that needs Electron, the worker store, or rendering: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`.
+- Confirm the test fails for the right reason before writing implementation code.
+- Keep regression tests for bugs fixed; the failing test should reproduce the reported behaviour.
+- After implementing, re-run the relevant suite(s) and `make lint` before reporting completion.
 
 ## Architecture (three execution contexts)
 
@@ -74,6 +85,7 @@ Gotchas:
 - `worker/store/modules/scenes.js` — `applyScene`, `removeScene`, `setPerformanceEnabled`, `updatePerformance`, `loadScenesFromDisk`; `worker/loop.js` dispatches `scenes/tick` every frame for crossfades/performance mode.
 - `performance.allowedTransitions` is a list of transition names; each scene change picks one at random (legacy single `transition` values migrate to a one-item list). Fade is the fallback when the list is empty or unavailable.
 - Global performance timing applies to Scenes without an explicit per-Scene override (`timingOverride`); editing a Scene's Time fields creates an override. Dwell only advances while no transition is running.
+- `scenes/stopPerformance` completes any in-flight crossfade (transition state plus pending Group cleanup) before disabling performance mode, so a stopped performance mode never leaves a stale transition or orphaned Groups behind.
 - Scene JSON lives in the project media directory under `scene/` (read/save handlers in `src/main/media-manager/`, `delete-scene` IPC in `src/main/window-prefs.js`). UI: `src/renderer/src/components/Scenes.vue`.
 
 ## Lint & formatting
@@ -88,12 +100,33 @@ Gotchas:
 - `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `make yarn ARGS="remove <pkg>"`, run `make install` again to reapply patches (see issue #554).
 - electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`, plus a `toolchain` stage for the Dockerised yarn commands); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `make build` is the supported local build. Do not run `electron-builder` locally.
 
+### Vite / build toolchain
+
+- Version matrix (Vite 6 upgrade): `vite` `^6.4.4` (from `^5.0.12`), `electron-vite` `^3.1.0` (from `^2.0.0`, for Vite 6 support), `@vitejs/plugin-vue` `^5.2.4`, `vite-plugin-node-polyfills` `^0.24.0`, `vite-svg-loader` `^5.1.3`, `vitest` `^5.0.5` (from `^2.1.9`; removes the duplicate Vite 5 toolchain — Vitest 5 requires Vite >= 6.4). The unused `vite-plugin-electron-renderer` was removed.
+- In `electron.vite.config.mjs`, `nodePolyfills()` must run **before** `vue()`/`svgLoader()` — plugin order is sensitive.
+- Vite 6 enables `commonjsOptions.strictRequires` by default. Worker `require()` paths (`fs`, `path`, `grandiose`, `node-osc`) should be smoke-tested whenever build config changes.
+- Verified after the upgrade: unit `38/38` pass, `make lint` clean, `make build` produces the AppImage and `.deb`, and the Vite 6 e2e smoke passes `25/25`.
+
 ## Release
 
 Nightly releases are produced by `.github/workflows/nightly.yml` (Docker build on `main` pushes plus a nightly schedule) and published as the rolling `nightly` prerelease. There is no `semantic-release` workflow; do not manually bump `version` in `package.json` (CI overrides it per build).
+
+## Unit testing notes
+
+Vitest 5 (`^5.0.5`) runs on Vite 6 (`^6.4.4`) and is configured in `vitest.config.mjs` (`environment: "node"`, `include: ["tests/unit/**/*.test.js"]`, `@renderer` alias). Import modules with relative paths from `tests/unit/`. The current suites cover `audio-bands`, `tempo-detector`, `phrase-detector`, `point10/audioBridge` and `point10/props`. Keep unit tests free of Electron/WebGL so they run in plain Node.
 
 ## e2e testing notes
 
 Tests use a singleton page object `modVApp` (`tests/e2e/pageObjectModel/`) that launches the built app once in `beforeAll` and waits for the `is-modv-ready` IPC. Helpers `evaluateMainState`, `evaluateWorkerState`, `evaluateWorker` and `checkWorkerAndMainState` read state from both contexts; `evaluateWorkerState` runs in the dedicated worker using `self.store` and `self._get` (lodash.get, exposed for tests). Custom matcher `toBeJSON` is in `tests/e2e/extentions/toBeJSON.js`.
 
-Specs under `tests/e2e/spec/{scenes,point10,packaging}/` cover scene snapshots/performance, Point10 effect/transition registration, and the trimmed Linux bundle.
+The container runs as the host UID/GID, so it does **not** inherit the host's supplementary `video`/`render` groups. `make test-e2e` adds the `/dev/dri` device GIDs via `--group-add`; without that the forwarded GPU nodes are unreadable, Chromium's GPU process aborts (`exit_code=133` / SIGTRAP) under load, and every renderer sharing the app goes with it. If e2e crashes in `performance mode dwell`, check `/dev/dri` access first.
+
+Docker runs use `--ulimit core=0` and `.dockerignore` excludes `core*`: a crashed renderer used to write a ~1.1 TB sparse core dump into the repo, which then got copied into the Docker build context and filled the disk.
+
+The page object logs Electron stderr (`ELECTRON_ENABLE_LOGGING=1`), listens for `crash`/`close`, and `getWorker()` waits for the worker before evaluating, so a renderer crash fails with a clear message instead of `Cannot read properties of undefined`. `src/main/index.js` logs `render-process-gone` / `child-process-gone` reasons and exit codes.
+
+Specs under `tests/e2e/spec/{scenes,point10,packaging}/` cover scene snapshots/performance, Point10 effect/transition registration, and the trimmed Linux bundle. Verified after the Vite 6 upgrade: full suite `58/58` passes in ~49s (3 consecutive runs).
+
+Known flake: `performance mode dwell advances in real time` can still take the Electron renderer down natively (`reason=crashed`, `exitCode=5` / SIGTRAP) — in one host-GPU state the suite was `58/58` three times in a row, in another it failed the same spec every time. The container shares the GPU with the desktop compositor and other apps, so the rate depends on host GPU load. It is not a Vite regression and is independent of the GL backend (SwiftShader), of WebGPU, and of the WebGL context cap (16 or 32). Re-run the spec to confirm.
+
+Runs use **1 worker** (`MODV_E2E_WORKERS` overrides). Every worker launches its own Electron app, and the suite is GPU-bound: two concurrent apps over-subscribe the single GPU and Chromium aborts the renderer (`reason=crashed`, `exitCode=5`), failing whichever specs were running (reproducibly the ISF transition and performance-dwell specs). One worker is as fast as two and stable; use `--workers=2` only with GPU isolation.
