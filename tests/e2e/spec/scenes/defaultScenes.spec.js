@@ -10,7 +10,6 @@ const GROUP_NAMES = ["Background", "Foreground", "Effects"];
 
 const REQUIRED_ISF_FILTERS = [
   "Bloom",
-  "Dirty Lens",
   "VVMotionBlur 3.0",
   "Vignette",
   "Hue-Saturation",
@@ -211,6 +210,44 @@ test("seeds the version 3 scenes with every module intact", async () => {
         group.modules.map((moduleId) => scene.modules[moduleId].$moduleName),
       ).toEqual(groupDefinition.modules.map((module) => module.name));
     }
+  }
+});
+
+test("default scenes chain controls to bass and a BPM tween", async () => {
+  const scenes = await modVApp.evaluateWorkerState("scenes.scenes");
+  const defaultNames = new Set(
+    DEFAULT_SCENES.map((scene) => sceneKey(scene.name)),
+  );
+  const seededDefaults = scenes.filter((scene) =>
+    defaultNames.has(sceneKey(scene.name)),
+  );
+
+  expect(seededDefaults.length).toBeGreaterThanOrEqual(18);
+
+  for (const scene of seededDefaults) {
+    const links = Object.values(scene.inputLinks || {});
+    const bassLink = links.find(
+      (link) =>
+        link.source === "meyda" &&
+        Array.isArray(link.args) &&
+        link.args[0] === "bass",
+    );
+    const bpmTweenLink = links.find(
+      (link) =>
+        link.source === "tween" &&
+        scene.tweens &&
+        scene.tweens[link.id] &&
+        scene.tweens[link.id].useBpm === true,
+    );
+
+    expect(
+      bassLink,
+      `${scene.name} should link a control to bass`,
+    ).toBeTruthy();
+    expect(
+      bpmTweenLink,
+      `${scene.name} should link a control to a BPM tween`,
+    ).toBeTruthy();
   }
 });
 

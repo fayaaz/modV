@@ -115,7 +115,7 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Disco Ball",
+    name: "Chromatic Sphere",
     introducedVersion: 1,
     minSeconds: 8,
     maxSeconds: 20,
@@ -128,7 +128,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Disco Ball",
+            name: "Point10 Chromatic Wave",
             props: {
               gain: 1.25,
               bassGain: 1.4,
@@ -340,12 +340,10 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Dirty Lens",
+            name: "Vignette",
             props: {
-              scale: 12,
-              brightness: 0.35,
-              brightnessCurve: 1.2,
-              radius: 0.6,
+              intensity: 20,
+              extension: 0.35,
             },
           },
         ],
@@ -912,13 +910,10 @@ const DEFAULT_SCENES = [
             },
           },
           {
-            name: "Dirty Lens",
+            name: "Bloom",
             props: {
-              scale: 14,
-              brightness: 0.35,
-              brightnessCurve: 1.2,
-              radius: 0.55,
-              noiseSeed: 0.2,
+              blurAmount: 10,
+              intensity: 0.45,
             },
           },
         ],
@@ -1310,7 +1305,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Disco Ball",
+            name: "Point10 Ring Of Fire",
             props: {
               gain: 1.2,
               bassGain: 1.4,
@@ -1430,7 +1425,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Disco Ball",
+            name: "Point10 Chromatic Wave",
             props: {
               gain: 1.25,
               bassGain: 1.45,
@@ -1630,7 +1625,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Disco Ball",
+            name: "Point10 Ring Of Fire",
             props: {
               gain: 1.25,
               bassGain: 1.45,

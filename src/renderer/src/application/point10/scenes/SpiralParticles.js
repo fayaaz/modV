@@ -73,7 +73,7 @@ export class SpiralParticles extends BaseScene {
 
   update(dt, audioData) {
     super.update(dt, audioData);
-    if (!audioData) return;
+    if (!audioData || audioData.length === 0) return;
 
     this.points.rotation.y += dt * (0.1 + (audioData[0] / 255) * 0.5);
 

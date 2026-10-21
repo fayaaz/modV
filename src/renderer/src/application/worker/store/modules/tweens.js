@@ -237,6 +237,12 @@ const mutations = {
   UPDATE_TWEEN_VALUE(state, { id, key, value }) {
     state.tweens[id][key] = value;
   },
+
+  REMOVE_TWEEN(state, { id }) {
+    delete state.tweens[id];
+    delete frames[id];
+    delete progress[id];
+  },
 };
 
 function advanceFrame(id) {

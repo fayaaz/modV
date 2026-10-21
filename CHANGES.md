@@ -15,3 +15,20 @@
 - [x] Beatdetektor gets the bpm wrong all the time. Especially with drum n bass around 170bpm+. Possibly look at what mixxx uses now or a more modern BPM detector. (done in c2ef4f5f)
 - [x] Loopback audio capture (e.g. capture of now playing desktop audio) - this is already possible in firefox as an audio device. Consider a pipewire capture (done in 1c09269c)
 - [x] Add many more default scenes making use of audio controlled glitch effects, effects sometimes only on the foreground. Kaleidoscope and twirled geometric shapes are good. (done in fc4c82e1)
+- [x] Cube Floor import does not work (black) (done)
+- [x] Don't use dirty lens in any of the defaults (done)
+- [x] Don't use Point10 disco ball, remove that completely as a module (done)
+- [x] Import wormhole from ../Point10 (done)
+- [x] Import it is coming for you from Point10. For Plane9 presets do a full threejs port. (done)
+- [x] Import Boxy from Point10.  For Plane9 presets do a full threejs port. (done)
+- [x] Import Attractor Particles from Point10. (done)
+- [x] Loopback audio does not work just says system audio capture is not available when there is a monitor device for the main audio device. Is there any way to use native pipewire? (done)
+- [x] Spiral Particles don't work like Point10 at all. (done)
+- [x] Spectrum bars  do not actually provide a spectrum (done)
+- [x] The treble audio feature reads much lower than mids and bass. Treble should be 2khz and up. (done)
+- [x] Import Around and Around Plus form Point10 (done)
+- [x] Import Light Tunnel from Point10 (done)
+- [x] Import Square Tunnel from Point10 (done)
+
+Hints:
+- Point10 is available in the browser at localhost:5199 accessible by browser harness

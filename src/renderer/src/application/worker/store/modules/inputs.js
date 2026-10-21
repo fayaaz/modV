@@ -186,7 +186,14 @@ const actions = {
       return false;
     }
 
+    const link = writeTo.inputLinks[inputId];
+
     commit("REMOVE_INPUT_LINK", { inputId, writeToSwap });
+
+    if (link && link.source === "tween") {
+      commit("tweens/REMOVE_TWEEN", { id: inputId }, { root: true });
+    }
+
     return true;
   },
 

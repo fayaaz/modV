@@ -352,9 +352,11 @@ class ModV {
 
     if (features) {
       const timeDomain = getByteTimeDomainData();
+      const byteFrequencyData = getByteFrequencyData();
       const bands = this.audioBands.update({
         floatFrequencyData: getFloatFrequencyData(),
         byteTimeDomainData: timeDomain,
+        byteFrequencyData,
         sampleRate: this.audioContext ? this.audioContext.sampleRate : 44100,
       });
 
@@ -367,7 +369,7 @@ class ModV {
       features.p10 = bands;
 
       this.updateBeatDetektor && this.updateBeatDetektor(delta, features);
-      features.byteFrequencyData = Array.from(getByteFrequencyData() || []);
+      features.byteFrequencyData = Array.from(byteFrequencyData || []);
       // ISF audio inputs expect 512 time-domain values; the analyser now hands
       // over fftSize samples for AudioBands' wave buffer.
       features.byteTimeDomainData = Array.from(

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { AudioBands } from "../../src/renderer/src/application/audio-bands.js";
 import { Point10AudioBridge } from "../../src/renderer/src/application/point10/audioBridge.js";
+import { P9Audio } from "../../src/renderer/src/application/point10/plane9/P9Audio.js";
 
 const defaultLevers = () => ({
   gain: 1,
@@ -102,6 +104,34 @@ describe("Point10AudioBridge", () => {
     expect(bridge.grid[0]).toBeLessThan(0.4);
   });
 
+  it("builds a real spectrum from the AudioBands payload", () => {
+    const fftSize = 1024;
+    const sampleRate = 44100;
+    const byteFrequencyData = new Uint8Array(fftSize);
+
+    byteFrequencyData[2] = 100;
+    byteFrequencyData[14] = 50;
+    byteFrequencyData[fftSize - 1] = 200;
+
+    const audioBands = new AudioBands();
+    const payload = audioBands.update({
+      floatFrequencyData: new Float32Array(fftSize).fill(-100),
+      byteTimeDomainData: new Uint8Array(fftSize).fill(128),
+      byteFrequencyData,
+      sampleRate,
+    });
+
+    const bridge = new Point10AudioBridge();
+    bridge.update(0.1, payload, defaultLevers());
+
+    expect(payload.byteFrequencyData).toHaveLength(fftSize);
+    expect(bridge.spectrum).toHaveLength(fftSize);
+    expect(bridge.spectrum[2]).toBe(100);
+    expect(bridge.spectrum[14]).toBe(50);
+    expect(bridge.spectrum[fftSize - 1]).toBe(200);
+    expect(Array.from(bridge.spectrum)).toEqual(Array.from(byteFrequencyData));
+  });
+
   it("scales the byte spectrum by the matching band gain", () => {
     const bridge = new Point10AudioBridge();
     const byteFrequencyData = new Uint8Array(1024);
@@ -131,5 +161,45 @@ describe("Point10AudioBridge", () => {
     });
 
     expect(bridge.spectrum[2]).toBe(255);
+  });
+
+  it("exposes the engine fields the vendored P9Audio reads", () => {
+    const bridge = new Point10AudioBridge();
+
+    bridge.update(0.1, makePayload(), defaultLevers());
+
+    expect(bridge.freqArray).toHaveLength(1024);
+    expect(bridge.freqArray[0]).toBe(0.5);
+    expect(bridge.freqMagL).toHaveLength(1024);
+    expect(bridge.freqMagR).toHaveLength(1024);
+    expect(bridge.freqMagL[0]).toBe(0.5);
+    expect(bridge.freqMagR[0]).toBe(0.5);
+    expect(bridge.ctx.sampleRate).toBe(44100);
+    expect(bridge.dataArray).toHaveLength(1024);
+    expect(bridge.dataArray[0]).toBe(191);
+  });
+
+  it("tracks sample rate changes on the P9Audio ctx alias", () => {
+    const bridge = new Point10AudioBridge();
+
+    bridge.update(0.1, makePayload({ sampleRate: 48000 }), defaultLevers());
+
+    expect(bridge.sampleRate).toBe(48000);
+    expect(bridge.ctx.sampleRate).toBe(48000);
+  });
+
+  it("drives the vendored P9Audio from the bridge", () => {
+    const bridge = new Point10AudioBridge();
+
+    bridge.update(0.1, makePayload(), defaultLevers());
+
+    const p9 = new P9Audio(bridge);
+    p9.update(0.1);
+
+    expect(p9.hasAudio).toBe(true);
+    expect(p9.freq[0]).toBe(0.5);
+    expect(p9.wave[0]).toBeCloseTo(0.5, 1);
+    expect(p9.bands[0]).toBeGreaterThan(0);
+    expect(p9.band(-1, 0, 0)).toBe(p9.bands[0]);
   });
 });
