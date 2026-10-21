@@ -16,6 +16,7 @@ import * as THREE from "three";
 import * as THREE_GPU from "three/webgpu";
 import { Point10AudioBridge } from "./audioBridge.js";
 import { RESPONSIVENESS_PROPS, readLevers } from "./props.js";
+import { createFrameClock } from "./timing.js";
 
 const instances = new Map();
 
@@ -142,6 +143,7 @@ function createInstance(SceneClass, width, height) {
     camera,
     bridge,
     scene,
+    frameClock: createFrameClock(),
     width,
     height,
     lastUsed: 0,
@@ -182,6 +184,7 @@ function createWebGPUInstance(SceneClass, width, height) {
     host,
     renderTarget: null,
     frameData: null,
+    frameClock: createFrameClock(),
     webgpu: true,
     ready: false,
     bitmap: null,
@@ -333,7 +336,6 @@ function drawScene({
   canvas,
   context,
   features,
-  delta,
   props,
   isGallery,
 }) {
@@ -361,15 +363,19 @@ function drawScene({
     resizeInstance(instance, canvas.width, canvas.height);
   }
 
-  instance.lastUsed = performance.now();
-  evictInstances(instance.lastUsed);
+  // `delta` is the absolute requestAnimationFrame timestamp, not elapsed
+  // frame time (see renderers/2d/index.js), so the instance keeps its own
+  // clock and advances by real seconds.
+  const now = performance.now();
+  instance.lastUsed = now;
+  evictInstances(now);
 
   // async GPU/backend bring-up: the scene reports ready when it can draw
   if (instance.webgpu && instance.ready === false) {
     return;
   }
 
-  const dt = Math.min(0.1, (delta || 16.7) / 1000);
+  const dt = instance.frameClock(now);
 
   instance.bridge.update(dt, features ? features.p10 : null, readLevers(props));
 
@@ -427,7 +433,7 @@ function createPoint10Module({
     // must stay JSON-safe (see the note above)
     data: {},
 
-    draw({ canvas, context, features, delta, props, moduleId, isGallery }) {
+    draw({ canvas, context, features, props, moduleId, isGallery }) {
       drawScene({
         moduleId: moduleId || key,
         SceneClass,
@@ -435,7 +441,6 @@ function createPoint10Module({
         canvas,
         context,
         features,
-        delta,
         props,
         isGallery,
       });
