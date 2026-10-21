@@ -39,6 +39,9 @@ export default defineConfig({
       alias: [{ find: "@renderer", replacement: resolve("src/renderer/src") }],
     },
     plugins: [
+      nodePolyfills({
+        include: ["events"],
+      }),
       vue({
         template: {
           compilerOptions: {
@@ -47,9 +50,6 @@ export default defineConfig({
         },
       }),
       svgLoader(),
-      nodePolyfills({
-        include: ["events"],
-      }),
     ],
     worker: {
       format: "es",
