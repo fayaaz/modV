@@ -34,8 +34,18 @@ app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 // Point10's WebGPU scenes (three.js TSL) need a real adapter, not the
 // software fallback. Vulkan is the backend that works on Linux without the
 // SwiftShader path Electron uses by default.
-app.commandLine.appendSwitch("enable-features", "Vulkan,WebGPU");
+//
+// The loopback features let getDisplayMedia({ audio: true }) return the
+// desktop audio, which modV uses for its "System Audio (loopback)" input.
+app.commandLine.appendSwitch(
+  "enable-features",
+  "Vulkan,WebGPU,MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride,PulseaudioLoopbackForScreenShare",
+);
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
+
+// Allows PulseAudio/PipeWire monitor sources to be listed and captured as
+// input devices on Linux, which is the fallback backend for system audio.
+app.commandLine.appendSwitch("allow-monitor-inputs", "true");
 
 const isDevelopment = process.env.NODE_ENV !== "production";
 

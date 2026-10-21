@@ -4,6 +4,14 @@ const state = {
 
   currentAudioSource: null,
   currentVideoSource: null,
+
+  // State of the system audio (loopback) capture
+  systemAudio: {
+    supported: false,
+    active: false,
+    label: null,
+    error: null,
+  },
   // Multi-select support: list of selected video deviceIds
   selectedVideoSources: [],
 
@@ -42,6 +50,13 @@ const mutations = {
 
   SET_CURRENT_AUDIO_SOURCE(state, { audioId }) {
     state.currentAudioSource = audioId;
+  },
+
+  SET_SYSTEM_AUDIO_STATE(state, payload) {
+    state.systemAudio = {
+      ...state.systemAudio,
+      ...payload,
+    };
   },
 
   SET_CURRENT_VIDEO_SOURCE(state, { videoId }) {

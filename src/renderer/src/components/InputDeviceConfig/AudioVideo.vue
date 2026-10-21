@@ -33,6 +33,20 @@
 
         <c span="1..">
           <grid columns="4">
+            <c span="1"></c>
+            <c span="3">
+              <div v-if="systemAudioError" class="system-audio-error">
+                {{ systemAudioError }}
+              </div>
+              <div v-else-if="systemAudioActive" class="system-audio-status">
+                (active: {{ systemAudioLabel }})
+              </div>
+            </c>
+          </grid>
+        </c>
+
+        <c span="1..">
+          <grid columns="4">
             <c span="1">Audio Gain</c>
             <c span="2">
               <Range
@@ -130,6 +144,8 @@
 </template>
 
 <script>
+import { isSystemAudioSource } from "../../application/system-audio";
+
 export default {
   data() {
     return {
@@ -138,6 +154,7 @@ export default {
       switchingAudio: false,
       switchingVideo: false,
       gainRangeValue: 1,
+      audioSelectValue: null,
     };
   },
 
@@ -147,7 +164,13 @@ export default {
         this.$modV.store.state.mediaStream.audio,
       );
 
-      return audioInputs.sort((a, b) => a.label.localeCompare(b.label));
+      return audioInputs.sort((a, b) => {
+        if (!!a.isSystemAudio !== !!b.isSystemAudio) {
+          return a.isSystemAudio ? -1 : 1;
+        }
+
+        return a.label.localeCompare(b.label);
+      });
     },
 
     videoInputs() {
@@ -160,14 +183,73 @@ export default {
 
     currentAudioSource: {
       get() {
+        if (this.audioSelectValue !== null) {
+          return this.audioSelectValue;
+        }
+
         return this.$modV.store.state.mediaStream.currentAudioSource;
       },
 
       async set(value) {
+        const previous = this.$modV.store.state.mediaStream.currentAudioSource;
+
         this.switchingAudio = true;
-        await this.$modV.setupMedia({ audioId: value });
-        this.switchingAudio = false;
+        this.audioSelectValue = value;
+
+        try {
+          if (isSystemAudioSource(value)) {
+            const captured = await this.$modV.systemAudioCapture.capture();
+
+            await this.$modV.setupMedia({
+              audioId: value,
+              audioStream: captured.stream,
+            });
+
+            this.setSystemAudioState({
+              supported: true,
+              active: true,
+              label: captured.label,
+              error: null,
+            });
+          } else {
+            await this.$modV.setupMedia({ audioId: value });
+
+            this.setSystemAudioState({
+              active: false,
+              label: null,
+              error: null,
+            });
+          }
+        } catch (e) {
+          this.setSystemAudioState({
+            supported: true,
+            active: false,
+            label: null,
+            error: e?.message || String(e),
+          });
+
+          this.revertAudioSource(previous);
+        } finally {
+          this.audioSelectValue = null;
+          this.switchingAudio = false;
+        }
       },
+    },
+
+    systemAudioState() {
+      return this.$modV.store.state.mediaStream.systemAudio || {};
+    },
+
+    systemAudioActive() {
+      return !!this.systemAudioState.active;
+    },
+
+    systemAudioLabel() {
+      return this.systemAudioState.label || "";
+    },
+
+    systemAudioError() {
+      return this.systemAudioState.error || "";
     },
 
     selectedVideoSourceIds() {
@@ -296,6 +378,24 @@ export default {
   },
 
   methods: {
+    setSystemAudioState(payload) {
+      this.$modV.store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
+      this.$modV._store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
+    },
+
+    revertAudioSource(previous) {
+      if (
+        this.$modV.store.state.mediaStream.currentAudioSource !== previous
+      ) {
+        this.$modV.store.commit("mediaStream/SET_CURRENT_AUDIO_SOURCE", {
+          audioId: previous,
+        });
+        this.$modV._store.commit("mediaStream/SET_CURRENT_AUDIO_SOURCE", {
+          audioId: previous,
+        });
+      }
+    },
+
     stopVideoDevice(deviceId) {
       const imageCapture = this.$modV._imageCaptures?.[deviceId];
 
@@ -383,5 +483,13 @@ export default {
 
 .device-config .range-control {
   max-width: 240px !important;
+}
+
+.system-audio-status {
+  color: #8f8;
+}
+
+.system-audio-error {
+  color: #f88;
 }
 </style>

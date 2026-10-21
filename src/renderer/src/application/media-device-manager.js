@@ -1,4 +1,8 @@
 import store from "./worker/store";
+import {
+  SYSTEM_AUDIO_SOURCE_ID,
+  SYSTEM_AUDIO_SOURCE_LABEL,
+} from "./system-audio";
 
 class MediaDeviceManager {
   constructor() {
@@ -17,7 +21,14 @@ class MediaDeviceManager {
   async enumerateDevices() {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const sources = {
-      audio: [],
+      audio: [
+        {
+          deviceId: SYSTEM_AUDIO_SOURCE_ID,
+          label: SYSTEM_AUDIO_SOURCE_LABEL,
+          kind: "audioinput",
+          isSystemAudio: true,
+        },
+      ],
       video: [],
     };
 
