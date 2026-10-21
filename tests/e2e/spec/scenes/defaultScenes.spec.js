@@ -19,6 +19,25 @@ const REQUIRED_ISF_FILTERS = [
   "Slit Scan",
 ];
 
+const AUDIO_GLITCH_MODULES = [
+  "Point10 Digital Glitch",
+  "Point10 RGB Shift",
+  "Point10 Color Distort",
+  "Point10 Contrast",
+];
+
+const KALEIDOSCOPE_MODULES = ["Kaleidoscope", "Kaleidoscope Tile"];
+
+const TWIRL_MODULES = [
+  "Twirl",
+  "Spiral",
+  "UltimateSpiral",
+  "rotozoomer",
+  "Point10 Swirl Grid",
+  "Point10 Banded Swirl",
+  "Point10 Smooth Swirl Grid",
+];
+
 const sceneKey = (name) =>
   String(name || "")
     .trim()
@@ -28,6 +47,12 @@ function getModuleNames(scene) {
   return scene.groups.flatMap((group) =>
     (group.modules || []).map((module) => module.name),
   );
+}
+
+function getGroupModules(scene, groupName) {
+  const group = scene.groups.find((item) => item.name === groupName);
+
+  return (group?.modules || []).map((module) => module.name);
 }
 
 function getEffectsModuleNames(scene) {
@@ -103,6 +128,90 @@ test("uses a spread of registered ISF filters in Effects groups", async () => {
   expect(
     DEFAULT_SCENES.some((scene) => getModuleNames(scene).includes("Bands")),
   ).toBe(true);
+});
+
+test("ships a version 3 batch of glitch, kaleidoscope and twirl scenes", async () => {
+  const registered = await modVApp.evaluateWorkerState("modules.registered");
+  const newBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 3,
+  );
+
+  expect(DEFAULTS_VERSION).toBe(3);
+  expect(newBatch.length).toBeGreaterThanOrEqual(10);
+
+  for (const scene of newBatch) {
+    const names = getModuleNames(scene);
+
+    for (const name of names) {
+      expect(registered[name]).toBeDefined();
+    }
+
+    expect(names.some((name) => AUDIO_GLITCH_MODULES.includes(name))).toBe(
+      true,
+    );
+  }
+
+  const audioReactive = AUDIO_GLITCH_MODULES.filter(
+    (name) =>
+      registered[name] &&
+      (registered[name].meta.audioFeatures || []).length > 0,
+  );
+
+  expect(audioReactive.length).toBe(AUDIO_GLITCH_MODULES.length);
+
+  const kaleidoscopeScenes = newBatch.filter((scene) =>
+    getModuleNames(scene).some((name) => KALEIDOSCOPE_MODULES.includes(name)),
+  );
+  const twirlScenes = newBatch.filter((scene) =>
+    getModuleNames(scene).some((name) => TWIRL_MODULES.includes(name)),
+  );
+
+  expect(kaleidoscopeScenes.length).toBeGreaterThanOrEqual(3);
+  expect(twirlScenes.length).toBeGreaterThanOrEqual(3);
+
+  const foregroundOnly = newBatch.filter((scene) => {
+    const foreground = getGroupModules(scene, "Foreground");
+    const elsewhere = scene.groups
+      .filter((group) => group.name !== "Foreground")
+      .flatMap((group) => (group.modules || []).map((module) => module.name));
+
+    return foreground.some(
+      (name) =>
+        AUDIO_GLITCH_MODULES.includes(name) && !elsewhere.includes(name),
+    );
+  });
+
+  expect(foregroundOnly.length).toBeGreaterThanOrEqual(3);
+});
+
+test("seeds the version 3 scenes with every module intact", async () => {
+  const newBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 3,
+  );
+  const scenes = await modVApp.evaluateWorkerState("scenes.scenes");
+
+  for (const definition of newBatch) {
+    const scene = scenes.find((item) => item.name === definition.name);
+
+    expect(scene).toBeTruthy();
+
+    const groupNames = scene.groups.map((group) => group.name);
+
+    expect(groupNames).toEqual(
+      expect.arrayContaining(["Background", "Foreground", "Effects"]),
+    );
+
+    for (const group of scene.groups) {
+      const groupDefinition = definition.groups.find(
+        (item) => item.name === group.name,
+      );
+
+      expect(groupDefinition).toBeTruthy();
+      expect(
+        group.modules.map((moduleId) => scene.modules[moduleId].$moduleName),
+      ).toEqual(groupDefinition.modules.map((module) => module.name));
+    }
+  }
 });
 
 test("seeds every default scene on a fresh install", () => {

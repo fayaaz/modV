@@ -8,9 +8,10 @@
 // meta (alpha, blend mode, ...).
 //
 // `introducedVersion` lets existing installs receive only the Scenes added
-// since their last seeding pass. Version 1 is the original six Scenes.
+// since their last seeding pass. Version 1 is the original six Scenes,
+// version 2 the second batch and version 3 the glitch/Kaleidoscope batch.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 2;
+export const DEFAULTS_VERSION = 3;
 
 const sceneKey = (name) =>
   String(name || "")
@@ -1478,6 +1479,799 @@ const DEFAULT_SCENES = [
               angle: 0.25,
               scale: 1.2,
               colorize: 0.2,
+              center: [0.5, 0.5],
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Fractured Kaleidoscope",
+    introducedVersion: 3,
+    minSeconds: 6,
+    maxSeconds: 16,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Mycelium",
+            props: {
+              gain: 1.15,
+              bassGain: 1.5,
+              midGain: 1.1,
+              smoothing: 0.12,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Kaleidoscope",
+            props: {
+              sides: 8,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 4,
+              intensity: 0.4,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Prism Reliquary",
+    introducedVersion: 3,
+    minSeconds: 9,
+    maxSeconds: 22,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Spiral Particles",
+            props: {
+              gain: 1.15,
+              bassGain: 1.2,
+              trebleGain: 1.4,
+              smoothing: 0.05,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+            meta: { alpha: 0.75, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Kaleidoscope Tile",
+            props: {
+              size: 0.6,
+              sides: 12,
+              rotation: 0.125,
+              angle: 0.05,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 5,
+              intensity: 0.45,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Broken Mirror Ball",
+    introducedVersion: 3,
+    minSeconds: 7,
+    maxSeconds: 18,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Disco Ball",
+            props: {
+              gain: 1.25,
+              bassGain: 1.45,
+              smoothing: 0.06,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Kaleidoscope",
+            props: {
+              sides: 5,
+            },
+          },
+          {
+            name: "Point10 Contrast",
+            props: {},
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Twirl Reactor",
+    introducedVersion: 3,
+    minSeconds: 8,
+    maxSeconds: 20,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Geometric Tunnel",
+            props: {
+              gain: 1.2,
+              bassGain: 1.4,
+              trebleGain: 1.1,
+              smoothing: 0.06,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Color Distort",
+            props: {},
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Twirl",
+            props: {
+              radius: 0.9,
+              amount: 2.4,
+              center: [0.5, 0.5],
+            },
+          },
+          {
+            name: "Vignette",
+            props: {
+              intensity: 18,
+              extension: 0.3,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Spiral Static",
+    introducedVersion: 3,
+    minSeconds: 7,
+    maxSeconds: 19,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Chromatic Wave",
+            props: {
+              gain: 1.2,
+              bassGain: 1.4,
+              midGain: 1.1,
+              smoothing: 0.1,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Spiral",
+            props: {
+              rotation: 0.08,
+              count: 9,
+              width: 0.09,
+              softness: 0.35,
+            },
+            meta: { alpha: 0.55, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 4,
+              intensity: 0.35,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Ultimate Drift",
+    introducedVersion: 3,
+    minSeconds: 10,
+    maxSeconds: 26,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Water Ripple",
+            props: {
+              gain: 1.2,
+              bassGain: 1.35,
+              midGain: 1.1,
+              smoothing: 0.16,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "UltimateSpiral",
+            props: {
+              rate: 10,
+              density: 48,
+              sectors: 32,
+              shape: 24,
+              smooth: 0.08,
+              vanishingpoint: 0.5,
+            },
+            meta: { alpha: 0.5, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 6,
+              intensity: 0.4,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Roto Zoom Riot",
+    introducedVersion: 3,
+    minSeconds: 6,
+    maxSeconds: 15,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Cube Floor",
+            props: {
+              gain: 1.3,
+              bassGain: 1.55,
+              smoothing: 0.05,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "rotozoomer",
+            props: {
+              rotationSpeed: 55,
+              zoomScale: 4,
+              timeScale: 1.5,
+            },
+          },
+          {
+            name: "Point10 Contrast",
+            props: {},
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Glitch Bloom Cathedral",
+    introducedVersion: 3,
+    minSeconds: 9,
+    maxSeconds: 23,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Smoke Room",
+            props: {
+              gain: 1.15,
+              bassGain: 1.35,
+              midGain: 1.1,
+              smoothing: 0.15,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Kaleidoscope Tile",
+            props: {
+              size: 0.45,
+              sides: 8,
+              rotation: 0.2,
+              angle: 0.1,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 8,
+              intensity: 0.55,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Twirl Grid",
+    introducedVersion: 3,
+    minSeconds: 8,
+    maxSeconds: 20,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Ferrofluid",
+            props: {
+              gain: 1.25,
+              bassGain: 1.55,
+              midGain: 1.2,
+              smoothing: 0.1,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Polygon",
+            props: {
+              intensity: 14,
+              shapeSize: 70,
+              strokeWeight: 2,
+              fill: false,
+              rotateToggle: true,
+              rotateSpeed: 3.5,
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Twirl",
+            props: {
+              radius: 0.6,
+              amount: 1.8,
+              center: [0.5, 0.5],
+            },
+          },
+          {
+            name: "Point10 Color Distort",
+            props: {},
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Hex Bloom",
+    introducedVersion: 3,
+    minSeconds: 10,
+    maxSeconds: 24,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Rolling Fire",
+            props: {
+              gain: 1.2,
+              bassGain: 1.5,
+              midGain: 1.05,
+              smoothing: 0.08,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Concentrics",
+            props: {
+              rms: true,
+              intensity: 10,
+              spacing: 4,
+              objectDistance: 60,
+              strokeWeight: 2,
+            },
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Kaleidoscope",
+            props: {
+              sides: 10,
+            },
+          },
+          {
+            name: "Point10 Color Distort",
+            props: {},
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "VHS Reliquary",
+    introducedVersion: 3,
+    minSeconds: 7,
+    maxSeconds: 18,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Particle Field",
+            props: {
+              gain: 1.15,
+              bassGain: 1.2,
+              trebleGain: 1.4,
+              smoothing: 0.06,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Kaleidoscope Tile",
+            props: {
+              size: 0.7,
+              sides: 5,
+              rotation: 0.05,
+              angle: 0.15,
+            },
+          },
+          {
+            name: "VHS Glitch",
+            props: {
+              autoScan: true,
+              xScanline: 0.45,
+              xScanline2: 0.55,
+              yScanline: 0.1,
+              xScanlineSize: 0.5,
+              xScanlineSize2: 0.2,
+              yScanlineAmount: 0.2,
+              grainLevel: 0.15,
+              scanFollow: true,
+              analogDistort: 1.4,
+              bleedAmount: 0.9,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Twirled Feedback",
+    introducedVersion: 3,
+    minSeconds: 11,
+    maxSeconds: 27,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Ring Of Fire",
+            props: {
+              gain: 1.2,
+              bassGain: 1.5,
+              smoothing: 0.08,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Color Distort",
+            props: {},
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Circular Feedback Mask",
+            props: {
+              maskRadius: 0.2,
+              feedbackRate: 0.04,
+              twirlAmount: 0.12,
+              fadeRate: 0.02,
+              centerFeedback: 0,
+              feedbackCenter: [0.5, 0.5],
+              styleMode: 2,
+            },
+          },
+          {
+            name: "Twirl",
+            props: {
+              radius: 0.5,
+              amount: 1.2,
               center: [0.5, 0.5],
             },
           },
