@@ -1027,8 +1027,9 @@ const actions = {
     }
   },
 
-  stopPerformance({ commit }) {
+  async stopPerformance({ commit }) {
     dwell = 0;
+    await completeTransition(commit);
     commit("UPDATE_PERFORMANCE", { enabled: false });
   },
 
