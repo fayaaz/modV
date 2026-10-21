@@ -12,6 +12,7 @@ import {
   getByteTimeDomainData,
 } from "./setup-media";
 import { AudioBands, isBandFeature } from "./audio-bands";
+import { createLogger } from "./logger";
 import MediaDeviceManager from "./media-device-manager";
 import { SystemAudioCapture } from "./system-audio";
 import setupBeatDetektor from "./setup-beat-detektor";
@@ -21,6 +22,24 @@ import windowHandler from "./window-handler";
 import use from "./use";
 import constants, { GROUP_ENABLED } from "./constants";
 import ModVWorker from "./worker/index.worker.js?worker";
+
+const logger = createLogger("renderer:app");
+
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (event) => {
+    logger.error("uncaught error in the renderer", {
+      message: event?.message,
+      source: event?.filename,
+      line: event?.lineno,
+      column: event?.colno,
+      stack: event?.error?.stack,
+    });
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    logger.error("unhandled rejection in the renderer", event?.reason);
+  });
+}
 
 // deprecated single-capture buffer kept for compatibility; unused in async pipeline
 // let imageBitmap;

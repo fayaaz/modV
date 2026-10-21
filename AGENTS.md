@@ -79,6 +79,14 @@ Gotchas:
 - `src/renderer/src/application/audio-bands.js` — AGC-normalised `bass`/`mid`/`treble` plus 16 log-spaced band cells; published to `store.state.meyda.bands` via `meyda/SET_BANDS`.
 - `src/renderer/src/application/worker/phrase-detector.js` — dependency-free phrase/drop detector used by performance mode.
 - `src/renderer/src/application/tempo-detector.js` — onset-envelope/autocorrelation BPM tracker used by `setup-beat-detektor.js`; resolves octave ambiguity so fast (170+ BPM) material is not reported as half time.
+- `src/renderer/src/application/system-audio.js` — the "System Audio (loopback)" input. It captures a PulseAudio/PipeWire **monitor source** as an input device first (no picker), and only falls back to `getDisplayMedia({ video: true, audio: true })` on macOS/Windows, where Electron's desktop-audio loopback works. Electron's Linux loopback is broken — it returns a stream with no audio track and has been observed to take the browser process down — so the main process never asks for `audio: "loopback"` on Linux and the `PulseaudioLoopbackForScreenShare` Chromium flag is deliberately not enabled.
+- The audio graph in `setup-media.js` is built **before** the previous `AudioContext` is closed, so a failure leaves the running graph intact instead of half-replacing it.
+
+## Logging
+
+- `src/main/logger.js` and `src/renderer/src/application/logger.js` write to `<userData>/logs/modv-YYYY-MM-DD.log` (`~/.config/modV/logs` on Linux), keeping the last seven daily files. `src/shared/logger-format.js` holds the shared line formatter.
+- The renderer has no filesystem access of its own, so it forwards its lines to the main process over the `log` IPC channel and everything lands in the same file. The main process also logs `render-process-gone` / `child-process-gone` and uncaught exceptions.
+- The "Open Logs" button in the Audio/Video panel (`get-logs-folder` / `open-logs-folder` IPC) shows the user where the file is.
 
 ## Scenes & performance mode
 
@@ -128,5 +136,7 @@ The page object logs Electron stderr (`ELECTRON_ENABLE_LOGGING=1`), listens for 
 Specs under `tests/e2e/spec/{scenes,point10,packaging}/` cover scene snapshots/performance, Point10 effect/transition registration, and the trimmed Linux bundle. Verified after the Vite 6 upgrade: full suite `58/58` passes in ~49s (3 consecutive runs).
 
 Known flake: `performance mode dwell advances in real time` can still take the Electron renderer down natively (`reason=crashed`, `exitCode=5` / SIGTRAP) — in one host-GPU state the suite was `58/58` three times in a row, in another it failed the same spec every time. The container shares the GPU with the desktop compositor and other apps, so the rate depends on host GPU load. It is not a Vite regression and is independent of the GL backend (SwiftShader), of WebGPU, and of the WebGL context cap (16 or 32). Re-run the spec to confirm.
+
+Known flake: `scenes/performanceTransitions.spec.js` fails one of its four tests on a full-suite run, and it is a different test each time (the transition specs time out waiting for the shader to compile). It reproduces on an unmodified checkout, so it is a GPU-load artefact of the shared device rather than a regression. Re-run the spec on its own to confirm.
 
 Runs use **1 worker** (`MODV_E2E_WORKERS` overrides). Every worker launches its own Electron app, and the suite is GPU-bound: two concurrent apps over-subscribe the single GPU and Chromium aborts the renderer (`reason=crashed`, `exitCode=5`), failing whichever specs were running (reproducibly the ISF transition and performance-dwell specs). One worker is as fast as two and stable; use `--workers=2` only with GPU isolation.
