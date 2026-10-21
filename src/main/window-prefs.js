@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain, screen, BrowserWindow } from "electron";
+import { app, dialog, ipcMain, screen, shell, BrowserWindow } from "electron";
 import os from "node:os";
 import fs from "node:fs";
 import { join } from "path";
@@ -6,6 +6,7 @@ import { join } from "path";
 import store from "./media-manager/store";
 // import { autoUpdater } from "electron-updater"; @TODO add back in updater
 import { checkMediaPermission } from "./check-media-permission";
+import { createLogger, getLogDirectory } from "./logger";
 import { setProjectNames, setCurrentProject } from "./projects";
 import { closeWindow, createWindow, windows } from "./windows";
 import { updateMenu } from "./menu-bar";
@@ -180,6 +181,40 @@ const windowPrefs = {
         window.webContents.send("input-update", message);
       });
 
+      // The renderer has no way to write to the log directory itself, so it
+      // forwards its log lines here and they all end up in the same file. The
+      // renderer already printed them to its own console.
+      ipcMain.on("log", (event, payload) => {
+        const { level, scope, message, data } = payload || {};
+        const rendererLogger = createLogger(scope || "renderer", {
+          mirror: false,
+        });
+
+        if (level === "error") {
+          rendererLogger.error(message, data);
+        } else if (level === "warn") {
+          rendererLogger.warn(message, data);
+        } else {
+          rendererLogger.info(message, data);
+        }
+      });
+
+      ipcMain.handle("get-logs-folder", async () => {
+        return getLogDirectory();
+      });
+
+      ipcMain.handle("open-logs-folder", async () => {
+        const directory = getLogDirectory();
+
+        try {
+          await shell.openPath(directory);
+        } catch (e) {
+          createLogger("main:logs").error("could not open the logs folder", e);
+        }
+
+        return directory;
+      });
+
       window.on("close", async (e) => {
         // 0 because this is the position of the buttons
         // in the dialog's buttons array
@@ -233,7 +268,10 @@ const windowPrefs = {
       ipcMain.removeAllListeners("delete-scene");
       ipcMain.removeAllListeners("current-project");
       ipcMain.removeAllListeners("input-update");
+      ipcMain.removeAllListeners("log");
       ipcMain.removeHandler("is-modv-ready");
+      ipcMain.removeHandler("get-logs-folder");
+      ipcMain.removeHandler("open-logs-folder");
     },
   },
 

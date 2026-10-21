@@ -47,6 +47,18 @@
 
         <c span="1..">
           <grid columns="4">
+            <c span="1">Logs</c>
+            <c span="2">
+              <Button class="light" @click="openLogsFolder">
+                Open Logs
+              </Button>
+            </c>
+            <c class="log-path">{{ logDirectory || "(unknown)" }}</c>
+          </grid>
+        </c>
+
+        <c span="1..">
+          <grid columns="4">
             <c span="1">Audio Gain</c>
             <c span="2">
               <Range
@@ -144,7 +156,10 @@
 </template>
 
 <script>
+import { createLogger } from "../../application/logger";
 import { isSystemAudioSource } from "../../application/system-audio";
+
+const logger = createLogger("renderer:audio-input");
 
 export default {
   data() {
@@ -155,6 +170,7 @@ export default {
       switchingVideo: false,
       gainRangeValue: 1,
       audioSelectValue: null,
+      logDirectory: "",
     };
   },
 
@@ -196,6 +212,8 @@ export default {
         this.switchingAudio = true;
         this.audioSelectValue = value;
 
+        logger.info("the audio input was changed", { previous, value });
+
         try {
           if (isSystemAudioSource(value)) {
             const captured = await this.$modV.systemAudioCapture.capture();
@@ -211,6 +229,11 @@ export default {
               label: captured.label,
               error: null,
             });
+
+            logger.info("the system audio is now the audio input", {
+              backend: captured.backend,
+              label: captured.label,
+            });
           } else {
             await this.$modV.setupMedia({ audioId: value });
 
@@ -221,6 +244,13 @@ export default {
             });
           }
         } catch (e) {
+          logger.error("the audio input could not be changed", {
+            previous,
+            value,
+            error: e?.message || String(e),
+            stack: e?.stack,
+          });
+
           this.setSystemAudioState({
             supported: true,
             active: false,
@@ -375,9 +405,37 @@ export default {
   created() {
     const value = this.$modV.gainNode?.gain.value ?? 1;
     this.gainRangeValue = Number(value);
+
+    this.loadLogDirectory();
   },
 
   methods: {
+    async loadLogDirectory() {
+      try {
+        this.logDirectory = await window.electron.ipcRenderer.invoke(
+          "get-logs-folder",
+        );
+      } catch (e) {
+        logger.warn("could not read the log directory", {
+          message: e?.message,
+        });
+      }
+    },
+
+    async openLogsFolder() {
+      try {
+        const directory = await window.electron.ipcRenderer.invoke(
+          "open-logs-folder",
+        );
+
+        this.logDirectory = directory;
+      } catch (e) {
+        logger.error("could not open the log directory", {
+          message: e?.message,
+        });
+      }
+    },
+
     setSystemAudioState(payload) {
       this.$modV.store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
       this.$modV._store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);

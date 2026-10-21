@@ -8,6 +8,7 @@ import {
   desktopCapturer,
 } from "electron";
 import { APP_SCHEME } from "./background-constants";
+import { createLogger, getLogDirectory } from "./logger";
 import { openFile } from "./open-file";
 import { createWindow } from "./windows";
 
@@ -17,6 +18,14 @@ require("@electron/remote/main").initialize();
 // ~/.config/modv-vite. Packaged builds get "modV" from productName, so set it
 // explicitly here to share one userData directory (and its media tree).
 app.setName("modV");
+
+const logger = createLogger("main");
+
+logger.info("modV starting", {
+  version: app.getVersion(),
+  platform: process.platform,
+  logDirectory: getLogDirectory(),
+});
 
 // modV's shader, gallery-shader, ISF, gallery-ISF and three renderers already
 // hold five long-lived WebGL contexts. The old cap of 6 left no room for the
@@ -36,15 +45,17 @@ app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 // SwiftShader path Electron uses by default.
 //
 // The loopback features let getDisplayMedia({ audio: true }) return the
-// desktop audio, which modV uses for its "System Audio (loopback)" input.
+// desktop audio on macOS. Electron 31 hides that behind feature flags and
+// has no working equivalent on Linux, where the desktop audio is captured
+// from a PulseAudio/PipeWire monitor source instead.
 app.commandLine.appendSwitch(
   "enable-features",
-  "Vulkan,WebGPU,MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride,PulseaudioLoopbackForScreenShare",
+  "Vulkan,WebGPU,MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride",
 );
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
 
-// Allows PulseAudio/PipeWire monitor sources to be listed and captured as
-// input devices on Linux, which is the fallback backend for system audio.
+// Lets PulseAudio/PipeWire monitor sources be listed and captured as input
+// devices, which is how the system audio is captured on Linux.
 app.commandLine.appendSwitch("allow-monitor-inputs", "true");
 
 const isDevelopment = process.env.NODE_ENV !== "production";
@@ -72,15 +83,28 @@ app.on("open-file", (event, filePath) => {
 // Log crash details so e2e runs (and bug reports) can distinguish an app
 // crash from a test-level failure.
 app.on("render-process-gone", (event, webContents, details) => {
-  console.error(
-    `[main] renderer gone: reason=${details.reason} exitCode=${details.exitCode} url=${webContents.getURL()}`,
-  );
+  logger.error("renderer process gone", {
+    reason: details.reason,
+    exitCode: details.exitCode,
+    url: webContents.getURL(),
+  });
 });
 
 app.on("child-process-gone", (event, details) => {
-  console.error(
-    `[main] child process gone: type=${details.type} reason=${details.reason} exitCode=${details.exitCode} name=${details.name || ""}`,
-  );
+  logger.error("child process gone", {
+    type: details.type,
+    reason: details.reason,
+    exitCode: details.exitCode,
+    name: details.name || "",
+  });
+});
+
+process.on("uncaughtException", (error) => {
+  logger.error("uncaught exception in the main process", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("unhandled rejection in the main process", reason);
 });
 
 // Quit when all windows are closed.
@@ -141,11 +165,27 @@ app.on("ready", async () => {
   try {
     session.defaultSession.setDisplayMediaRequestHandler(
       async (request, callback) => {
+        const displayMediaLogger = createLogger("main:display-media");
+
+        displayMediaLogger.info("display media request received", {
+          video: request?.video ? { id: request.video.id } : null,
+          audio: request?.audio ?? null,
+        });
+
         try {
           const sources = await desktopCapturer.getSources({
             types: ["screen", "window"],
             thumbnailSize: { width: 0, height: 0 },
           });
+
+          displayMediaLogger.info(
+            "desktop capturer returned sources",
+            sources.map((source) => ({
+              id: source.id,
+              name: source.name,
+              display_id: source.display_id,
+            })),
+          );
 
           // Send the list to the renderer for UI selection if desired.
           // For now, grant the first source matching the requested surface type.
@@ -155,19 +195,46 @@ app.on("ready", async () => {
             if (match) chosen = match;
           }
 
-          callback({
+          if (!chosen) {
+            displayMediaLogger.error(
+              "no desktop source was available for the request",
+            );
+            callback({});
+            return;
+          }
+
+          // Electron's desktop audio loopback is only reliable on macOS and
+          // Windows. On Linux it hands back a stream without an audio track
+          // and can take the browser process down with it, so the system audio
+          // is captured from a PulseAudio/PipeWire monitor source instead.
+          const wantsLoopback =
+            process.platform === "darwin" || process.platform === "win32";
+
+          const granted = {
             video: { source: chosen, frameRate: 60 },
-            audio: "loopback",
+          };
+
+          if (wantsLoopback) {
+            granted.audio = "loopback";
+          }
+
+          displayMediaLogger.info("granting display media request", {
+            source: chosen.name,
+            loopbackAudio: wantsLoopback,
           });
+
+          callback(granted);
         } catch (e) {
-          console.error("setDisplayMediaRequestHandler error", e);
+          displayMediaLogger.error("setDisplayMediaRequestHandler error", e);
           callback({});
         }
       },
       { useSystemPicker: true },
     );
   } catch (e) {
-    console.warn("DisplayMediaRequestHandler not available", e?.message);
+    logger.warn("DisplayMediaRequestHandler not available", {
+      message: e?.message,
+    });
   }
 
   const mainWindow = createWindow({ windowName: "mainWindow" });

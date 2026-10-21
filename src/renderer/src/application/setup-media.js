@@ -1,6 +1,9 @@
 import Meyda from "meyda";
 import constants from "./constants";
+import { createLogger } from "./logger";
 import { isSystemAudioSource } from "./system-audio";
+
+const logger = createLogger("renderer:setup-media");
 
 let floatFrequencyDataArray;
 let byteFrequencyDataArray;
@@ -185,51 +188,101 @@ async function setupMedia({
   }
 
   if (audioMediaStream) {
-    if (this.audioContext) {
-      this.audioContext.close();
-    }
-
-    // Create new Audio Context
-    this.audioContext = new window.AudioContext({
-      latencyHint: "playback",
+    logger.info("building the audio graph", {
+      audioSourceId,
+      suppliedStream: !!audioStream,
+      previousContextState: this.audioContext?.state,
     });
 
-    // Create new Audio Analyser
-    analyserNode = this.audioContext.createAnalyser();
-    analyserNode.smoothingTimeConstant = 0;
-    analyserNode.fftSize = 2048;
+    const previousContext = this.audioContext;
+
+    let newContext;
+    let newAnalyser;
+    let newGainNode;
+    let newMeyda;
+    let newAudioStream;
+
+    try {
+      // Create new Audio Context
+      newContext = new window.AudioContext({
+        latencyHint: "playback",
+      });
+
+      // Create new Audio Analyser
+      newAnalyser = newContext.createAnalyser();
+      newAnalyser.smoothingTimeConstant = 0;
+      newAnalyser.fftSize = 2048;
+
+      // Create a gain node
+      newGainNode = newContext.createGain();
+
+      // Default gain
+      newGainNode.gain.value = 1;
+
+      // Create the audio input stream (audio)
+      newAudioStream = newContext.createMediaStreamSource(audioMediaStream);
+
+      // Connect the audio stream to the analyser (this is a passthru) (audio->(analyser))
+      newAudioStream.connect(newAnalyser);
+
+      // Connect the audio stream to the gain node (audio->(analyser)->gain)
+      newAudioStream.connect(newGainNode);
+
+      // Set up Meyda
+      // eslint-disable-next-line new-cap
+      newMeyda = new Meyda.createMeydaAnalyzer({
+        audioContext: newContext,
+        source: newGainNode,
+        bufferSize: constants.AUDIO_BUFFER_SIZE,
+        windowingFunction: "rect",
+        featureExtractors: ["complexSpectrum"],
+      });
+    } catch (e) {
+      // A broken audio graph must not take the app down with it. The previous
+      // graph is left untouched so the visualiser keeps running.
+      logger.error("could not build the audio graph", e);
+
+      try {
+        newContext?.close();
+      } catch (closeError) {
+        logger.error("could not close the failed audio context", closeError);
+      }
+
+      const tracks = audioMediaStream?.getTracks?.() || [];
+
+      for (const track of tracks) {
+        track.stop();
+      }
+
+      throw e;
+    }
 
     // Set up arrays for analyser. The time-domain buffer is the analyser's
     // fftSize (not frequencyBinCount): a shorter array would leave the rest of
     // AudioBands' wave buffer stale (see audio-bands.js).
+    analyserNode = newAnalyser;
     floatFrequencyDataArray = new Float32Array(analyserNode.frequencyBinCount);
     byteFrequencyDataArray = new Uint8Array(analyserNode.frequencyBinCount);
     byteTimeDomainDataArray = new Uint8Array(analyserNode.fftSize);
 
-    // Create a gain node
-    this.gainNode = this.audioContext.createGain();
+    this.audioContext = newContext;
+    this.gainNode = newGainNode;
+    this.meyda = newMeyda;
+    this.audioStream = newAudioStream;
 
-    // Default gain
-    this.gainNode.gain.value = 1;
+    if (previousContext && previousContext !== newContext) {
+      try {
+        await previousContext.close();
+      } catch (e) {
+        logger.warn("could not close the previous audio context", {
+          message: e?.message,
+        });
+      }
+    }
 
-    // Create the audio input stream (audio)
-    this.audioStream =
-      this.audioContext.createMediaStreamSource(audioMediaStream);
-
-    // Connect the audio stream to the analyser (this is a passthru) (audio->(analyser))
-    this.audioStream.connect(analyserNode);
-
-    // Connect the audio stream to the gain node (audio->(analyser)->gain)
-    this.audioStream.connect(this.gainNode);
-
-    // Set up Meyda
-    // eslint-disable-next-line new-cap
-    this.meyda = new Meyda.createMeydaAnalyzer({
-      audioContext: this.audioContext,
-      source: this.gainNode,
-      bufferSize: constants.AUDIO_BUFFER_SIZE,
-      windowingFunction: "rect",
-      featureExtractors: ["complexSpectrum"],
+    logger.info("the audio graph is ready", {
+      sampleRate: this.audioContext.sampleRate,
+      contextState: this.audioContext.state,
     });
 
     mediaDeviceManager.selectAudioDevice(audioSourceId);

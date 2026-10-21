@@ -13,11 +13,13 @@ class FakeTrack {
   constructor(kind, label = "") {
     this.kind = kind;
     this.label = label;
+    this.readyState = "live";
     this.stopped = false;
   }
 
   stop() {
     this.stopped = true;
+    this.readyState = "ended";
   }
 }
 
@@ -40,6 +42,12 @@ class FakeStream {
 }
 
 class FakeMediaStream extends FakeStream {}
+
+const silentLogger = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+};
 
 describe("system audio source id", () => {
   it("matches only the exact system audio id", () => {
@@ -141,6 +149,45 @@ describe("SystemAudioCapture", () => {
     expect(SystemAudioCapture.isSupported(undefined)).toBe(false);
   });
 
+  it("prefers a monitor source over the display picker", async () => {
+    const monitorTrack = new FakeTrack("audio", "Monitor of Built-in Audio");
+    const monitorStream = new FakeStream([monitorTrack]);
+
+    const monitorDevice = {
+      deviceId: "mon-1",
+      kind: "audioinput",
+      label: "Monitor of Built-in Audio",
+    };
+
+    const getDisplayMedia = vi.fn();
+    const getUserMedia = vi.fn(async () => monitorStream);
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        getDisplayMedia,
+        enumerateDevices: vi.fn(async () => [monitorDevice]),
+        getUserMedia,
+      },
+      platform: "darwin",
+      logger: silentLogger,
+    });
+
+    const result = await capture.capture();
+
+    expect(result.backend).toBe("monitor");
+    expect(result.label).toBe("Monitor of Built-in Audio");
+    expect(result.stream).toBe(monitorStream);
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        deviceId: { exact: "mon-1" },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+  });
+
   it("captures system audio through the display capture path", async () => {
     const audioTrack = new FakeTrack("audio", "System Audio");
     const videoTrack = new FakeTrack("video", "Screen");
@@ -148,7 +195,12 @@ describe("SystemAudioCapture", () => {
 
     const getDisplayMedia = vi.fn(async () => displayStream);
     const capture = new SystemAudioCapture({
-      mediaDevices: { getDisplayMedia },
+      mediaDevices: {
+        getDisplayMedia,
+        enumerateDevices: vi.fn(async () => []),
+      },
+      platform: "darwin",
+      logger: silentLogger,
     });
 
     const result = await capture.capture();
@@ -163,39 +215,25 @@ describe("SystemAudioCapture", () => {
     expect(videoTrack.stopped).toBe(true);
   });
 
-  it("falls back to a monitor device when the display capture has no audio", async () => {
-    const videoTrack = new FakeTrack("video", "Screen");
-    const displayStream = new FakeStream([videoTrack]);
-    const monitorTrack = new FakeTrack("audio", "Monitor of Built-in Audio");
-    const monitorStream = new FakeStream([monitorTrack]);
+  it("skips the display capture fallback on linux", async () => {
+    const getDisplayMedia = vi.fn();
 
-    const monitorDevice = {
-      deviceId: "mon-1",
-      kind: "audioinput",
-      label: "Monitor of Built-in Audio",
-    };
-
-    const getUserMedia = vi.fn(async () => monitorStream);
-    const mediaDevices = {
-      getDisplayMedia: vi.fn(async () => displayStream),
-      enumerateDevices: vi.fn(async () => [monitorDevice]),
-      getUserMedia,
-    };
-
-    const capture = new SystemAudioCapture({ mediaDevices });
-    const result = await capture.capture();
-
-    expect(result.backend).toBe("monitor");
-    expect(result.label).toBe("Monitor of Built-in Audio");
-    expect(result.stream).toBe(monitorStream);
-    expect(getUserMedia).toHaveBeenCalledWith({
-      audio: {
-        deviceId: { exact: "mon-1" },
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        getDisplayMedia,
+        enumerateDevices: vi.fn(async () => [
+          { deviceId: "mic-1", kind: "audioinput", label: "USB Microphone" },
+        ]),
+        getUserMedia: vi.fn(),
       },
+      platform: "linux",
+      logger: silentLogger,
     });
+
+    await expect(capture.capture()).rejects.toThrow(
+      /System audio capture is not available on this system/,
+    );
+    expect(getDisplayMedia).not.toHaveBeenCalled();
   });
 
   it("rejects with a descriptive message when no capture path works", async () => {
@@ -210,12 +248,57 @@ describe("SystemAudioCapture", () => {
       getUserMedia: vi.fn(),
     };
 
-    const capture = new SystemAudioCapture({ mediaDevices });
+    const capture = new SystemAudioCapture({
+      mediaDevices,
+      platform: "darwin",
+      logger: silentLogger,
+    });
 
     await expect(capture.capture()).rejects.toThrow(
       /System audio capture is not available on this system/,
     );
     await expect(capture.capture()).rejects.toThrow(/pactl load-module/);
+  });
+
+  it("rejects when the monitor source has no live audio track", async () => {
+    const monitorTrack = new FakeTrack("audio", "Monitor of Built-in Audio");
+    monitorTrack.readyState = "ended";
+    const monitorStream = new FakeStream([monitorTrack]);
+
+    const monitorDevice = {
+      deviceId: "mon-1",
+      kind: "audioinput",
+      label: "Monitor of Built-in Audio",
+    };
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => [monitorDevice]),
+        getUserMedia: vi.fn(async () => monitorStream),
+      },
+      platform: "linux",
+      logger: silentLogger,
+    });
+
+    await expect(capture.capture()).rejects.toThrow(/live audio track/);
+    expect(monitorTrack.stopped).toBe(true);
+  });
+
+  it("propagates the original error when the capture throws", async () => {
+    const failure = new Error("the picker was cancelled");
+
+    const capture = new SystemAudioCapture({
+      mediaDevices: {
+        enumerateDevices: vi.fn(async () => []),
+        getDisplayMedia: vi.fn(async () => {
+          throw failure;
+        }),
+      },
+      platform: "darwin",
+      logger: silentLogger,
+    });
+
+    await expect(capture.capture()).rejects.toThrow(failure);
   });
 
   it("stops the tracks of the captured stream", async () => {
@@ -225,7 +308,10 @@ describe("SystemAudioCapture", () => {
     const capture = new SystemAudioCapture({
       mediaDevices: {
         getDisplayMedia: vi.fn(async () => displayStream),
+        enumerateDevices: vi.fn(async () => []),
       },
+      platform: "darwin",
+      logger: silentLogger,
     });
 
     const { stream } = await capture.capture();

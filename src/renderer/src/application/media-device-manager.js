@@ -1,8 +1,11 @@
 import store from "./worker/store";
+import { createLogger } from "./logger";
 import {
   SYSTEM_AUDIO_SOURCE_ID,
   SYSTEM_AUDIO_SOURCE_LABEL,
 } from "./system-audio";
+
+const logger = createLogger("renderer:media-devices");
 
 class MediaDeviceManager {
   constructor() {
@@ -11,7 +14,9 @@ class MediaDeviceManager {
     this.videoSources = [];
 
     // Listen for device changes
-    navigator.mediaDevices.ondevicechange = () => this.enumerateDevices();
+    if (navigator.mediaDevices) {
+      navigator.mediaDevices.ondevicechange = () => this.enumerateDevices();
+    }
   }
 
   /**
@@ -19,7 +24,6 @@ class MediaDeviceManager {
    * @returns {Promise<{audio: Array, video: Array}>}
    */
   async enumerateDevices() {
-    const devices = await navigator.mediaDevices.enumerateDevices();
     const sources = {
       audio: [
         {
@@ -32,12 +36,20 @@ class MediaDeviceManager {
       video: [],
     };
 
-    for (const device of devices) {
-      if (device.kind === "audioinput") {
-        sources.audio.push(device);
-      } else if (device.kind === "videoinput") {
-        sources.video.push(device);
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+
+      for (const device of devices) {
+        if (device.kind === "audioinput") {
+          sources.audio.push(device);
+        } else if (device.kind === "videoinput") {
+          sources.video.push(device);
+        }
       }
+    } catch (e) {
+      // The device list is unavailable (no audio backend, permission denied,
+      // ...). The system audio entry stays so it can still be picked.
+      logger.error("could not enumerate the media devices", e);
     }
 
     this.audioSources = sources.audio;
