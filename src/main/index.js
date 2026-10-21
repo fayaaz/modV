@@ -59,6 +59,20 @@ app.on("open-file", (event, filePath) => {
   openFile(filePath);
 });
 
+// Log crash details so e2e runs (and bug reports) can distinguish an app
+// crash from a test-level failure.
+app.on("render-process-gone", (event, webContents, details) => {
+  console.error(
+    `[main] renderer gone: reason=${details.reason} exitCode=${details.exitCode} url=${webContents.getURL()}`,
+  );
+});
+
+app.on("child-process-gone", (event, details) => {
+  console.error(
+    `[main] child process gone: type=${details.type} reason=${details.reason} exitCode=${details.exitCode} name=${details.name || ""}`,
+  );
+});
+
 // Quit when all windows are closed.
 app.on("window-all-closed", () => {
   // On macOS it is common for applications and their menu bar
