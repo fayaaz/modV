@@ -225,7 +225,12 @@ test("default scenes chain controls to bass and a BPM tween", async () => {
   expect(seededDefaults.length).toBeGreaterThanOrEqual(18);
 
   for (const scene of seededDefaults) {
-    const links = Object.values(scene.inputLinks || {});
+    const links = Object.values(
+      (scene.inputs && scene.inputs.inputLinks) || scene.inputLinks || {},
+    );
+    const tweens = Array.isArray(scene.tweens)
+      ? scene.tweens
+      : Object.values(scene.tweens || {});
     const bassLink = links.find(
       (link) =>
         link.source === "meyda" &&
@@ -235,9 +240,7 @@ test("default scenes chain controls to bass and a BPM tween", async () => {
     const bpmTweenLink = links.find(
       (link) =>
         link.source === "tween" &&
-        scene.tweens &&
-        scene.tweens[link.id] &&
-        scene.tweens[link.id].useBpm === true,
+        tweens.some((tween) => tween.id === link.id && tween.useBpm === true),
     );
 
     expect(

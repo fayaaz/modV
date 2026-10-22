@@ -88,12 +88,12 @@ export function generateMenuTemplate() {
       label: "File",
       submenu: [
         {
-          label: "Open Preset",
+          label: "Open Preset or Scene",
           accelerator: "CmdOrCtrl+O",
           async click() {
             const result = await dialog.showOpenDialog(windows["mainWindow"], {
               filters: [
-                { name: "Presets", extensions: ["json"] },
+                { name: "Presets and Scenes", extensions: ["json"] },
                 { name: "All Files", extensions: ["*"] },
               ],
               properties: ["openFile"],

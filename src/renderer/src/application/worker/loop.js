@@ -415,6 +415,10 @@ async function loop(delta, features, fftOutput) {
     for (let i = 0; i < groupsLength - 1; ++i) {
       const group = groups[groupIndexRenderOrder[i]];
 
+      if (!group) {
+        continue;
+      }
+
       const {
         compositeOperation,
         context: { context },

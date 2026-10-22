@@ -222,7 +222,7 @@ export default {
     return {
       iVTitle: "Scenes",
       iVBody:
-        "Scenes are snapshots of the Groups tab: every Group, its settings and its Modules can be saved and reloaded as a whole. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and transitioning all Groups between Scenes. Scenes are saved as JSON in the current project's scene folder.",
+        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. A Scene JSON can be opened like a preset.",
       newSceneName: "",
       editingSceneId: null,
       localSceneName: "",

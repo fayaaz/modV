@@ -7,6 +7,11 @@ import grabCanvasPlugin from "../plugins/grab-canvas";
 import get from "lodash.get";
 import { tick as frameTick } from "./frame-counter";
 import { getFeatures, setFeatures } from "./audio-features";
+import {
+  createPresetData,
+  isSceneDocument,
+  loadPresetData,
+} from "./preset-serializer";
 
 const fs = require("fs");
 
@@ -469,37 +474,17 @@ async function start() {
     if (type === "loadPreset") {
       const fileBuffer = await fs.promises.readFile(payload);
       const jsonString = fileBuffer.toString();
-      const preset = JSON.parse(jsonString);
+      const document = JSON.parse(jsonString);
 
-      console.log(preset);
+      if (isSceneDocument(document)) {
+        await store.dispatch("scenes/loadSceneFromJson", {
+          scene: document,
+        });
 
-      const cleanupFunctionsAfterSwap = [];
-
-      const storeModuleKeys = Object.keys(preset);
-      for (let i = 0, len = storeModuleKeys.length; i < len; i++) {
-        const storeModuleKey = storeModuleKeys[i];
-
-        try {
-          console.log("Loading from preset…", storeModuleKey);
-          const fn = await store.dispatch(
-            `${storeModuleKey}/loadPresetData`,
-            preset[storeModuleKey],
-          );
-
-          if (fn) {
-            cleanupFunctionsAfterSwap.push(fn);
-          }
-        } catch (e) {
-          console.error(e);
-        }
+        return;
       }
 
-      store.commit("groups/SWAP");
-      store.commit("modules/SWAP");
-      store.commit("inputs/SWAP");
-      store.commit("expressions/SWAP");
-
-      cleanupFunctionsAfterSwap.forEach((fn) => fn());
+      await loadPresetData(store, document);
 
       return;
     }
@@ -522,22 +507,7 @@ async function start() {
     const { type, identifier, payload, __async } = message;
     if (__async) {
       if (type === "generatePreset") {
-        const preset = {};
-
-        const storeModuleKeys = Object.keys(store.state);
-        for (let i = 0, len = storeModuleKeys.length; i < len; i++) {
-          const storeModuleKey = storeModuleKeys[i];
-
-          try {
-            preset[storeModuleKey] = await store.dispatch(
-              `${storeModuleKey}/createPresetData`,
-            );
-          } catch (e) {
-            // do nothing
-          }
-        }
-
-        return JSON.stringify(preset);
+        return JSON.stringify(await createPresetData(store));
       }
 
       /**

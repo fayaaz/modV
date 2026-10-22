@@ -24,6 +24,7 @@ import {
   normalizeSceneTiming,
   resolveSceneTiming,
 } from "../../scene-timing";
+import { createPresetData } from "../../preset-serializer";
 
 const fs = require("fs");
 const path = require("path");
@@ -31,13 +32,18 @@ const path = require("path");
 /**
  * @typedef {Object} Scene
  *
- * A Scene is a snapshot of the Groups tab: every Group, its settings and its
- * ordered Modules (with their preset data).
+ * A Scene is a preset document plus Scene metadata. It snapshots the whole
+ * preset-aware store (Groups, Modules, Input Links, Expressions, Tweens and
+ * MIDI devices) and adds performance timing/crossfade information.
  *
  * @property {String} id       UUID of the Scene
  * @property {String} name     Name of the Scene
  * @property {Array}  groups   Group snapshots, including their Module ids
  * @property {Object} modules  Preset data for each Module, keyed by Module id
+ * @property {Object} inputs   Input state, including Input Links
+ * @property {Object} expressions Expression assignments
+ * @property {Array}  tweens   Tween definitions
+ * @property {Object} midi     MIDI device state
  */
 
 /**
@@ -198,6 +204,7 @@ function collectSceneInputIds(groups, modules) {
 function serializeTween(tween) {
   return JSON.parse(
     JSON.stringify({
+      id: tween.id,
       data: tween.data,
       duration: tween.duration,
       direction: tween.direction,
@@ -211,25 +218,55 @@ function serializeTween(tween) {
   );
 }
 
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getSceneInputLinks(scene) {
+  if (scene.inputs && scene.inputs.inputLinks) {
+    return scene.inputs.inputLinks;
+  }
+
+  return scene.inputLinks || {};
+}
+
+function getSceneTweenEntries(scene) {
+  if (Array.isArray(scene.tweens)) {
+    return scene.tweens.map((tween) => [tween.id, tween]);
+  }
+
+  if (scene.tweens && typeof scene.tweens === "object") {
+    return Object.entries(scene.tweens);
+  }
+
+  return [];
+}
+
 /**
- * Captures every Input Link (the yellow highlights in the Module/Group
- * inspectors) that belongs to the given Groups and Modules, along with the
- * Tween data needed to rebuild tween-backed links. Input IDs are only stable
- * inside a live store, so the caller remaps them when applying the Scene.
+ * Builds a Scene snapshot for Scene definitions that are constructed from a
+ * temporary Group/Module set (the default Scenes). The snapshot uses the same
+ * shape as a preset so Scenes and presets remain interchangeable.
  */
-function snapshotSceneInputs(groups, modules) {
+function createScopedSceneData(groups, modules) {
   const inputIds = collectSceneInputIds(groups, modules);
+  const inputs = {};
   const inputLinks = {};
-  const tweens = {};
+  const tweens = [];
 
   for (const inputId of inputIds) {
+    const input = store.state.inputs.inputs[inputId];
+
+    if (input) {
+      inputs[inputId] = clone(input);
+    }
+
     const link = store.state.inputs.inputLinks[inputId];
 
     if (!link) {
       continue;
     }
 
-    inputLinks[inputId] = JSON.parse(JSON.stringify(link));
+    inputLinks[inputId] = clone(link);
 
     if (link.source === "tween") {
       const tween =
@@ -237,12 +274,32 @@ function snapshotSceneInputs(groups, modules) {
         store.state.tweens.tweens[inputId];
 
       if (tween) {
-        tweens[inputId] = serializeTween(tween);
+        tweens.push(serializeTween(tween));
       }
     }
   }
 
-  return { inputLinks, tweens };
+  const assignments = {};
+  const currentAssignments = store.state.expressions.assignments || {};
+
+  for (const assignment of Object.values(currentAssignments)) {
+    if (inputIds.has(assignment.inputId)) {
+      assignments[assignment.id] = clone(assignment);
+    }
+  }
+
+  return {
+    groups,
+    modules,
+    inputs: {
+      focusedInput: { id: null, title: null },
+      inputs,
+      inputLinks,
+    },
+    expressions: { assignments },
+    tweens,
+    midi: clone(store.state.midi),
+  };
 }
 
 function mapGroupInputIds(oldGroup, newGroup, inputIdMap) {
@@ -295,8 +352,37 @@ function mapModuleInputIds(oldModule, newModule, inputIdMap) {
 }
 
 async function restoreSceneInputs(scene, inputIdMap) {
-  const inputLinks = scene.inputLinks || {};
-  const tweens = scene.tweens || {};
+  const inputLinks = getSceneInputLinks(scene);
+  const tweenEntries = getSceneTweenEntries(scene);
+  const tweenMap = new Map();
+  const createdTweenIds = new Set();
+
+  for (let i = 0, len = tweenEntries.length; i < len; i++) {
+    const [tweenKey, tween] = tweenEntries[i];
+
+    if (!tween) {
+      continue;
+    }
+
+    const tweenId = tween.id || tweenKey;
+
+    tweenMap.set(tweenKey, tween);
+    tweenMap.set(tweenId, tween);
+
+    const newTweenId = inputIdMap[tweenId];
+
+    if (!newTweenId) {
+      continue;
+    }
+
+    await store.dispatch("dataTypes/createType", {
+      type: "tween",
+      args: { ...tween, id: newTweenId },
+    });
+
+    createdTweenIds.add(newTweenId);
+  }
+
   const inputIds = Object.keys(inputLinks);
 
   for (let i = 0, len = inputIds.length; i < len; i++) {
@@ -310,16 +396,18 @@ async function restoreSceneInputs(scene, inputIdMap) {
     const link = { ...inputLinks[oldInputId] };
 
     if (link.source === "tween") {
-      const tween = tweens[oldInputId];
+      const tween = tweenMap.get(oldInputId) || tweenMap.get(link.id);
 
-      if (!tween) {
+      if (tween && !createdTweenIds.has(newInputId)) {
+        await store.dispatch("dataTypes/createType", {
+          type: "tween",
+          args: { ...tween, id: newInputId },
+        });
+
+        createdTweenIds.add(newInputId);
+      } else if (!store.state.tweens.tweens[newInputId]) {
         continue;
       }
-
-      await store.dispatch("dataTypes/createType", {
-        type: "tween",
-        args: { ...tween, id: newInputId },
-      });
 
       // Tween input links point at the Tween by its input ID, which changes
       // every time the Scene is applied.
@@ -331,6 +419,69 @@ async function restoreSceneInputs(scene, inputIdMap) {
       ...link,
     });
   }
+
+  if (!scene.inputs || typeof scene.inputs !== "object") {
+    return;
+  }
+
+  const focusedInput = scene.inputs.focusedInput;
+
+  if (focusedInput && focusedInput.id) {
+    const newInputId = inputIdMap[focusedInput.id];
+
+    if (newInputId) {
+      await store.dispatch("inputs/setFocusedInput", {
+        id: newInputId,
+        title: focusedInput.title,
+      });
+
+      return;
+    }
+  }
+
+  await store.dispatch("inputs/clearFocusedInput");
+}
+
+async function restoreSceneExpressions(scene, inputIdMap) {
+  if (!scene.expressions || typeof scene.expressions !== "object") {
+    return;
+  }
+
+  const source = scene.expressions.assignments || {};
+  const assignments = {};
+
+  for (const assignment of Object.values(source)) {
+    const newInputId = inputIdMap[assignment.inputId];
+
+    if (!newInputId) {
+      continue;
+    }
+
+    assignments[assignment.id] = {
+      ...assignment,
+      inputId: newInputId,
+    };
+  }
+
+  await store.dispatch("expressions/loadPresetData", { assignments });
+  store.commit("expressions/SWAP");
+
+  for (const assignment of Object.values(assignments)) {
+    if (assignment.evaluateEveryFrame) {
+      await store.dispatch("expressions/updateEvaluation", {
+        id: assignment.id,
+        evaluateEveryFrame: true,
+      });
+    }
+  }
+}
+
+async function restoreSceneMidi(scene) {
+  if (!scene.midi || typeof scene.midi !== "object") {
+    return;
+  }
+
+  await store.dispatch("midi/loadPresetData", scene.midi);
 }
 
 function clamp(value, min, max) {
@@ -953,6 +1104,8 @@ async function buildSceneSnapshot(definition) {
       const snapshot = { ...group };
       delete snapshot.context;
       delete snapshot.sceneId;
+      delete snapshot.writeToSwap;
+      delete snapshot.readFromSwap;
       groupSnapshots.push(JSON.parse(JSON.stringify(snapshot)));
       moduleIds.push(...group.modules);
     }
@@ -968,22 +1121,16 @@ async function buildSceneSnapshot(definition) {
       }
     }
 
-    const { inputLinks, tweens } = snapshotSceneInputs(
-      groupSnapshots,
-      moduleSnapshots,
-    );
+    const sceneData = createScopedSceneData(groupSnapshots, moduleSnapshots);
 
     return {
+      ...sceneData,
       id: uuidv4(),
       name: definition.name,
       enabled: definition.enabled !== false,
       minSeconds: definition.minSeconds,
       maxSeconds: definition.maxSeconds,
       timingOverride: false,
-      groups: groupSnapshots,
-      modules: moduleSnapshots,
-      inputLinks,
-      tweens,
     };
   } finally {
     for (let i = 0, len = createdGroupIds.length; i < len; i++) {
@@ -1033,43 +1180,63 @@ async function completeTransition(commit) {
 
 const actions = {
   /**
-   * Snapshots every Group in the Groups tab, including each Group's ordered
-   * Modules and their preset data, into a new Scene.
+   * Snapshots the whole preset-aware store using the same serializer as a
+   * preset, then adds Scene metadata.
    */
   async saveCurrentAsScene({ commit, state }, args = {}) {
     const name = args.name || `Scene ${state.scenes.length + 1}`;
 
     await completeTransition(commit);
 
-    const groups = store.state.groups.groups
-      .filter((group) => !isGalleryGroup(group))
-      .map((group) => {
-        const snapshot = { ...group };
-        delete snapshot.context;
-        delete snapshot.sceneId;
-        return snapshot;
-      });
-
-    const modules = await store.dispatch("modules/createPresetData");
     const timing = normalizePerformanceTiming(state.performance);
-    const { inputLinks, tweens } = snapshotSceneInputs(groups, modules);
+    const presetData = await createPresetData(store);
 
     const scene = {
+      ...presetData,
       id: uuidv4(),
       name,
       enabled: true,
       minSeconds: timing.minSeconds,
       maxSeconds: timing.maxSeconds,
       timingOverride: false,
-      groups: JSON.parse(JSON.stringify(groups)),
-      modules: JSON.parse(JSON.stringify(modules)),
-      inputLinks,
-      tweens,
     };
 
     commit("ADD_SCENE", scene);
 
     return JSON.parse(JSON.stringify(scene));
+  },
+
+  /**
+   * Loads a Scene document (a preset document plus Scene metadata) from JSON,
+   * registers it and applies it. Scene files and presets use the same
+   * serializer, so a Scene can also be opened through the preset loader.
+   */
+  async loadSceneFromJson(
+    { commit, dispatch, state },
+    { scene, apply = true, persist = true } = {},
+  ) {
+    const normalized = normalizeScene(scene);
+
+    if (!normalized) {
+      return null;
+    }
+
+    const imported = {
+      ...normalized,
+      ...normalizeSceneTiming(normalized, state.performance),
+    };
+
+    commit("ADD_SCENE", imported);
+
+    if (apply) {
+      await dispatch("applyScene", { sceneId: imported.id });
+    }
+
+    if (persist) {
+      await dispatch("persistScenes");
+    }
+
+    return JSON.parse(JSON.stringify(imported));
   },
 
   updateSceneName({ commit, state }, { sceneId, name }) {
@@ -1139,9 +1306,9 @@ const actions = {
   },
 
   /**
-   * Applies a Scene by rebuilding all of its Groups and Modules, then
-   * crossfading the previous Groups out and the new Groups in. This replaces
-   * the Groups tab with the saved snapshot.
+   * Applies a Scene by restoring the whole preset-aware store. Groups and
+   * Modules are rebuilt with fresh IDs so the previous Groups can be
+   * crossfaded out while the new Groups fade in.
    */
   async applyScene({ commit, state }, { sceneId }) {
     const scene = state.scenes.find((scene) => scene.id === sceneId);
@@ -1165,8 +1332,20 @@ const actions = {
     const oldGroups = store.state.groups.groups.filter(
       (group) => !isGalleryGroup(group),
     );
+    const oldGroupModuleIds = new Set(
+      oldGroups.flatMap((group) => group.modules),
+    );
+    const oldOrphanModuleIds = Object.values(store.state.modules.active)
+      .filter(
+        (module) =>
+          !module.meta.isGallery && !oldGroupModuleIds.has(module.$id),
+      )
+      .map((module) => module.$id);
     const groupSnapshots = normalizedScene.groups || [];
     const moduleSnapshots = normalizedScene.modules || {};
+    // Only Modules referenced by Groups are rebuilt. Unreferenced Modules stay
+    // in the serialized store for preset parity but are not instantiated while
+    // crossfading Scenes.
     const createdGroups = [];
     const groupIdMap = {};
     const inputIdMap = {};
@@ -1187,6 +1366,8 @@ const actions = {
       delete groupData.inheritInputId;
       delete groupData.compositeOperationInputId;
       delete groupData.pipelineInputId;
+      delete groupData.writeToSwap;
+      delete groupData.readFromSwap;
 
       const targetAlpha = snapshot.alpha ?? 1;
 
@@ -1235,7 +1416,15 @@ const actions = {
       }
     }
 
+    for (let i = 0, len = oldOrphanModuleIds.length; i < len; i++) {
+      await store.dispatch("modules/removeActiveModule", {
+        moduleId: oldOrphanModuleIds[i],
+      });
+    }
+
     await restoreSceneInputs(normalizedScene, inputIdMap);
+    await restoreSceneExpressions(normalizedScene, inputIdMap);
+    await restoreSceneMidi(normalizedScene);
 
     // Remap inheritFrom now that every Group has its new id, so Groups that
     // appear later in the snapshot still resolve correctly.

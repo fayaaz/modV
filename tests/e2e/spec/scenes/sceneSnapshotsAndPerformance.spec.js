@@ -1,3 +1,6 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { expect, test } from "@playwright/test";
 import constants, {
   GROUP_ENABLED,
@@ -217,15 +220,15 @@ test("a saved Scene restores its Input Links and Tween data", async () => {
 
   const scene = await saveScene(name);
 
-  expect(scene.inputLinks[inputIds.bassInputId]).toEqual(
+  expect(scene.inputs.inputLinks[inputIds.bassInputId]).toEqual(
     expect.objectContaining({ source: "meyda", args: ["bass"] }),
   );
-  expect(scene.inputLinks[inputIds.tweenInputId]).toEqual(
+  expect(scene.inputs.inputLinks[inputIds.tweenInputId]).toEqual(
     expect.objectContaining({ source: "tween" }),
   );
-  expect(scene.tweens[inputIds.tweenInputId]).toEqual(
-    expect.objectContaining({ useBpm: true, bpmDivision: 8 }),
-  );
+  expect(
+    scene.tweens.find((tween) => tween.id === inputIds.tweenInputId),
+  ).toEqual(expect.objectContaining({ useBpm: true, bpmDivision: 8 }));
 
   await modVApp.evaluateWorker(
     async ({ groupId }) => {
@@ -279,6 +282,414 @@ test("a saved Scene restores its Input Links and Tween data", async () => {
   );
 
   await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
+test("a saved Scene serialises the whole store like a preset", async () => {
+  const name = uniqueName("E2E Whole Store");
+  const groupId = await createGroup(name);
+  const moduleId = await addModuleToGroup(groupId, "Ball");
+
+  const setup = await modVApp.evaluateWorker(
+    async ({ moduleId }) => {
+      const module = self.store.state.modules.active[moduleId];
+      const inputId = module.$props.intensity.id;
+
+      await self.store.dispatch("inputs/createInputLink", {
+        inputId,
+        type: "getter",
+        location: "meyda/getFeature",
+        source: "meyda",
+        args: ["bass"],
+        min: 0,
+        max: 1,
+      });
+
+      const expressionId = await self.store.dispatch("expressions/create", {
+        inputId,
+        expression: "inputValue * 0.5",
+      });
+
+      self.store.commit("midi/ADD_DEVICE", {
+        id: "e2e-whole-store",
+        name: "E2E Controller",
+        manufacturer: "modV",
+      });
+
+      await self.store.dispatch("inputs/setFocusedInput", {
+        id: inputId,
+        title: "Intensity",
+      });
+
+      return {
+        expressionId,
+        inputId,
+        midiDeviceId: "e2e-whole-store-E2E Controller-modV",
+      };
+    },
+    { moduleId },
+  );
+
+  const scene = await saveScene(name);
+
+  expect(Object.keys(scene)).toEqual(
+    expect.arrayContaining([
+      "groups",
+      "modules",
+      "inputs",
+      "expressions",
+      "tweens",
+      "midi",
+    ]),
+  );
+  expect(scene.inputs.inputLinks[setup.inputId]).toEqual(
+    expect.objectContaining({ source: "meyda", args: ["bass"] }),
+  );
+  expect(scene.expressions.assignments[setup.expressionId]).toEqual(
+    expect.objectContaining({
+      inputId: setup.inputId,
+      expression: "inputValue * 0.5",
+    }),
+  );
+  expect(Array.isArray(scene.tweens)).toBe(true);
+  expect(scene.midi.devices[setup.midiDeviceId]).toBeTruthy();
+  expect(scene.inputs.focusedInput).toEqual({
+    id: setup.inputId,
+    title: "Intensity",
+  });
+
+  const restored = await modVApp.evaluateWorker(
+    async ({ groupId, expressionId, sceneId, sceneName }) => {
+      await self.store.dispatch("groups/removeGroup", { groupId });
+      await self.store.dispatch("expressions/remove", { id: expressionId });
+      await self.store.dispatch("inputs/clearFocusedInput");
+      self.store.commit("midi/SET_STATE", { devices: {}, learning: false });
+
+      await self.store.dispatch("scenes/applyScene", { sceneId });
+
+      const group = self.store.state.groups.groups.find(
+        (item) => item.name === sceneName,
+      );
+      const module = self.store.state.modules.active[group.modules[0]];
+      const inputId = module.$props.intensity.id;
+      const assignment = Object.values(
+        self.store.state.expressions.assignments,
+      ).find((item) => item.inputId === inputId);
+
+      return {
+        inputId,
+        link: self.store.state.inputs.inputLinks[inputId],
+        expression: assignment,
+        focusedInput: self.store.state.inputs.focusedInput,
+        midiDevice:
+          self.store.state.midi.devices["e2e-whole-store-E2E Controller-modV"],
+      };
+    },
+    {
+      groupId,
+      expressionId: setup.expressionId,
+      sceneId: scene.id,
+      sceneName: name,
+    },
+  );
+
+  expect(restored.inputId).not.toBe(setup.inputId);
+  expect(restored.link).toEqual(
+    expect.objectContaining({ source: "meyda", args: ["bass"] }),
+  );
+  expect(restored.expression).toEqual(
+    expect.objectContaining({
+      inputId: restored.inputId,
+      expression: "inputValue * 0.5",
+    }),
+  );
+  expect(restored.focusedInput).toEqual({
+    id: restored.inputId,
+    title: "Intensity",
+  });
+  expect(restored.midiDevice).toBeTruthy();
+
+  await removeScene(scene.id);
+  await modVApp.evaluateWorker(async () => {
+    self.store.commit("midi/SET_STATE", { devices: {}, learning: false });
+    self.store.commit("expressions/SWAP");
+  });
+  await ensureUserGroup();
+});
+
+test("a Scene JSON opened like a preset is applied as a Scene", async () => {
+  const name = uniqueName("E2E Open Scene");
+  const groupId = await createGroup(name);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(name);
+
+  await modVApp.evaluateWorker(
+    async ({ groupId }) => {
+      await self.store.dispatch("groups/removeGroup", { groupId });
+    },
+    { groupId },
+  );
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "modv-e2e-scene-"));
+  const filePath = path.join(directory, "scene.json");
+  fs.writeFileSync(filePath, JSON.stringify(scene));
+
+  await modVApp.page.evaluate(
+    async ({ filePath }) => {
+      window.modV.loadPreset(filePath);
+    },
+    { filePath },
+  );
+
+  await expect
+    .poll(() =>
+      modVApp.evaluateWorkerState("scenes.performance.currentSceneId"),
+    )
+    .toBe(scene.id);
+
+  const groupNames = await modVApp.evaluateWorker(async () =>
+    self.store.state.groups.groups.map((group) => group.name),
+  );
+
+  expect(groupNames).toContain(name);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+
+  await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
+test("a legacy Scene with an object tweens map still applies", async () => {
+  const name = uniqueName("E2E Legacy Scene");
+  const groupId = await createGroup(name);
+  const moduleId = await addModuleToGroup(groupId, "Ball");
+
+  await modVApp.evaluateWorker(
+    async ({ moduleId }) => {
+      const module = self.store.state.modules.active[moduleId];
+      const inputId = module.$props.speed.id;
+
+      await self.store.dispatch("dataTypes/createType", {
+        type: "tween",
+        args: {
+          id: inputId,
+          data: [[0], [1]],
+          duration: 1000,
+          direction: "alternate",
+          easing: "linear",
+          loop: true,
+          useBpm: true,
+          bpmDivision: 4,
+        },
+      });
+
+      await self.store.dispatch("inputs/createInputLink", {
+        inputId,
+        type: "state",
+        location: `tweens.tweens['${inputId}'].value[0]`,
+        source: "tween",
+        min: 0,
+        max: 1,
+      });
+    },
+    { moduleId },
+  );
+
+  const scene = await saveScene(name);
+
+  const legacyScene = await modVApp.evaluateWorker(
+    async ({ scene }) => {
+      const tweens = {};
+
+      for (const tween of scene.tweens) {
+        tweens[tween.id] = tween;
+      }
+
+      return {
+        id: scene.id,
+        name: scene.name,
+        enabled: scene.enabled,
+        minSeconds: scene.minSeconds,
+        maxSeconds: scene.maxSeconds,
+        timingOverride: scene.timingOverride,
+        groups: scene.groups,
+        modules: scene.modules,
+        inputLinks: scene.inputs.inputLinks,
+        tweens,
+      };
+    },
+    { scene },
+  );
+
+  const restored = await modVApp.evaluateWorker(
+    async ({ groupId, scene, sceneName }) => {
+      await self.store.dispatch("groups/removeGroup", { groupId });
+
+      await self.store.dispatch("scenes/loadSceneFromJson", {
+        scene,
+        persist: false,
+      });
+
+      const group = self.store.state.groups.groups.find(
+        (item) => item.name === sceneName,
+      );
+      const module = self.store.state.modules.active[group.modules[0]];
+      const inputId = module.$props.speed.id;
+
+      return {
+        inputId,
+        tween: self.store.state.tweens.tweens[inputId],
+        link: self.store.state.inputs.inputLinks[inputId],
+      };
+    },
+    { groupId, scene: legacyScene, sceneName: name },
+  );
+
+  expect(restored.tween).toEqual(
+    expect.objectContaining({ useBpm: true, bpmDivision: 4 }),
+  );
+  expect(restored.link).toEqual(
+    expect.objectContaining({
+      source: "tween",
+      location: `tweens.tweens['${restored.inputId}'].value[0]`,
+    }),
+  );
+
+  await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
+test("a Scene JSON can be loaded directly", async () => {
+  const name = uniqueName("E2E Scene JSON");
+  const groupId = await createGroup(name);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(name);
+
+  const imported = await modVApp.evaluateWorker(
+    async ({ groupId, scene }) => {
+      await self.store.dispatch("groups/removeGroup", { groupId });
+
+      const result = await self.store.dispatch("scenes/loadSceneFromJson", {
+        scene,
+        persist: false,
+      });
+
+      return {
+        result,
+        currentSceneId: self.store.state.scenes.performance.currentSceneId,
+        groupNames: self.store.state.groups.groups.map((group) => group.name),
+        moduleNames: Object.values(self.store.state.modules.active)
+          .filter((module) => !module.meta.isGallery)
+          .map((module) => module.$moduleName),
+      };
+    },
+    { groupId, scene },
+  );
+
+  expect(imported.result.id).toBe(scene.id);
+  expect(imported.currentSceneId).toBe(scene.id);
+  expect(imported.groupNames).toContain(name);
+  expect(imported.moduleNames).toContain("Ball");
+
+  await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
+test("Scenes saved from preset-style Groups apply without swap flags", async () => {
+  const name = uniqueName("E2E Swap Flags");
+
+  const result = await modVApp.evaluateWorker(
+    async ({ name, galleryName, enabled }) => {
+      await self.store.dispatch("scenes/stopPerformance");
+
+      const userGroups = self.store.state.groups.groups.filter(
+        (group) => group.name !== galleryName,
+      );
+
+      for (let i = 0; i < userGroups.length; i++) {
+        await self.store.dispatch("groups/removeGroup", {
+          groupId: userGroups[i].id,
+        });
+      }
+
+      // Preset loading creates Groups through the swap buffer. Older builds
+      // stored the `writeToSwap` action flag on the Group itself, which then
+      // ended up in saved Scenes and made applying them write into the swap
+      // buffer instead of the live state.
+      await self.store.dispatch("groups/createGroup", {
+        name,
+        enabled,
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        pipeline: false,
+        writeToSwap: true,
+      });
+      self.store.commit("groups/SWAP");
+
+      const liveGroup = self.store.state.groups.groups.find(
+        (group) => group.name === name,
+      );
+      const module = await self.store.dispatch("modules/makeActiveModule", {
+        moduleName: "Ball",
+      });
+
+      self.store.commit("groups/ADD_MODULE_TO_GROUP", {
+        moduleId: module.$id,
+        groupId: liveGroup.id,
+      });
+
+      const scene = await self.store.dispatch("scenes/saveCurrentAsScene", {
+        name,
+      });
+      const savedGroup = scene.groups.find((group) => group.name === name);
+
+      // Remove the source Group so Apply has to rebuild it.
+      await self.store.dispatch("groups/removeGroup", {
+        groupId: liveGroup.id,
+      });
+
+      await self.store.dispatch("scenes/applyScene", { sceneId: scene.id });
+
+      const restoredGroups = self.store.state.groups.groups.filter(
+        (group) => group.name === name,
+      );
+      const restoredModuleIds = restoredGroups.flatMap(
+        (group) => group.modules,
+      );
+
+      return {
+        groupHasWriteToSwap: Object.prototype.hasOwnProperty.call(
+          liveGroup,
+          "writeToSwap",
+        ),
+        savedGroupHasWriteToSwap: Object.prototype.hasOwnProperty.call(
+          savedGroup,
+          "writeToSwap",
+        ),
+        savedModuleCount: savedGroup.modules.length,
+        sceneId: scene.id,
+        restoredGroupCount: restoredGroups.length,
+        restoredModuleNames: restoredModuleIds.map(
+          (moduleId) => self.store.state.modules.active[moduleId].$moduleName,
+        ),
+      };
+    },
+    {
+      name,
+      galleryName: constants.GALLERY_GROUP_NAME,
+      enabled: GROUP_ENABLED,
+    },
+  );
+
+  expect(result.groupHasWriteToSwap).toBe(false);
+  expect(result.savedGroupHasWriteToSwap).toBe(false);
+  expect(result.savedModuleCount).toBe(1);
+  expect(result.restoredGroupCount).toBe(1);
+  expect(result.restoredModuleNames).toEqual(["Ball"]);
+
+  await removeScene(result.sceneId);
   await ensureUserGroup();
 });
 

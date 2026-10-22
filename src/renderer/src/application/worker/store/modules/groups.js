@@ -128,38 +128,45 @@ const getters = {
 
 const actions = {
   async createGroup({ commit }, args = {}) {
-    const name = args.name || "New Group";
-    const writeTo = args.writeToSwap ? swap : state;
-    const inherit = args.inherit === undefined ? true : args.inherit;
+    // `writeToSwap`/`readFromSwap` are action arguments, not Group properties.
+    // Persisting them would make a later apply of a saved Scene write its
+    // Groups into the preset swap buffer instead of the live state.
+    const writeToSwap = args.writeToSwap;
+    const groupArgs = { ...args };
+    delete groupArgs.writeToSwap;
+    delete groupArgs.readFromSwap;
+    const name = groupArgs.name || "New Group";
+    const writeTo = writeToSwap ? swap : state;
+    const inherit = groupArgs.inherit === undefined ? true : groupArgs.inherit;
 
     const existingGroupIndex = writeTo.groups.findIndex(
-      (group) => group.id === args.id,
+      (group) => group.id === groupArgs.id,
     );
 
     if (existingGroupIndex > -1) {
       return writeTo.groups[existingGroupIndex];
     }
 
-    const id = args.id || uuidv4();
+    const id = groupArgs.id || uuidv4();
 
     const group = {
-      ...args,
+      ...groupArgs,
       name,
       id,
-      clearing: args.clearing ?? false,
-      enabled: Number(args.enabled) ?? GROUP_DISABLED,
-      hidden: args.hidden ?? false,
-      modules: args.modules ?? [],
+      clearing: groupArgs.clearing ?? false,
+      enabled: Number(groupArgs.enabled) ?? GROUP_DISABLED,
+      hidden: groupArgs.hidden ?? false,
+      modules: groupArgs.modules ?? [],
       inherit,
-      inheritFrom: args.inheritFrom ?? -1,
-      alpha: args.alpha ?? 1,
-      pipeline: args.pipeline ?? 0,
-      compositeOperation: args.compositeOperation || "normal",
+      inheritFrom: groupArgs.inheritFrom ?? -1,
+      alpha: groupArgs.alpha ?? 1,
+      pipeline: groupArgs.pipeline ?? 0,
+      compositeOperation: groupArgs.compositeOperation || "normal",
       context: await store.dispatch("outputs/getAuxillaryOutput", {
         name,
         group: "group",
         id,
-        reactToResize: args.reactToResize ?? true,
+        reactToResize: groupArgs.reactToResize ?? true,
       }),
     };
 
@@ -175,8 +182,8 @@ const actions = {
       const inputName = inputs[i];
       const idKey = `${inputName}InputId`;
 
-      if (args[idKey] !== undefined) {
-        group[idKey] = args[idKey];
+      if (groupArgs[idKey] !== undefined) {
+        group[idKey] = groupArgs[idKey];
       } else {
         group[idKey] = (
           await store.dispatch("inputs/addInput", {
@@ -188,7 +195,7 @@ const actions = {
       }
     }
 
-    commit("ADD_GROUP", { group, writeToSwap: args.writeToSwap });
+    commit("ADD_GROUP", { group, writeToSwap });
 
     return group;
   },
@@ -251,6 +258,8 @@ const actions = {
       .map((group) => {
         const clonedGroup = { ...group };
         delete clonedGroup.context;
+        delete clonedGroup.writeToSwap;
+        delete clonedGroup.readFromSwap;
         return clonedGroup;
       });
   },
