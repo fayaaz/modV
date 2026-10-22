@@ -10,6 +10,7 @@ import { getFeatures, setFeatures } from "./audio-features";
 import {
   createPresetData,
   isSceneDocument,
+  isScenesPlaylist,
   loadPresetData,
 } from "./preset-serializer";
 
@@ -475,6 +476,14 @@ async function start() {
       const fileBuffer = await fs.promises.readFile(payload);
       const jsonString = fileBuffer.toString();
       const document = JSON.parse(jsonString);
+
+      if (isScenesPlaylist(document)) {
+        await store.dispatch("scenes/importPlaylist", {
+          playlist: document,
+        });
+
+        return;
+      }
 
       if (isSceneDocument(document)) {
         await store.dispatch("scenes/loadSceneFromJson", {

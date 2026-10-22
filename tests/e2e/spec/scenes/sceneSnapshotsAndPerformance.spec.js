@@ -417,6 +417,117 @@ test("a saved Scene serialises the whole store like a preset", async () => {
   await ensureUserGroup();
 });
 
+test("exports all Scenes as a playlist and imports it", async () => {
+  const name = uniqueName("E2E Playlist");
+  const groupId = await createGroup(name);
+  await addModuleToGroup(groupId, "Ball");
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/updatePerformance", {
+      minSeconds: 5,
+      maxSeconds: 11,
+      transitionSeconds: 0.4,
+      order: "random",
+      allowedTransitions: ["Fade"],
+    });
+  });
+
+  const scene = await saveScene(name);
+
+  const playlist = await modVApp.evaluateWorker(async () =>
+    self.store.dispatch("scenes/exportPlaylist"),
+  );
+
+  expect(playlist.type).toBe("modv-scenes-playlist");
+  expect(playlist.version).toBe(1);
+  expect(playlist.scenes.find((item) => item.name === name)).toBeTruthy();
+  expect(playlist.performance).toEqual(
+    expect.objectContaining({
+      minSeconds: 5,
+      maxSeconds: 11,
+      transitionSeconds: 0.4,
+      order: "random",
+      allowedTransitions: ["Fade"],
+    }),
+  );
+  expect(playlist.performance).not.toHaveProperty("currentSceneId");
+  expect(playlist.performance).not.toHaveProperty("enabled");
+
+  await modVApp.evaluateWorker(
+    async ({ groupId, sceneId }) => {
+      await self.store.dispatch("scenes/removeScene", { sceneId });
+      await self.store.dispatch("groups/removeGroup", { groupId });
+      await self.store.dispatch("scenes/updatePerformance", {
+        minSeconds: 30,
+        maxSeconds: 40,
+        order: "in-order",
+      });
+    },
+    { groupId, sceneId: scene.id },
+  );
+
+  const imported = await modVApp.evaluateWorker(
+    async ({ playlist }) =>
+      self.store.dispatch("scenes/importPlaylist", { playlist }),
+    { playlist },
+  );
+
+  expect(imported.scenes.find((item) => item.name === name)).toBeTruthy();
+  expect(imported.performance).toEqual(
+    expect.objectContaining({
+      minSeconds: 5,
+      maxSeconds: 11,
+      transitionSeconds: 0.4,
+      order: "random",
+      allowedTransitions: ["Fade"],
+    }),
+  );
+
+  await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
+test("a Scenes playlist JSON can be opened like a preset", async () => {
+  const name = uniqueName("E2E Playlist File");
+  const groupId = await createGroup(name);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(name);
+
+  const playlist = await modVApp.evaluateWorker(async () =>
+    self.store.dispatch("scenes/exportPlaylist"),
+  );
+
+  await modVApp.evaluateWorker(
+    async ({ groupId, sceneId }) => {
+      await self.store.dispatch("scenes/removeScene", { sceneId });
+      await self.store.dispatch("groups/removeGroup", { groupId });
+    },
+    { groupId, sceneId: scene.id },
+  );
+
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "modv-e2e-playlist-"),
+  );
+  const filePath = path.join(directory, "playlist.json");
+  fs.writeFileSync(filePath, JSON.stringify(playlist));
+
+  await modVApp.page.evaluate(
+    async ({ filePath }) => {
+      window.modV.loadPreset(filePath);
+    },
+    { filePath },
+  );
+
+  await expect
+    .poll(() => modVApp.evaluateWorkerState("scenes.scenes"))
+    .toEqual(expect.arrayContaining([expect.objectContaining({ name })]));
+
+  fs.rmSync(directory, { recursive: true, force: true });
+
+  await removeScene(scene.id);
+  await ensureUserGroup();
+});
+
 test("a Scene JSON opened like a preset is applied as a Scene", async () => {
   const name = uniqueName("E2E Open Scene");
   const groupId = await createGroup(name);

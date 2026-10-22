@@ -215,6 +215,65 @@ const windowPrefs = {
         return directory;
       });
 
+      ipcMain.handle("export-scenes-playlist", async (event, playlist) => {
+        const result = await dialog.showSaveDialog(window, {
+          title: "Export Scenes Playlist",
+          defaultPath: "scenes-playlist.json",
+          filters: [{ name: "Scenes Playlist", extensions: ["json"] }],
+        });
+
+        if (result.canceled || !result.filePath) {
+          return { canceled: true };
+        }
+
+        try {
+          await fs.promises.writeFile(
+            result.filePath,
+            JSON.stringify(playlist, null, 2),
+          );
+
+          return { canceled: false, filePath: result.filePath };
+        } catch (e) {
+          createLogger("main:scenes").error(
+            "could not export the Scenes playlist",
+            e,
+          );
+
+          return { canceled: false, error: e.message };
+        }
+      });
+
+      ipcMain.handle("import-scenes-playlist", async () => {
+        const result = await dialog.showOpenDialog(window, {
+          title: "Import Scenes Playlist",
+          filters: [{ name: "Scenes Playlist", extensions: ["json"] }],
+          properties: ["openFile"],
+          multiSelections: false,
+        });
+
+        if (result.canceled || !result.filePaths.length) {
+          return { canceled: true };
+        }
+
+        try {
+          const fileBuffer = await fs.promises.readFile(result.filePaths[0]);
+          const playlist = JSON.parse(fileBuffer.toString());
+
+          return {
+            canceled: false,
+            filePath: result.filePaths[0],
+            playlist,
+          };
+        } catch (e) {
+          createLogger("main:scenes").error(
+            "could not import the Scenes playlist",
+            e,
+          );
+
+          return { canceled: false, error: e.message };
+        }
+      });
+
       window.on("close", async (e) => {
         // 0 because this is the position of the buttons
         // in the dialog's buttons array
@@ -272,6 +331,8 @@ const windowPrefs = {
       ipcMain.removeHandler("is-modv-ready");
       ipcMain.removeHandler("get-logs-folder");
       ipcMain.removeHandler("open-logs-folder");
+      ipcMain.removeHandler("export-scenes-playlist");
+      ipcMain.removeHandler("import-scenes-playlist");
     },
   },
 

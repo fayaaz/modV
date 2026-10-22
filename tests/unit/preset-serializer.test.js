@@ -2,7 +2,9 @@ import { describe, expect, test, vi } from "vitest";
 import {
   createPresetData,
   isSceneDocument,
+  isScenesPlaylist,
   loadPresetData,
+  SCENES_PLAYLIST_TYPE,
 } from "../../src/renderer/src/application/worker/preset-serializer.js";
 
 function createFakeStore() {
@@ -156,5 +158,35 @@ describe("isSceneDocument", () => {
     expect(isSceneDocument(null)).toBe(false);
     expect(isSceneDocument({})).toBe(false);
     expect(isSceneDocument({ id: "scene-1", name: "A Scene" })).toBe(false);
+  });
+});
+
+describe("isScenesPlaylist", () => {
+  test("detects a scenes playlist", () => {
+    expect(
+      isScenesPlaylist({
+        type: SCENES_PLAYLIST_TYPE,
+        version: 1,
+        scenes: [],
+      }),
+    ).toBe(true);
+  });
+
+  test("rejects a scene document", () => {
+    expect(
+      isScenesPlaylist({
+        id: "scene-1",
+        name: "A Scene",
+        groups: [],
+      }),
+    ).toBe(false);
+  });
+
+  test("rejects malformed playlists", () => {
+    expect(isScenesPlaylist(null)).toBe(false);
+    expect(isScenesPlaylist({})).toBe(false);
+    expect(
+      isScenesPlaylist({ type: SCENES_PLAYLIST_TYPE, scenes: "nope" }),
+    ).toBe(false);
   });
 });

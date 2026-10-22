@@ -24,7 +24,10 @@ import {
   normalizeSceneTiming,
   resolveSceneTiming,
 } from "../../scene-timing";
-import { createPresetData } from "../../preset-serializer";
+import {
+  createPresetData,
+  SCENES_PLAYLIST_TYPE,
+} from "../../preset-serializer";
 
 const fs = require("fs");
 const path = require("path");
@@ -220,6 +223,49 @@ function serializeTween(tween) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+const PLAYLIST_VERSION = 1;
+
+const PLAYLIST_PERFORMANCE_KEYS = [
+  "minSeconds",
+  "maxSeconds",
+  "transitionSeconds",
+  "allowedTransitions",
+  "order",
+];
+
+function getPlaylistPerformance(performance) {
+  const normalized = normalizePerformanceTiming(performance);
+  const data = {};
+
+  for (let i = 0, len = PLAYLIST_PERFORMANCE_KEYS.length; i < len; i++) {
+    const key = PLAYLIST_PERFORMANCE_KEYS[i];
+
+    if (normalized[key] !== undefined) {
+      data[key] = clone(normalized[key]);
+    }
+  }
+
+  return data;
+}
+
+function getImportedPerformance(performance) {
+  if (!performance || typeof performance !== "object") {
+    return null;
+  }
+
+  const data = {};
+
+  for (let i = 0, len = PLAYLIST_PERFORMANCE_KEYS.length; i < len; i++) {
+    const key = PLAYLIST_PERFORMANCE_KEYS[i];
+
+    if (performance[key] !== undefined) {
+      data[key] = performance[key];
+    }
+  }
+
+  return Object.keys(data).length ? data : null;
 }
 
 function getSceneInputLinks(scene) {
@@ -1239,6 +1285,95 @@ const actions = {
     return JSON.parse(JSON.stringify(imported));
   },
 
+  /**
+   * Exports every Scene as a portable playlist JSON document. Performance
+   * settings travel with the playlist; runtime state (enabled/current scene)
+   * does not.
+   */
+  exportPlaylist({ state }) {
+    return {
+      type: SCENES_PLAYLIST_TYPE,
+      version: PLAYLIST_VERSION,
+      scenes: clone(state.scenes),
+      performance: getPlaylistPerformance(state.performance),
+    };
+  },
+
+  /**
+   * Imports a playlist, merging Scenes by id by default. Set `replace` to
+   * replace the whole Scene list.
+   */
+  async importPlaylist(
+    { commit, dispatch, state },
+    { playlist, replace = false } = {},
+  ) {
+    if (!playlist || !Array.isArray(playlist.scenes)) {
+      return null;
+    }
+
+    await completeTransition(commit);
+
+    const importedPerformance = getImportedPerformance(playlist.performance);
+
+    if (importedPerformance) {
+      commit(
+        "UPDATE_PERFORMANCE",
+        normalizePerformanceTiming({
+          ...state.performance,
+          ...normalizePerformanceData(importedPerformance),
+        }),
+      );
+    }
+
+    const importedScenes = [];
+
+    for (let i = 0, len = playlist.scenes.length; i < len; i++) {
+      const rawScene = playlist.scenes[i];
+
+      if (!rawScene || typeof rawScene !== "object") {
+        continue;
+      }
+
+      const normalized = normalizeScene({
+        ...rawScene,
+        id: rawScene.id || uuidv4(),
+      });
+
+      if (!normalized) {
+        continue;
+      }
+
+      importedScenes.push({
+        ...normalized,
+        ...normalizeSceneTiming(normalized, state.performance),
+      });
+    }
+
+    if (replace) {
+      commit("REPLACE_SCENES", importedScenes);
+    } else {
+      for (let i = 0, len = importedScenes.length; i < len; i++) {
+        commit("ADD_SCENE", importedScenes[i]);
+      }
+    }
+
+    if (
+      state.performance.currentSceneId &&
+      !state.scenes.some(
+        (scene) => scene.id === state.performance.currentSceneId,
+      )
+    ) {
+      commit("UPDATE_PERFORMANCE", { currentSceneId: null });
+    }
+
+    await dispatch("persistScenes");
+
+    return {
+      scenes: clone(state.scenes),
+      performance: clone(state.performance),
+    };
+  },
+
   updateSceneName({ commit, state }, { sceneId, name }) {
     const scene = state.scenes.find((scene) => scene.id === sceneId);
     const newName = (name || "").trim();
@@ -1920,6 +2055,10 @@ const mutations = {
     }
 
     state.scenes.push(scene);
+  },
+
+  REPLACE_SCENES(state, scenes) {
+    state.scenes.splice(0, state.scenes.length, ...scenes);
   },
 
   REMOVE_SCENE(state, { sceneId }) {

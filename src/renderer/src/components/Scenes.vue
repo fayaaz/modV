@@ -200,6 +200,12 @@
         <Button class="light" @click="saveCurrentAsScene">
           Save current as Scene
         </Button>
+        <Button class="light" @click="exportPlaylist">
+          Export Playlist
+        </Button>
+        <Button class="light" @click="importPlaylist">
+          Import Playlist
+        </Button>
         <Button class="light" @click="loadFromDisk">Reload from disk</Button>
         <Button class="light" @click="nextScene">Next scene</Button>
       </c>
@@ -222,7 +228,7 @@ export default {
     return {
       iVTitle: "Scenes",
       iVBody:
-        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. A Scene JSON can be opened like a preset.",
+        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
       newSceneName: "",
       editingSceneId: null,
       localSceneName: "",
@@ -566,6 +572,37 @@ export default {
       ipcRenderer.send("delete-scene", {
         name: scene.name,
         project: this.currentProject,
+      });
+    },
+
+    async exportPlaylist() {
+      const playlist = await this.$modV.store.dispatch(
+        "scenes/exportPlaylist",
+      );
+      const result = await ipcRenderer.invoke(
+        "export-scenes-playlist",
+        playlist,
+      );
+
+      if (result && result.error) {
+        console.error("Could not export the Scenes playlist", result.error);
+      }
+    },
+
+    async importPlaylist() {
+      const result = await ipcRenderer.invoke("import-scenes-playlist");
+
+      if (!result || result.canceled) {
+        return;
+      }
+
+      if (result.error) {
+        console.error("Could not import the Scenes playlist", result.error);
+        return;
+      }
+
+      await this.$modV.store.dispatch("scenes/importPlaylist", {
+        playlist: result.playlist,
       });
     },
 

@@ -1,5 +1,7 @@
 const SWAP_MODULES = ["groups", "modules", "inputs", "expressions"];
 
+export const SCENES_PLAYLIST_TYPE = "modv-scenes-playlist";
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -91,5 +93,18 @@ export function isSceneDocument(value) {
     value.id &&
     typeof value.name === "string" &&
     (Array.isArray(value.groups) || Array.isArray(value.layers))
+  );
+}
+
+/**
+ * A Scenes playlist is a portable list of Scene documents plus performance
+ * configuration.
+ */
+export function isScenesPlaylist(value) {
+  return !!(
+    value &&
+    typeof value === "object" &&
+    value.type === SCENES_PLAYLIST_TYPE &&
+    Array.isArray(value.scenes)
   );
 }
