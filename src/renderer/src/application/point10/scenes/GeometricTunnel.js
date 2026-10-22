@@ -4,6 +4,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
+import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
@@ -12,9 +13,146 @@ import { P9Audio } from "../p10Audio.js";
 
 export const TUNNEL_BLOOM_LAYER = 1;
 export const TUNNEL_HOOP_DEPTH = 0.05;
+export const TUNNEL_GRAIN_SIZE = 96;
+export const TUNNEL_ENV_WIDTH = 128;
+export const TUNNEL_ENV_HEIGHT = 64;
+
+// Anodised metal, not chrome: a moderately rough surface with a real
+// environment to reflect. The old near-mirror metalness + no environment is
+// what read as plastic.
+export const TUNNEL_SURFACE = {
+  metalness: 0.9,
+  roughness: 0.8,
+  envMapIntensity: 1.45,
+  bumpScale: 0.012,
+};
+
+// SSAO's distances are normalised over the camera's near..far range (0.1..
+// 1000), so 1 unit is ~0.001. The defaults (0.005..0.1) only occlude geometry
+// metres apart and would leave these 0.1-unit braces untouched.
+export const TUNNEL_SSAO = {
+  kernelRadius: 0.5,
+  minDistance: 0.00008,
+  maxDistance: 0.0025,
+};
+
 const OUTER_SIDES = [4, 8, 3, 32, 10, 12];
 const INNER_SIDES = [32, 12, 4, 8, 3, 10];
 const ringGeometries = new Map();
+
+const clamp01 = (value) => Math.min(1, Math.max(0, value));
+const lerp = (a, b, t) => a + (b - a) * t;
+const clampByte = (value) => Math.max(0, Math.min(255, Math.round(value)));
+
+export function tunnelHash(x, y, seed = 0) {
+  const h = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453123;
+  return h - Math.floor(h);
+}
+
+// Periodic value noise: the lattice wraps at `cells`, so a texture built from
+// it tiles without a visible seam on the extruded hoops.
+export function tileableNoise(u, v, cells, seed = 0) {
+  const x = u * cells;
+  const y = v * cells;
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const x0 = ((xi % cells) + cells) % cells;
+  const y0 = ((yi % cells) + cells) % cells;
+  const x1 = (x0 + 1) % cells;
+  const y1 = (y0 + 1) % cells;
+  const tx = x - xi;
+  const ty = y - yi;
+  const sx = tx * tx * (3 - 2 * tx);
+  const sy = ty * ty * (3 - 2 * ty);
+  const top = lerp(tunnelHash(x0, y0, seed), tunnelHash(x1, y0, seed), sx);
+  const bottom = lerp(tunnelHash(x0, y1, seed), tunnelHash(x1, y1, seed), sx);
+  return lerp(top, bottom, sy);
+}
+
+// Grayscale surface map: red drives the bump, green the roughness (three
+// reads .g for roughnessMap) and the RGB copy drives emissive wear.
+export function buildTunnelGrain(size = TUNNEL_GRAIN_SIZE) {
+  const data = new Uint8Array(size * size * 4);
+  const octaves = [
+    [3, 0.5, 11],
+    [7, 0.28, 23],
+    [15, 0.14, 37],
+    [31, 0.08, 53],
+  ];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = x / size;
+      const v = y / size;
+      let noise = 0;
+      let weight = 0;
+      for (const [cells, amplitude, seed] of octaves) {
+        noise += tileableNoise(u, v, cells, seed) * amplitude;
+        weight += amplitude;
+      }
+      noise /= weight;
+      const brushed = Math.sin((u * 61 + noise * 9) * Math.PI * 2) * 0.5 + 0.5;
+      const mixed = clamp01(noise * 0.82 + brushed * 0.18);
+      const height = clamp01((mixed - 0.5) * 1.8 + 0.5);
+      const value = clampByte((0.3 + height * 0.56) * 255);
+      const index = (y * size + x) * 4;
+      data[index] = value;
+      data[index + 1] = value;
+      data[index + 2] = value;
+      data[index + 3] = 255;
+    }
+  }
+  return data;
+}
+
+// Equirectangular studio: a dark violet floor, a blue horizon and a pale sky
+// with a few light panels. This is what the metal reflects instead of black.
+export function buildTunnelEnvironment(
+  width = TUNNEL_ENV_WIDTH,
+  height = TUNNEL_ENV_HEIGHT,
+) {
+  const data = new Uint8Array(width * height * 4);
+  const floor = [16, 6, 30];
+  const horizon = [34, 42, 82];
+  const sky = [138, 176, 244];
+  const panels = [
+    { v: 0.16, width: 0.045, tint: [255, 124, 200], gain: 0.55 },
+    { v: 0.54, width: 0.05, tint: [186, 214, 255], gain: 0.8 },
+    { v: 0.82, width: 0.04, tint: [226, 238, 255], gain: 1.0 },
+  ];
+
+  for (let y = 0; y < height; y++) {
+    const v = height > 1 ? y / (height - 1) : 0;
+    const base =
+      v < 0.58
+        ? floor.map((c, i) => lerp(c, horizon[i], v / 0.58))
+        : horizon.map((c, i) => lerp(c, sky[i], (v - 0.58) / 0.42));
+
+    for (let x = 0; x < width; x++) {
+      const u = width > 1 ? x / (width - 1) : 0;
+      const streak = 0.82 + tileableNoise(u, v * 0.35, 9, 71) * 0.36;
+      const panelWidth = 0.55 + 0.45 * Math.cos(u * Math.PI * 10) ** 2;
+      const rgb = base.map((c) => c * streak);
+
+      for (const panel of panels) {
+        const d = (v - panel.v) / panel.width;
+        const band = Math.exp(-d * d) * panel.gain * panelWidth;
+        for (let i = 0; i < 3; i++) rgb[i] += panel.tint[i] * band;
+      }
+
+      const bounce = Math.max(0, 1 - v / 0.22) * 0.5;
+      rgb[0] += 46 * bounce;
+      rgb[1] += 10 * bounce;
+      rgb[2] += 34 * bounce;
+
+      const index = (y * width + x) * 4;
+      data[index] = clampByte(rgb[0]);
+      data[index + 1] = clampByte(rgb[1]);
+      data[index + 2] = clampByte(rgb[2]);
+      data[index + 3] = 255;
+    }
+  }
+  return data;
+}
 
 export const tunnelRingSides = (index, inner = false) => {
   const sides = inner ? INNER_SIDES : OUTER_SIDES;
@@ -87,6 +225,7 @@ export class GeometricTunnel extends BaseScene {
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(0x07071a, 10, this.tunnelLen * 1.3);
     this.scene.add(this.group);
+    this._buildSurfaceMaps();
 
     this.braceGeo = new THREE.BoxGeometry(1, 1, 1);
     this.nodeGeo = new THREE.OctahedronGeometry(0.11, 0);
@@ -177,13 +316,29 @@ export class GeometricTunnel extends BaseScene {
       });
     }
 
-    const ambient = new THREE.AmbientLight(0x263258, 0.72);
-    this.keyLight = new THREE.DirectionalLight(0xb8d5ff, 0.85);
+    // Hemisphere keeps the shadow side blue instead of flat grey, while the
+    // key and magenta rim give each hoop a lit face and a coloured edge.
+    this.hemiLight = new THREE.HemisphereLight(0x9fc4ff, 0x1b0a24, 0.42);
+    this.keyLight = new THREE.DirectionalLight(0xd6e4ff, 1.25);
     this.keyLight.position.set(3, 4, 6);
-    this.l1 = new THREE.PointLight(0x88aaff, 1.5, 16, 1.4);
-    this.l2 = new THREE.PointLight(0xff66aa, 1.0, 16, 1.4);
-    this.group.add(ambient, this.keyLight, this.l1, this.l2);
-    for (const light of [ambient, this.keyLight, this.l1, this.l2]) {
+    this.rimLight = new THREE.DirectionalLight(0xff7fc4, 0.7);
+    this.rimLight.position.set(-4, -2, 5);
+    this.l1 = new THREE.PointLight(0x88aaff, 1.2, 18, 1.5);
+    this.l2 = new THREE.PointLight(0xff66aa, 0.9, 18, 1.5);
+    this.group.add(
+      this.hemiLight,
+      this.keyLight,
+      this.rimLight,
+      this.l1,
+      this.l2,
+    );
+    for (const light of [
+      this.hemiLight,
+      this.keyLight,
+      this.rimLight,
+      this.l1,
+      this.l2,
+    ]) {
       light.layers.enable(TUNNEL_BLOOM_LAYER);
     }
 
@@ -327,6 +482,11 @@ export class GeometricTunnel extends BaseScene {
     this.group.add(this.target);
 
     if (this.renderer) {
+      // Filmic response keeps the brushed-metal highlights from clipping to
+      // white, which was the other half of the plastic read.
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      this.renderer.toneMappingExposure = 1.0;
+
       const size = this.renderer.getSize(new THREE.Vector2());
       const renderPass = new RenderPass(
         this.scene,
@@ -380,7 +540,12 @@ export class GeometricTunnel extends BaseScene {
         "baseTexture",
       );
       this.bloomMixPass.needsSwap = true;
+      this.ssaoPass = new SSAOPass(this.scene, this.camera, size.x, size.y);
+      this.ssaoPass.kernelRadius = TUNNEL_SSAO.kernelRadius;
+      this.ssaoPass.minDistance = TUNNEL_SSAO.minDistance;
+      this.ssaoPass.maxDistance = TUNNEL_SSAO.maxDistance;
       this.finalComposer.addPass(renderPass);
+      this.finalComposer.addPass(this.ssaoPass);
       this.finalComposer.addPass(this.bloomMixPass);
       this.finalComposer.addPass(new OutputPass());
       this.bloomComposer.setSize(size.x, size.y);
@@ -388,13 +553,60 @@ export class GeometricTunnel extends BaseScene {
     }
   }
 
+  _buildSurfaceMaps() {
+    const grain = buildTunnelGrain();
+    this.grainMap = this._dataTexture(grain, false);
+    this.emissiveMap = this._dataTexture(grain, true);
+    this.envMap = this._environmentTexture();
+    this.scene.environment = this.envMap;
+    this.scene.environmentIntensity = 1.0;
+  }
+
+  _dataTexture(data, srgb) {
+    const texture = new THREE.DataTexture(
+      data,
+      TUNNEL_GRAIN_SIZE,
+      TUNNEL_GRAIN_SIZE,
+      THREE.RGBAFormat,
+    );
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(2.5, 2.5);
+    texture.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    texture.anisotropy = this.renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  _environmentTexture() {
+    const texture = new THREE.DataTexture(
+      buildTunnelEnvironment(),
+      TUNNEL_ENV_WIDTH,
+      TUNNEL_ENV_HEIGHT,
+      THREE.RGBAFormat,
+    );
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
   _neonMat() {
     return new THREE.MeshStandardMaterial({
-      color: 0x080b18,
+      // Metal tint, not paint: this is the colour the environment reflects.
+      // A near-black base here made the hoops mirror-black without the sheen.
+      color: 0x3a4358,
       emissive: 0xffffff,
       emissiveIntensity: 0.55,
-      roughness: 0.24,
-      metalness: 0.72,
+      emissiveMap: this.emissiveMap,
+      roughness: TUNNEL_SURFACE.roughness,
+      roughnessMap: this.grainMap,
+      metalness: TUNNEL_SURFACE.metalness,
+      bumpMap: this.grainMap,
+      bumpScale: TUNNEL_SURFACE.bumpScale,
+      envMapIntensity: TUNNEL_SURFACE.envMapIntensity,
       flatShading: true,
       side: THREE.DoubleSide,
       depthWrite: true,
@@ -439,9 +651,11 @@ export class GeometricTunnel extends BaseScene {
     this.dust.material.opacity = 0.58 + b * 0.22 + this.flash * 0.16;
 
     const lightPulse = 0.6 + b * 0.9 + this.flash * 1.6;
-    this.keyLight.intensity = 0.65 + lightPulse * 0.28;
-    this.l1.intensity = 0.8 + lightPulse * 0.45;
-    this.l2.intensity = 0.55 + lightPulse * 0.3;
+    this.hemiLight.intensity = 0.34 + b * 0.14 + this.flash * 0.1;
+    this.keyLight.intensity = 0.9 + lightPulse * 0.34;
+    this.rimLight.intensity = 0.4 + b * 0.35 + this.flash * 0.25;
+    this.l1.intensity = 0.7 + lightPulse * 0.45;
+    this.l2.intensity = 0.45 + lightPulse * 0.3;
     this.l1.position.set(Math.sin(this.time * 0.14) * 1.5, 1, 5);
     this.l2.position.set(Math.cos(this.time * 0.2) * 1.5, 0, -30);
     this.targetLight.intensity = 1.25 + b * 0.9 + this.flash * 1.2;
@@ -483,10 +697,12 @@ export class GeometricTunnel extends BaseScene {
       const l = Math.min(0.48, 0.34 + m * 0.06 + this.flash * 0.08);
       c.setHSL(hue, 0.9, l);
       const bright = 0.48 + depth * 0.28 + b * 0.2 + this.flash * 0.38;
-      frame.material.emissive.copy(c).multiplyScalar(0.42);
-      frame.material.emissiveIntensity = bright * 0.78;
-      inner.material.emissive.copy(c).multiplyScalar(0.34);
-      inner.material.emissiveIntensity = bright * 0.62;
+      // The frame is lit metal with a faint neon bleed; the inner hoop carries
+      // most of the glow. Fully emissive frames are what looked like plastic.
+      frame.material.emissive.copy(c).multiplyScalar(0.5);
+      frame.material.emissiveIntensity = bright * 0.32;
+      inner.material.emissive.copy(c).multiplyScalar(0.42);
+      inner.material.emissiveIntensity = bright * 0.5;
 
       for (let k = 0; k < nodes.length; k++) {
         const node = nodes[k];
@@ -506,7 +722,7 @@ export class GeometricTunnel extends BaseScene {
           (i % 2 ? -1 : 1) * Math.sin(this.time * 0.7 + i * 1.7) * 0.35;
         const tileMaterial = ros.children[0].material;
         tileMaterial.emissive.copy(c).multiplyScalar(0.85);
-        tileMaterial.emissiveIntensity = bright * 0.82 * near;
+        tileMaterial.emissiveIntensity = bright * 0.7 * near;
       }
     }
 
@@ -780,6 +996,16 @@ export class GeometricTunnel extends BaseScene {
     );
     this.camera.fov = 64 + this.smBass * 3;
     this.camera.updateProjectionMatrix();
+
+    // SSAOPass only copies the camera matrices on construction/setSize, but
+    // the bass-driven FOV changes every frame.
+    if (this.ssaoPass) {
+      const uniforms = this.ssaoPass.ssaoMaterial.uniforms;
+      uniforms.cameraProjectionMatrix.value.copy(this.camera.projectionMatrix);
+      uniforms.cameraInverseProjectionMatrix.value.copy(
+        this.camera.projectionMatrixInverse,
+      );
+    }
 
     if (!this.bloomComposer || !this.finalComposer) {
       this.renderer.render(this.scene, this.camera);
