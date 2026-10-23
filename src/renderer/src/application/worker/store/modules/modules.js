@@ -581,8 +581,20 @@ const actions = {
 
   resize({ commit, state, rootState }, { moduleId, width, height }) {
     const module = state.active[moduleId];
+
+    // A Scene change can remove the Module between the resize pass snapshotting
+    // it and this action running.
+    if (!module) {
+      return;
+    }
+
     const moduleName = module.$moduleName;
     const moduleDefinition = state.registered[moduleName];
+
+    if (!moduleDefinition) {
+      return;
+    }
+
     const { renderers } = rootState;
 
     if (

@@ -1,5 +1,6 @@
 import store from "../../worker/store";
 import { resizeCanvases, clearCanvas, copyCanvas } from "../utils";
+import { disposeISFRenderer, getModuleId } from "../disposal";
 
 import {
   Renderer as ISFRenderer,
@@ -270,8 +271,16 @@ function addActiveModule({ $id: id, meta: { isGallery } }, moduleDefinition) {
   renderers[id] = renderer;
 }
 
-function removeActiveModule(id) {
+function removeActiveModule(moduleOrId) {
+  const id = getModuleId(moduleOrId);
+
+  if (!id) {
+    return;
+  }
+
+  disposeISFRenderer(renderers[id]);
   delete renderers[id];
+  delete inputs[id];
 }
 
 export default {

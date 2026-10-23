@@ -22,12 +22,14 @@ import DEFAULT_SCENES, {
 import {
   normalizePerformanceTiming,
   normalizeSceneTiming,
+  normalizeTransitionDuration,
   resolveSceneTiming,
 } from "../../scene-timing";
 import {
   createPresetData,
   SCENES_PLAYLIST_TYPE,
 } from "../../preset-serializer";
+import { createSerialTask } from "../../serial-task";
 
 const fs = require("fs");
 const path = require("path");
@@ -806,6 +808,7 @@ let phrase = createPhraseState();
 let dwell = 0;
 let transition = null;
 let pendingCleanup = [];
+const scheduleApplyScene = createSerialTask();
 
 const getters = {
   getById: (state) => (sceneId) =>
@@ -1196,32 +1199,42 @@ async function cleanupPendingGroups() {
 
   for (let i = 0, len = groupIds.length; i < len; i++) {
     const groupId = groupIds[i];
-    const exists = store.state.groups.groups.some(
-      (group) => group.id === groupId,
-    );
 
-    if (exists) {
-      await store.dispatch("groups/removeGroup", { groupId });
+    try {
+      const exists = store.state.groups.groups.some(
+        (group) => group.id === groupId,
+      );
+
+      if (exists) {
+        await store.dispatch("groups/removeGroup", { groupId });
+      }
+    } catch (e) {
+      // One broken Group must not abort cleanup for the rest, otherwise the
+      // old Scene keeps rendering alongside the new one forever.
+      console.error("Could not clean up a transitioning Scene Group", e);
     }
   }
 }
 
 async function completeTransition(commit) {
-  if (transition) {
-    for (let i = 0, len = transition.to.length; i < len; i++) {
-      const item = transition.to[i];
+  try {
+    if (transition) {
+      for (let i = 0, len = transition.to.length; i < len; i++) {
+        const item = transition.to[i];
 
-      store.commit("groups/UPDATE_GROUP", {
-        groupId: item.groupId,
-        data: { alpha: item.alpha },
-      });
+        store.commit("groups/UPDATE_GROUP", {
+          groupId: item.groupId,
+          data: { alpha: item.alpha },
+        });
+      }
+
+      transition = null;
     }
 
-    transition = null;
+    await cleanupPendingGroups();
+  } finally {
+    commit("SET_TRANSITIONING", false);
   }
-
-  await cleanupPendingGroups();
-  commit("SET_TRANSITIONING", false);
 }
 
 const actions = {
@@ -1444,8 +1457,16 @@ const actions = {
    * Applies a Scene by restoring the whole preset-aware store. Groups and
    * Modules are rebuilt with fresh IDs so the previous Groups can be
    * crossfaded out while the new Groups fade in.
+   *
+   * Applications are serialised: applying a second Scene while the first is
+   * still rebuilding Groups would leave the first Scene's Groups orphaned in
+   * the store and rendered every frame.
    */
-  async applyScene({ commit, state }, { sceneId }) {
+  applyScene(context, payload) {
+    return scheduleApplyScene(() => context.dispatch("applySceneNow", payload));
+  },
+
+  async applySceneNow({ commit, state }, { sceneId }) {
     const scene = state.scenes.find((scene) => scene.id === sceneId);
 
     if (!scene) {
@@ -1614,7 +1635,9 @@ const actions = {
       return;
     }
 
-    const duration = Math.max(0.01, state.performance.transitionSeconds);
+    const duration = normalizeTransitionDuration(
+      state.performance.transitionSeconds,
+    );
     const shader = transitionName !== "Fade";
 
     // Shader transitions composite the two Scenes themselves, so the Groups
@@ -1944,14 +1967,23 @@ const actions = {
    */
   async tick({ commit, state, dispatch }, { delta }) {
     const numericDelta = Number(delta);
-    const dt = Number.isFinite(numericDelta)
-      ? Math.max(0, Math.min(0.1, numericDelta / 1000))
+    const rawDt = Number.isFinite(numericDelta)
+      ? Math.max(0, numericDelta / 1000)
       : 0;
+    // Phrase detection smooths over long frames, but a transition must advance
+    // in real time. Clamping the transition delta made a 2s transition last
+    // many seconds on a slow frame rate, which kept the two Scene render load
+    // on screen for the whole stall.
+    const dt = Math.min(0.1, rawDt);
 
     if (transition) {
-      transition.elapsed += dt;
+      transition.elapsed += rawDt;
 
-      const progress = Math.min(1, transition.elapsed / transition.duration);
+      const duration =
+        Number.isFinite(transition.duration) && transition.duration > 0
+          ? transition.duration
+          : normalizeTransitionDuration(undefined);
+      const progress = Math.min(1, transition.elapsed / duration);
 
       if (!transition.shader) {
         const eased = progress * progress * (3 - 2 * progress);
@@ -1989,8 +2021,11 @@ const actions = {
         dwell = 0;
         phrase = createPhraseState();
 
-        await cleanupPendingGroups();
-        commit("SET_TRANSITIONING", false);
+        try {
+          await cleanupPendingGroups();
+        } finally {
+          commit("SET_TRANSITIONING", false);
+        }
       }
 
       // Dwell only starts once the crossfade has finished, so time spent

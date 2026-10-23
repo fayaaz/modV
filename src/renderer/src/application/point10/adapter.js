@@ -53,6 +53,43 @@ function disposeInstance(instance) {
   instance.canvas.height = 0;
 }
 
+function releaseInstance(instance) {
+  instances.delete(instance.id);
+  disposeInstance(instance);
+}
+
+function releaseIfIdle(instance) {
+  if (!instance.disposeWhenIdle || instance.presenting || instance.reading) {
+    return;
+  }
+
+  releaseInstance(instance);
+}
+
+/**
+ * Releases the GPU context of a Scene instance as soon as its Module is
+ * removed (a Scene transition completing, a Group being deleted, etc.) instead
+ * of waiting for idle eviction. During a transition both Scenes are live, so
+ * holding the outgoing Scene's contexts until they time out can push the app
+ * over Chromium's active-WebGL-context budget.
+ */
+function removeSceneInstance(moduleId) {
+  const instance = instances.get(moduleId);
+
+  if (!instance) {
+    return;
+  }
+
+  if (instance.presenting || instance.reading) {
+    // Disposing a canvas mid-transfer can reject the in-flight frame; defer
+    // until its promise settles.
+    instance.disposeWhenIdle = true;
+    return;
+  }
+
+  releaseInstance(instance);
+}
+
 function evictInstances(now) {
   if (instances.size <= MAX_LIVE_INSTANCES) {
     return;
@@ -280,6 +317,7 @@ function presentFrame(instance) {
     })
     .finally(() => {
       instance.presenting = false;
+      releaseIfIdle(instance);
     });
 }
 
@@ -326,6 +364,7 @@ function readBackFrame(instance) {
     })
     .finally(() => {
       instance.reading = false;
+      releaseIfIdle(instance);
     });
 }
 
@@ -341,6 +380,12 @@ function drawScene({
 }) {
   let instance = instances.get(moduleId);
 
+  // A deferred removal may have released the instance after it was fetched.
+  if (instance && instance.disposed) {
+    instances.delete(moduleId);
+    instance = null;
+  }
+
   if (isGallery) {
     evictGalleryInstances(moduleId);
   }
@@ -350,6 +395,7 @@ function drawScene({
       instance = webgpu
         ? createWebGPUInstance(SceneClass, canvas.width, canvas.height)
         : createInstance(SceneClass, canvas.width, canvas.height);
+      instance.id = moduleId;
       instance.gallery = !!isGallery;
       instances.set(moduleId, instance);
     } catch (error) {
@@ -448,4 +494,4 @@ function createPoint10Module({
   };
 }
 
-export { createPoint10Module, RESPONSIVENESS_PROPS };
+export { createPoint10Module, removeSceneInstance, RESPONSIVENESS_PROPS };

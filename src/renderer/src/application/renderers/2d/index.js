@@ -1,5 +1,7 @@
 import store from "../../worker/store";
 import { resizeCanvas, clearCanvas, copyCanvas } from "../utils";
+import { getModuleId } from "../disposal";
+import { removeSceneInstance } from "../../point10/adapter";
 
 const twoDCanvas = new OffscreenCanvas(300, 300);
 const twoDContext = twoDCanvas.getContext("2d");
@@ -143,4 +145,25 @@ async function setupModule(moduleDefinition) {
   return moduleDefinition;
 }
 
-export default { render, resize, updateModule, resizeModule, setupModule };
+/**
+ * Releases per-instance GPU resources. Only Point10 Modules own an instance;
+ * for every other 2D Module this is a no-op.
+ */
+function removeActiveModule(moduleOrId) {
+  const id = getModuleId(moduleOrId);
+
+  if (!id) {
+    return;
+  }
+
+  removeSceneInstance(id);
+}
+
+export default {
+  render,
+  resize,
+  updateModule,
+  resizeModule,
+  setupModule,
+  removeActiveModule,
+};

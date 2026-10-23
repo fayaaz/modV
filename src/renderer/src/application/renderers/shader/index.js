@@ -2,6 +2,7 @@ import createContext from "pex-context";
 import { frames } from "../../worker/frame-counter";
 import store from "../../worker/store";
 import defaultShader from "./default-shader";
+import { disposePexCommand, getModuleId } from "../disposal";
 
 function createCanvas(name, contextOptions) {
   const canvas = new OffscreenCanvas(256, 256);
@@ -320,6 +321,30 @@ function render({
   context.drawImage(rendererContext.canvas, 0, 0, canvas.width, canvas.height);
 }
 
+function removeActiveModule(moduleOrId) {
+  const id = getModuleId(moduleOrId);
+
+  if (!id) {
+    return;
+  }
+
+  // The module could have been created against either the normal or the
+  // gallery shader context, so check both.
+  const contexts = [shaderContext, shaderContextGallery];
+
+  for (let i = 0, len = contexts.length; i < len; i++) {
+    const rendererContext = contexts[i];
+    const command = rendererContext.commands[id];
+
+    if (!command) {
+      continue;
+    }
+
+    delete rendererContext.commands[id];
+    disposePexCommand(rendererContext.pex, command);
+  }
+}
+
 /**
  * Called each frame to update the Module
  */
@@ -335,4 +360,11 @@ function updateModule({ module, props, data, canvas, context, delta }) {
   return dataUpdated ?? data;
 }
 
-export default { setupModule, render, resize, updateModule, addActiveModule };
+export default {
+  setupModule,
+  render,
+  resize,
+  updateModule,
+  addActiveModule,
+  removeActiveModule,
+};

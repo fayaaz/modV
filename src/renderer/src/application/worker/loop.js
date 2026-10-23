@@ -12,6 +12,7 @@ const meyda = { windowing: applyWindow };
 let bufferCanvas;
 let bufferContext;
 let lastScenesTickTime = null;
+let scenesTickInFlight = false;
 const fallbackByteFrequencyData = Array(constants.AUDIO_BUFFER_SIZE).fill(0);
 
 export const ndiWorker = new NdiWorker();
@@ -48,15 +49,28 @@ async function loop(delta, features, fftOutput) {
   // Advance scene crossfades / performance mode phrase detection. The delta
   // passed to `loop` is the absolute requestAnimationFrame timestamp, so track
   // the real elapsed time between scene ticks here instead.
-  const scenesTickTime = performance.now();
-  const scenesDelta =
-    lastScenesTickTime === null ? 0 : scenesTickTime - lastScenesTickTime;
-  lastScenesTickTime = scenesTickTime;
+  //
+  // Applying a Scene awaits many dispatches and can outlast a frame. The
+  // render loop must not start a second tick (and therefore a second Scene
+  // application) while one is still in flight, or the resulting Groups are
+  // orphaned and rendered forever.
+  if (!scenesTickInFlight) {
+    const scenesTickTime = performance.now();
+    const scenesDelta =
+      lastScenesTickTime === null ? 0 : scenesTickTime - lastScenesTickTime;
+    scenesTickInFlight = true;
 
-  try {
-    await store.dispatch("scenes/tick", { delta: scenesDelta });
-  } catch (e) {
-    console.error("scenes/tick threw an error", e);
+    try {
+      await store.dispatch("scenes/tick", { delta: scenesDelta });
+    } catch (e) {
+      console.error("scenes/tick threw an error", e);
+    } finally {
+      // Measure from when the tick finished: applying a Scene can take longer
+      // than a frame, and that time must not be counted against the next
+      // Scene's crossfade.
+      lastScenesTickTime = performance.now();
+      scenesTickInFlight = false;
+    }
   }
 
   // Put fftBuffer on fftCanvas

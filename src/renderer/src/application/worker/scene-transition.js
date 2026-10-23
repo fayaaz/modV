@@ -7,11 +7,19 @@ import {
 import store from "./store";
 import { GROUP_ENABLED } from "../constants";
 import { NATIVE_TRANSITIONS } from "../scene-transition-defs";
+import { createBoundedCache, disposeISFRenderer } from "../renderers/disposal";
+import { getTransitionRenderSize } from "./transition-sizing";
 
 const nativeTransitions = new Map(
   NATIVE_TRANSITIONS.map((transition) => [transition.name, transition]),
 );
-const renderers = new Map();
+
+// Each cached renderer keeps its compiled programs plus a full-resolution
+// texture per image input. Performance mode can try every transition in the
+// allowlist, so cap the cache and release the least recently used renderer,
+// otherwise GPU memory grows with every new transition that is used.
+const MAX_CACHED_RENDERERS = 4;
+const renderers = createBoundedCache(MAX_CACHED_RENDERERS, disposeISFRenderer);
 
 let canvas = null;
 let gl = null;
@@ -158,8 +166,10 @@ function findDefinition(name) {
 }
 
 function getRenderer(definition) {
-  if (renderers.has(definition.name)) {
-    return renderers.get(definition.name);
+  const cached = renderers.get(definition.name);
+
+  if (cached) {
+    return cached;
   }
 
   try {
@@ -198,6 +208,9 @@ function getRenderer(definition) {
         `Could not compile transition "${definition.name}"`,
         renderer.errorWithCorrectedLines || renderer.error,
       );
+      // The renderer already constructed its paint program before the source
+      // failed to compile; release it instead of leaking it per attempt.
+      disposeISFRenderer(renderer);
       return null;
     }
 
@@ -234,21 +247,27 @@ export function renderSceneTransition({
     return null;
   }
 
+  // Bound the transition render target. The result is scaled back up onto the
+  // main canvas by the render loop.
+  const renderSize = getTransitionRenderSize(width, height);
+  const renderWidth = renderSize.width;
+  const renderHeight = renderSize.height;
+
   let from;
   let to;
 
   try {
     from = composeGroups(
-      getSceneCanvas("from", width, height),
+      getSceneCanvas("from", renderWidth, renderHeight),
       fromGroups,
-      width,
-      height,
+      renderWidth,
+      renderHeight,
     );
     to = composeGroups(
-      getSceneCanvas("to", width, height),
+      getSceneCanvas("to", renderWidth, renderHeight),
       toGroups,
-      width,
-      height,
+      renderWidth,
+      renderHeight,
     );
   } catch (e) {
     console.error(`Could not compose transition "${name}"`, e);
@@ -256,7 +275,7 @@ export function renderSceneTransition({
   }
 
   const fade = () => ({
-    canvas: renderFade(from, to, progress, width, height),
+    canvas: renderFade(from, to, progress, renderWidth, renderHeight),
     fallback: true,
   });
 
@@ -267,7 +286,7 @@ export function renderSceneTransition({
     return fade();
   }
 
-  if (!ensureContext(width, height)) {
+  if (!ensureContext(renderWidth, renderHeight)) {
     console.error(`Could not create a WebGL context for transition "${name}"`);
     return fade();
   }
@@ -283,7 +302,7 @@ export function renderSceneTransition({
     renderer.setValue("endImage", to);
     renderer.setValue("progress", Math.min(1, Math.max(0, progress)));
 
-    gl.viewport(0, 0, width, height);
+    gl.viewport(0, 0, renderWidth, renderHeight);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 

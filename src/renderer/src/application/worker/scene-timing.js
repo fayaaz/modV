@@ -5,7 +5,7 @@ export const DEFAULT_PERFORMANCE_TIMING = Object.freeze({
 });
 
 const MIN_SCENE_SECONDS = 1;
-const MIN_TRANSITION_SECONDS = 0.1;
+export const MIN_TRANSITION_SECONDS = 0.1;
 
 function toFiniteNumber(value) {
   if (typeof value === "number") {
@@ -23,6 +23,14 @@ function toFiniteNumber(value) {
 
 function roundTenth(value) {
   return Math.round(value * 10) / 10;
+}
+
+export function normalizeTransitionDuration(value) {
+  const transition = toFiniteNumber(value);
+
+  return transition === null
+    ? DEFAULT_PERFORMANCE_TIMING.transitionSeconds
+    : Math.max(MIN_TRANSITION_SECONDS, roundTenth(transition));
 }
 
 export function normalizePerformanceTiming(performance = {}) {

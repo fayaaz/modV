@@ -218,11 +218,16 @@ const mutations = {
   },
 
   RESIZE_AUXILLARY(state, { id, width, height }) {
-    if (!state.auxillary[id].context.canvas) {
+    const output = state.auxillary[id];
+
+    // The output can be removed by a Scene transition while a resize is in
+    // flight.
+    if (!output || !output.context || !output.context.canvas) {
       return;
     }
-    state.auxillary[id].context.canvas.width = width;
-    state.auxillary[id].context.canvas.height = height;
+
+    output.context.canvas.width = width;
+    output.context.canvas.height = height;
   },
 
   TOGGLE_DEBUG(state, debug) {
