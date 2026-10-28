@@ -61,7 +61,12 @@ export class ChromaticWave extends ChromaticLine {
     // (red <- bass, green <- mids, blue <- highs). Wave speed stays nearly
     // constant - the 0.05 xScale factor only nudges the pitch, so audio
     // no longer visibly speeds/slows the scroll.
-    u.glow.value.set(0.05 + b0 * 0.3, 0.05 + b1 * 0.3, 0.05 + b2 * 0.3);
+    u.glow.value.set(
+      (0.05 + b0 * 0.3) * this.glowScale,
+      (0.05 + b1 * 0.3) * this.glowScale,
+      (0.05 + b2 * 0.3) * this.glowScale,
+    );
     u.xScale.value.set(1.0 + b0 * 0.05, 1.0 + b1 * 0.05, 1.0 + b2 * 0.05);
+    u.distortion.value = this.distortion;
   }
 }

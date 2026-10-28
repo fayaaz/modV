@@ -361,6 +361,10 @@ export class Ferrofluid extends BaseScene {
     // stacking up.
     this._layer = 0;
     this._layerTarget = 0;
+    this.warpScale = 1;
+    this.coverageOffset = 0;
+    this.glowScale = 1;
+    this.flowScale = 1;
     this._accent = new THREE.Color();
     this._gold = new THREE.Color();
     this._warm = new THREE.Color();
@@ -422,13 +426,13 @@ export class Ferrofluid extends BaseScene {
     const lv = ferrofluidLevels(this._bass, this._mid, this._high, this._beat);
     const u = this.uniforms;
     u.uTime.value = this.time;
-    u.uWarp.value = lv.warp;
-    u.uCoverage.value = lv.coverage;
+    u.uWarp.value = lv.warp * this.warpScale;
+    u.uCoverage.value = clamp01(lv.coverage + this.coverageOffset);
     u.uSheen.value = lv.sheen;
-    u.uFlow.value = lv.flow;
+    u.uFlow.value = lv.flow * this.flowScale;
     u.uDroplet.value = lv.droplet;
     u.uDots.value = lv.dots;
-    u.uGlow.value = lv.glow;
+    u.uGlow.value = clamp01(lv.glow * this.glowScale);
 
     // Phrase hue drives the WHOLE palette, not just the accent: the source
     // swings yellow -> magenta -> teal over the track, so gold/warm/bg all

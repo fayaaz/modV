@@ -271,6 +271,9 @@ export class ItIsComingForYou extends BaseScene {
 
     this.p9audio = new P9Audio(this.audio);
     this.perm = makePerm(1);
+    this.speedScale = 1;
+    this.glowScale = 1;
+    this.bloomScale = 1;
     this.size = { w: 2, h: 2 };
     if (this.renderer) {
       const s = this.renderer.getSize(new THREE.Vector2());
@@ -300,14 +303,13 @@ export class ItIsComingForYou extends BaseScene {
           1,
         ),
       );
-      this.composer.addPass(
-        new UnrealBloomPass(
-          size,
-          BLOOM.strength,
-          BLOOM.radius,
-          BLOOM.threshold,
-        ),
+      this._bloomPass = new UnrealBloomPass(
+        size,
+        BLOOM.strength,
+        BLOOM.radius,
+        BLOOM.threshold,
       );
+      this.composer.addPass(this._bloomPass);
       this.composer.addPass(new OutputPass());
     }
   }
@@ -340,13 +342,13 @@ export class ItIsComingForYou extends BaseScene {
     const drive = itIsComingDrive(
       this.p9audio.band(-1, 0, 0, 0.1),
       this.p9audio.band(-1, 0, 1, 1),
-      dt,
+      dt * this.speedScale,
       this.perm,
     );
     this.perm = drive.perm;
     this.material.uniforms.gIn1.value.set(
-      drive.in1.x,
-      drive.in1.y,
+      drive.in1.x * this.glowScale,
+      drive.in1.y * this.glowScale,
       drive.in1.z,
       0,
     );
@@ -361,6 +363,10 @@ export class ItIsComingForYou extends BaseScene {
 
     // Shader2's Expression: in1.x = random() every frame (sparkle seed).
     this.background.material.uniforms.uSeed.value = Math.random();
+
+    if (this._bloomPass) {
+      this._bloomPass.strength = BLOOM.strength * this.bloomScale;
+    }
   }
 
   get paintsCanvas() {

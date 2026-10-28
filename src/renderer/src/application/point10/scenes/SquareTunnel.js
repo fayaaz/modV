@@ -143,6 +143,8 @@ export class SquareTunnel extends BaseScene {
 
     this.p9audio = new P9Audio(this.audio);
     this.perm = makePerm(1);
+    this.speedScale = 1;
+    this.brightnessScale = 1;
     this.size = { w: 2, h: 2 };
     if (this.renderer) {
       const s = this.renderer.getSize(new THREE.Vector2());
@@ -165,11 +167,16 @@ export class SquareTunnel extends BaseScene {
     const drive = squareTunnelDrive(
       this.p9audio.band(-1, 0, 0, 0.1),
       this.p9audio.beat(0),
-      dt,
+      dt * this.speedScale,
       this.perm,
     );
     this.perm = drive.perm;
-    this.quad.material.uniforms.gIn1.value.set(drive.in1.x, drive.in1.y, 0, 0);
+    this.quad.material.uniforms.gIn1.value.set(
+      drive.in1.x * this.brightnessScale,
+      drive.in1.y,
+      0,
+      0,
+    );
   }
 
   render() {

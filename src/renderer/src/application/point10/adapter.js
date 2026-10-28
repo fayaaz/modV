@@ -16,6 +16,7 @@ import * as THREE from "three";
 import * as THREE_GPU from "three/webgpu";
 import { Point10AudioBridge } from "./audioBridge.js";
 import { RESPONSIVENESS_PROPS, readLevers } from "./props.js";
+import { scenePropsFor } from "./sceneProps.js";
 import { createFrameClock } from "./timing.js";
 
 const instances = new Map();
@@ -376,6 +377,7 @@ function drawScene({
   context,
   features,
   props,
+  applyProps,
   isGallery,
 }) {
   let instance = instances.get(moduleId);
@@ -423,6 +425,12 @@ function drawScene({
 
   const dt = instance.frameClock(now);
 
+  // Scene-specific module inputs (smoke density, lifespans, ...) are applied
+  // every frame so a Scene built after the first draw still receives them.
+  if (typeof applyProps === "function") {
+    applyProps(instance.scene, props || {});
+  }
+
   instance.bridge.update(dt, features ? features.p10 : null, readLevers(props));
 
   const audioData =
@@ -457,8 +465,14 @@ function createPoint10Module({
   props = {},
   meta = {},
   webgpu = false,
+  applyProps = null,
 }) {
   const key = name;
+  // Every imported scene gets its module inputs from the central registry (see
+  // sceneProps.js), so a new scene only has to register its schema there.
+  const sceneConfig = scenePropsFor(name);
+  const sceneProps = { ...sceneConfig.props, ...props };
+  const applySceneProps = applyProps || sceneConfig.apply || null;
 
   return {
     meta: {
@@ -473,7 +487,7 @@ function createPoint10Module({
 
     props: {
       ...RESPONSIVENESS_PROPS,
-      ...props,
+      ...sceneProps,
     },
 
     // must stay JSON-safe (see the note above)
@@ -488,6 +502,7 @@ function createPoint10Module({
         context,
         features,
         props,
+        applyProps: applySceneProps,
         isGallery,
       });
     },

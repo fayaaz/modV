@@ -10,6 +10,7 @@ import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { P9Audio } from "../p10Audio.js";
+import { createParticleTexture } from "../shared/particleSprite.js";
 
 export const TUNNEL_BLOOM_LAYER = 1;
 export const TUNNEL_HOOP_DEPTH = 0.05;
@@ -216,6 +217,9 @@ export class GeometricTunnel extends BaseScene {
     this.tunnelLen = this.ringCount * this.spacing;
     this.radius = 4.2;
     this.scroll = 0;
+    this.speedScale = 1;
+    this.brightnessScale = 1;
+    this.bloomScale = 1;
     this.flash = 0;
     this.smBass = 0;
     this.smMid = 0;
@@ -456,6 +460,8 @@ export class GeometricTunnel extends BaseScene {
         depthWrite: false,
         sizeAttenuation: true,
         toneMapped: false,
+        map: createParticleTexture(),
+        alphaTest: 0.01,
       }),
     );
     this.dust.frustumCulled = false;
@@ -638,7 +644,7 @@ export class GeometricTunnel extends BaseScene {
     // Tunnel speed rides the music: a slow cruise with the intensity driving
     // most of the motion (smoothed b/m already, so it's glidey not juddery).
     // Rings whoosh harder/faster on heavy bass; near-silence drifts gently.
-    const turn = 2.6 + b * 5.0 + m * 2.5 + this.flash * 3.0;
+    const turn = (2.6 + b * 5.0 + m * 2.5 + this.flash * 3.0) * this.speedScale;
     this.scroll += dt * turn;
 
     this.dust.position.z = 6 - (this.scroll % this.tunnelLen);
@@ -660,9 +666,10 @@ export class GeometricTunnel extends BaseScene {
     this.l2.position.set(Math.cos(this.time * 0.2) * 1.5, 0, -30);
     this.targetLight.intensity = 1.25 + b * 0.9 + this.flash * 1.2;
     if (this.bloomPass) {
-      this.bloomPass.strength = 0.68 + b * 0.28 + this.flash * 0.22;
+      this.bloomPass.strength =
+        (0.68 + b * 0.28 + this.flash * 0.22) * this.bloomScale;
       this.bloomMixPass.material.uniforms.bloomStrength.value =
-        0.55 + b * 0.14 + this.flash * 0.12;
+        (0.55 + b * 0.14 + this.flash * 0.12) * this.bloomScale;
     }
 
     const c = new THREE.Color();
@@ -696,7 +703,9 @@ export class GeometricTunnel extends BaseScene {
       const hue = (0.62 + i * 0.045 + this.time * 0.04) % 1;
       const l = Math.min(0.48, 0.34 + m * 0.06 + this.flash * 0.08);
       c.setHSL(hue, 0.9, l);
-      const bright = 0.48 + depth * 0.28 + b * 0.2 + this.flash * 0.38;
+      const bright =
+        (0.48 + depth * 0.28 + b * 0.2 + this.flash * 0.38) *
+        this.brightnessScale;
       // The frame is lit metal with a faint neon bleed; the inner hoop carries
       // most of the glow. Fully emissive frames are what looked like plastic.
       frame.material.emissive.copy(c).multiplyScalar(0.5);

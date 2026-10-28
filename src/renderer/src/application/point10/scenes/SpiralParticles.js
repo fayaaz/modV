@@ -1,6 +1,6 @@
 import { BaseScene } from "../BaseScene.js";
-import { createCanvas } from "../canvas.js";
 import * as THREE from "three";
+import { createParticleTexture } from "../shared/particleSprite.js";
 
 export class SpiralParticles extends BaseScene {
   constructor(renderer, camera) {
@@ -12,6 +12,9 @@ export class SpiralParticles extends BaseScene {
   _init() {
     this.armCount = 4;
     this.particleCount = 8000;
+    this.spinScale = 1;
+    this.sizeScale = 1;
+    this.turbulence = 0.2;
     this.geometry = new THREE.BufferGeometry();
     this.positions = new Float32Array(this.particleCount * 3);
     this.colors = new Float32Array(this.particleCount * 3);
@@ -48,22 +51,13 @@ export class SpiralParticles extends BaseScene {
       new THREE.BufferAttribute(this.colors, 3),
     );
 
-    const canvas = createCanvas(32, 32);
-    canvas.width = canvas.height = 32;
-    const ctx = canvas.getContext("2d");
-    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, "rgba(255,255,255,1)");
-    grad.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 32, 32);
-
     this.material = new THREE.PointsMaterial({
       size: 0.1,
       vertexColors: true,
       transparent: true,
       opacity: 0.9,
       sizeAttenuation: true,
-      map: new THREE.CanvasTexture(canvas),
+      map: createParticleTexture(32),
       depthWrite: false,
     });
 
@@ -75,7 +69,9 @@ export class SpiralParticles extends BaseScene {
     super.update(dt, audioData);
     if (!audioData || audioData.length === 0) return;
 
-    this.points.rotation.y += dt * (0.1 + (audioData[0] / 255) * 0.5);
+    this.points.rotation.y +=
+      dt * (0.1 + (audioData[0] / 255) * 0.5) * this.spinScale;
+    this.material.size = 0.1 * this.sizeScale;
 
     const energy = audioData[0] / 255;
     const positions = this.geometry.attributes.position.array;
@@ -86,7 +82,8 @@ export class SpiralParticles extends BaseScene {
       const dist = Math.sqrt(x * x + z * z);
 
       if (energy > 0.6) {
-        positions[i * 3 + 1] += (Math.random() - 0.5) * energy * 0.2;
+        positions[i * 3 + 1] +=
+          (Math.random() - 0.5) * energy * this.turbulence;
       }
 
       const hue = 0.6 + dist * 0.02;

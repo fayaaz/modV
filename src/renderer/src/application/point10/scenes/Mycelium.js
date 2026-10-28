@@ -353,6 +353,9 @@ export class Mycelium extends BaseScene {
 
     this.growth = 0; // integrated wave clock (seconds at speed 1)
     this.speed = 0.25;
+    this.speedScale = 1;
+    this.glowScale = 1;
+    this.fogScale = 1;
     this._phrase = { hue: 0, t: 0, low: 0, phraseMax: 0, prev: 0, peakRise: 0 };
     this._phraseHue = 0;
     this._baseColors = [
@@ -436,16 +439,15 @@ export class Mycelium extends BaseScene {
   // saturating.
   _audioUniforms(b0, b1, b2, beat) {
     const u = this.uniforms;
-    this.speed = Math.min(0.25 + b0 * 3 + beat * 0.5, 3);
-    u.u_glow.value = Math.min(0.15 + (b1 + b2) * 2 + beat * 0.5, 2);
+    this.speed = Math.min(0.25 + b0 * 3 + beat * 0.5, 3) * this.speedScale;
+    u.u_glow.value =
+      Math.min(0.15 + (b1 + b2) * 2 + beat * 0.5, 2) * this.glowScale;
     u.u_beat.value = beat;
     u.u_wander.value = Math.min(0.6 + b0 * 1.2 + beat * 0.4, 2);
     u.u_twigs.value = Math.min(0.35 + b1 * 1.2 + b2 * 0.8, 1);
     u.u_scale.value = Math.min(0.7 + b2 * 1.2, 2);
-    u.u_fogDensity.value = Math.min(
-      0.25 + u.u_glow.value * 0.22 + beat * 0.15,
-      0.7,
-    );
+    u.u_fogDensity.value =
+      Math.min(0.25 + u.u_glow.value * 0.22 + beat * 0.15, 0.7) * this.fogScale;
     if (this.bloomPass)
       this.bloomPass.strength = Math.min(
         0.5 + u.u_glow.value * 0.35 + beat * 0.25,

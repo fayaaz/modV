@@ -1,0 +1,115 @@
+import { describe, expect, it } from "vitest";
+import { ChromaticLine } from "../../src/renderer/src/application/point10/scenes/ChromaticLine.js";
+import { CubeFloor } from "../../src/renderer/src/application/point10/scenes/CubeFloor.js";
+import { Mycelium } from "../../src/renderer/src/application/point10/scenes/Mycelium.js";
+import { ParticleField } from "../../src/renderer/src/application/point10/scenes/ParticleField.js";
+import { RingOfFire } from "../../src/renderer/src/application/point10/scenes/RingOfFire.js";
+import { SpectrumBars } from "../../src/renderer/src/application/point10/scenes/SpectrumBars.js";
+import { Waveform } from "../../src/renderer/src/application/point10/scenes/Waveform.js";
+
+const loud = () => new Uint8Array(1024).fill(255);
+const half = () => new Uint8Array(1024).fill(128);
+
+describe("Point10 scene inputs change the output", () => {
+  it("scales the Cube Floor height and glow", () => {
+    const scene = new CubeFloor(null, null);
+    const audio = half();
+    scene.heightScale = 4;
+    scene.update(0.016, audio);
+    const base = scene.cubes[0].mesh.scale.y;
+
+    scene.heightScale = 8;
+    scene.glowScale = 2;
+    scene.update(0.016, audio);
+
+    expect(scene.cubes[0].mesh.scale.y).toBeCloseTo(base * 2, 5);
+  });
+
+  it("scales the Waveform height and opacity", () => {
+    const scene = new Waveform(null, null);
+    const audio = loud();
+    scene.update(0.016, audio);
+    const base = Math.max(
+      ...Array.from(scene.line.geometry.attributes.position.array).filter(
+        (_value, index) => index % 3 === 1,
+      ),
+    );
+
+    scene.heightScale = 2;
+    scene.opacity = 0.5;
+    scene.update(0.016, audio);
+    const scaled = Math.max(
+      ...Array.from(scene.line.geometry.attributes.position.array).filter(
+        (_value, index) => index % 3 === 1,
+      ),
+    );
+
+    expect(scaled).toBeGreaterThan(base * 1.5);
+    expect(scene.line.material.opacity).toBeCloseTo(0.4);
+    expect(scene.line2.material.opacity).toBeCloseTo(0.25);
+  });
+
+  it("pauses the Particle Field at zero speed", () => {
+    const scene = new ParticleField(null, null);
+    const before = scene.positions.slice();
+    scene.speedScale = 0;
+    scene.particleSize = 0.4;
+    scene.opacity = 0.3;
+    scene.update(0.016, half());
+
+    expect(scene.positions).toEqual(before);
+    expect(scene.material.size).toBe(0.4);
+    expect(scene.material.opacity).toBe(0.3);
+  });
+
+  it("scales the Spectrum Bars height and rotation", () => {
+    const scene = new SpectrumBars(null, null);
+    const audio = loud();
+    scene.heightScale = 16;
+    scene.rotationSpeed = 1;
+    scene.update(0.5, audio);
+
+    expect(scene.bars[0].scale.y).toBeCloseTo(16);
+    expect(scene.group.rotation.y).toBeCloseTo(0.5);
+  });
+
+  it("scales the Ring of Fire pulse", () => {
+    const scene = new RingOfFire(null, null);
+    const audio = loud();
+    scene.pulseScale = 1;
+    scene.update(0.016, audio);
+    const base = scene.rings[0].mesh.scale.x;
+
+    scene.pulseScale = 2;
+    scene.update(0.016, audio);
+
+    expect(scene.rings[0].mesh.scale.x).toBeCloseTo(1 + (base - 1) * 2, 5);
+  });
+
+  it("applies the Chromatic Line amplitude and chroma", () => {
+    const scene = new ChromaticLine(null, null);
+    scene.ampScale = 2;
+    scene.distortion = 0.2;
+
+    scene._audioUniforms(0.1, 0.1, 0.1);
+
+    expect(scene.uniforms.amp.value.x).toBeCloseTo(1.6);
+    expect(scene.uniforms.amp.value.y).toBeCloseTo(1.6);
+    expect(scene.uniforms.distortion.value).toBe(0.2);
+  });
+
+  it("scales Mycelium growth, glow and fog", () => {
+    const scene = new Mycelium(null, null);
+    scene.speedScale = 2;
+    scene.glowScale = 2;
+    scene.fogScale = 2;
+
+    scene._audioUniforms(0, 0, 0, 0);
+
+    expect(scene.speed).toBeCloseTo(0.5);
+    expect(scene.uniforms.u_glow.value).toBeCloseTo(0.3);
+    expect(scene.uniforms.u_fogDensity.value).toBeCloseTo(
+      (0.25 + 0.3 * 0.22) * 2,
+    );
+  });
+});

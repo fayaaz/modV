@@ -393,6 +393,9 @@ export class AroundPlus extends BaseScene {
 
     this.p9audio = new P9Audio(this.audio);
     this.perm = 1; // Expression1 state starts at RandomSeed=1
+    this.spinSpeed = 1;
+    this.ringBrightness = 1;
+    this.waterChurn = 1;
     this._wander = makePitchWander(-10, 10);
     this.size = { w: 2, h: 2 };
     if (this.renderer) {
@@ -420,7 +423,11 @@ export class AroundPlus extends BaseScene {
     );
     // Expression1: perm += min(1, band(-1,1,1,0.05)*10+0.1)*dt*20; out1=perm
     // -> RenderObject1.Rot.y (degrees).
-    this.perm += Math.min(1, this.p9audio.band(-1, 1, 1) * 10 + 0.1) * dt * 20;
+    this.perm +=
+      Math.min(1, this.p9audio.band(-1, 1, 1) * 10 + 0.1) *
+      dt *
+      20 *
+      this.spinSpeed;
     this.torus.rotation.y = this.perm * DEG;
 
     // Ring colour on musical phrases: the bass drop detector flips the
@@ -431,6 +438,7 @@ export class AroundPlus extends BaseScene {
     dh = Math.atan2(Math.sin(dh), Math.cos(dh)); // shortest hue arc (hue is 2π-periodic)
     this._ringHue += dh * Math.min(1, dt * 1.2);
     equalizedHue(this._ringBase, this._ringHue, this.ringMat.color);
+    this.ringMat.color.multiplyScalar(this.ringBrightness);
 
     // Water vibrates with the bass: faster churn, shakier reflections and a
     // slight waterline swell (waterUniforms; calm in silence).
@@ -438,7 +446,7 @@ export class AroundPlus extends BaseScene {
     if (this.water) {
       const w = waterUniforms(bass, this._bassSm, dt);
       this._bassSm = w.smooth;
-      this.water.material.uniforms.time.value += w.dtTime;
+      this.water.material.uniforms.time.value += w.dtTime * this.waterChurn;
       this.water.material.uniforms.distortionScale.value = w.distortionScale;
       this.water.position.y = w.level;
     }

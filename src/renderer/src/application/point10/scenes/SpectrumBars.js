@@ -47,6 +47,9 @@ export class SpectrumBars extends BaseScene {
 
   _init() {
     this.barCount = 64;
+    this.heightScale = 8;
+    this.glowScale = 1;
+    this.rotationSpeed = 0;
     this.barGeometry = new THREE.BoxGeometry(0.6, 1, 0.6);
     this.barMaterial = new THREE.MeshStandardMaterial({
       color: 0xffffff,
@@ -75,18 +78,22 @@ export class SpectrumBars extends BaseScene {
     super.update(dt, audioData);
     if (!audioData) return;
 
+    this.group.rotation.y += dt * this.rotationSpeed;
+
     const levels = spectrumBarLevels(audioData, this.bars.length);
 
     for (let i = 0; i < this.bars.length; i++) {
       const value = levels[i] / 255;
-      const height = Math.max(value * 8, 0.1);
+      const height = Math.max(value * this.heightScale, 0.1);
       const mesh = this.bars[i];
       mesh.position.y = height / 2;
       mesh.scale.y = height;
 
       const hue = i / this.barCount;
       const color = new THREE.Color().setHSL(hue, 1, 0.5);
-      mesh.material.emissive.copy(color).multiplyScalar(value * 0.8);
+      mesh.material.emissive
+        .copy(color)
+        .multiplyScalar(value * 0.8 * this.glowScale);
     }
   }
 }

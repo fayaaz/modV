@@ -132,6 +132,13 @@ describe("GeometricTunnel material wiring", () => {
     expect(material.color.getHex()).toBeGreaterThan(0x222222);
   });
 
+  it("draws the dust with the circular particle sprite", () => {
+    const scene = new GeometricTunnel(null, null);
+
+    expect(scene.dust.material.map?.isDataTexture).toBe(true);
+    expect(scene.dust.material.alphaTest).toBeGreaterThan(0);
+  });
+
   it("keeps the ambient occlusion pass subtle enough for thin hoops", () => {
     expect(TUNNEL_SSAO.kernelRadius).toBeGreaterThan(0);
     expect(TUNNEL_SSAO.kernelRadius).toBeLessThan(2);

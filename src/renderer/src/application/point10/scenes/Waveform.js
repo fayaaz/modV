@@ -10,6 +10,10 @@ export class Waveform extends BaseScene {
 
   _init() {
     this.points = 256;
+    this._phase = 0;
+    this.heightScale = 1;
+    this.speedScale = 1;
+    this.opacity = 1;
     const geometry = new THREE.BufferGeometry();
     const positions = new Float32Array(this.points * 3);
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -39,13 +43,20 @@ export class Waveform extends BaseScene {
     super.update(dt, audioData);
     if (!audioData) return;
 
+    this._phase += dt * this.speedScale;
+    const phase = this._phase;
+    const height = this.heightScale;
+
+    this.line.material.opacity = 0.8 * this.opacity;
+    this.line2.material.opacity = 0.5 * this.opacity;
+
     const positions = this.line.geometry.attributes.position.array;
     const wave = audioData;
 
     for (let i = 0; i < this.points; i++) {
       const x = (i / this.points - 0.5) * 30;
       const value = wave[i % wave.length] / 255;
-      const y = value * 6 * Math.sin(i * 0.1 + this.time);
+      const y = value * 6 * height * Math.sin(i * 0.1 + phase);
 
       positions[i * 3] = x;
       positions[i * 3 + 1] = y;
@@ -58,7 +69,7 @@ export class Waveform extends BaseScene {
     for (let i = 0; i < this.points; i++) {
       const x = (i / this.points - 0.5) * 30;
       const value = wave[i % wave.length] / 255;
-      const y = value * 4 * Math.cos(i * 0.15 + this.time * 0.7);
+      const y = value * 4 * height * Math.cos(i * 0.15 + phase * 0.7);
 
       positions2[i * 3] = x;
       positions2[i * 3 + 1] = y;
@@ -67,7 +78,7 @@ export class Waveform extends BaseScene {
 
     this.line2.geometry.attributes.position.needsUpdate = true;
 
-    const hue = (this.time * 0.1) % 1;
+    const hue = (phase * 0.1) % 1;
     this.line.material.color.setHSL(hue, 1, 0.6);
     this.line2.material.color.setHSL((hue + 0.5) % 1, 1, 0.4);
   }

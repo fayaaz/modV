@@ -4,6 +4,9 @@ import * as THREE from "three";
 export class RingOfFire extends BaseScene {
   _init() {
     this.ringCount = 8;
+    this.spinScale = 1;
+    this.pulseScale = 1;
+    this.glowScale = 1;
     this.rings = [];
 
     for (let i = 0; i < this.ringCount; i++) {
@@ -46,16 +49,19 @@ export class RingOfFire extends BaseScene {
       const ring = this.rings[i];
       const value = audioData[i * 4] / 255;
 
-      ring.mesh.rotation.z += dt * ring.speed * (1 + value * 3);
+      ring.mesh.rotation.z +=
+        dt * ring.speed * (1 + value * 3) * this.spinScale;
       ring.mesh.rotation.x = Math.PI / 2 + Math.sin(this.time * 0.5 + i) * 0.3;
 
-      const scale = 1 + value * 0.5;
+      const scale = 1 + value * 0.5 * this.pulseScale;
       ring.mesh.scale.set(scale, scale, scale);
 
       const hue = (i / this.ringCount + this.time * 0.05) % 1;
       const color = new THREE.Color().setHSL(hue, 1, 0.4 + value * 0.4);
       ring.mesh.material.color.copy(color);
-      ring.mesh.material.emissive.copy(color).multiplyScalar(value);
+      ring.mesh.material.emissive
+        .copy(color)
+        .multiplyScalar(value * this.glowScale);
     }
   }
 }

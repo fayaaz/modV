@@ -62,6 +62,12 @@ function snapshot(scene) {
 }
 
 describe("SpiralParticles", () => {
+  it("uses the shared circular sprite map instead of a square point", () => {
+    const scene = new SpiralParticles(null, null);
+
+    expect(scene.material.map?.isDataTexture).toBe(true);
+  });
+
   it("responds to the real Point10 bridge spectrum", () => {
     const scene = new SpiralParticles(null, null);
     const before = snapshot(scene);

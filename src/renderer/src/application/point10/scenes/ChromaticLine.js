@@ -71,6 +71,9 @@ export class ChromaticLine extends BaseScene {
     this.ring = new Float32Array(this.R);
     this.head = 0;
     this._e = new Float32Array(this.WAVE_N);
+    this.distortion = 0.05;
+    this.ampScale = 1;
+    this.glowScale = 1;
 
     this.waveData = new Uint8Array(this.WAVE_N * 4);
     this.waveData.fill(255); // alpha; rgb starts 128 (= 0.0 wave)
@@ -129,12 +132,17 @@ export class ChromaticLine extends BaseScene {
   _audioUniforms(b0, b1, b2) {
     const u = this.uniforms;
     u.amp.value.set(
-      Math.min(b0 * 10, 0.8),
-      Math.min(b1 * 10, 0.8),
-      Math.min(b2 * 10, 0.8),
+      Math.min(b0 * 10, 0.8) * this.ampScale,
+      Math.min(b1 * 10, 0.8) * this.ampScale,
+      Math.min(b2 * 10, 0.8) * this.ampScale,
     );
-    u.glow.value.set(0.05 + b0 * 0.08, 0.05 + b1 * 0.08, 0.05 + b2 * 0.08);
+    u.glow.value.set(
+      (0.05 + b0 * 0.08) * this.glowScale,
+      (0.05 + b1 * 0.08) * this.glowScale,
+      (0.05 + b2 * 0.08) * this.glowScale,
+    );
     u.xScale.value.set(2.5 + b0 * 0.8, 2.5 + b1 * 0.8, 2.5 + b2 * 0.8);
+    u.distortion.value = this.distortion;
   }
 
   setAudio(audio) {

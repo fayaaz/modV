@@ -15,7 +15,6 @@
 // fetch-relative public dir and Vite inlines it for both dev and prod.
 import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import {
   SmokeRoom,
   VOLUME_WORLD_SIZE_X,
@@ -332,79 +331,8 @@ export class DvdRoom extends SmokeRoom {
     // would bury its bounce colour - smoke density is untouched.
     if (this._uFireIntensity) this._uFireIntensity.value = 22.0;
     this._webgpuScene = scene;
-    // Thin glass room: plain standard material (physical/clearcoat shaders
-    // come out black on this WebGPU backend - verified opaque) with a dark
-    // PMREM studio for streaks; the fire light plays across the panes.
-    // Dark studio for the panes: a few bright bars on black, PMREM'd with the
-    // scene's own renderer. (Raw equirect env maps sample black in this
-    // WebGPU pipeline - A/B proved the glass contributes zero - and
-    // RoomEnvironment floods the whole room gray.) Falls back to a gradient
-    // canvas if PMREM ever throws.
-    try {
-      if (!this._webgpuRenderer) throw new Error("no renderer");
-      const envScene = new THREE.Scene();
-      const bar = (w, h, x, y) => {
-        const m = new THREE.Mesh(
-          new THREE.PlaneGeometry(w, h),
-          new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            side: THREE.DoubleSide,
-          }),
-        );
-        m.position.set(x, y, 0);
-        envScene.add(m);
-      };
-      bar(1.2, 4, -3.5, 0);
-      bar(1.2, 4, 3.5, 0);
-      bar(5, 1, 0, 2.5);
-      const pmrem = new THREE.PMREMGenerator(this._webgpuRenderer);
-      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
-      pmrem.dispose();
-    } catch {
-      if (typeof document !== "undefined") {
-        const c = document.createElement("canvas");
-        c.width = 512;
-        c.height = 256;
-        const g = c.getContext("2d");
-        const grad = g.createLinearGradient(0, 0, 0, 256);
-        grad.addColorStop(0, "#3a4666");
-        grad.addColorStop(0.5, "#0a0d16");
-        grad.addColorStop(1, "#020307");
-        g.fillStyle = grad;
-        g.fillRect(0, 0, 512, 256);
-        g.fillStyle = "rgba(255,255,255,1.0)";
-        g.fillRect(0, 0, 512, 70);
-        g.fillRect(0, 186, 512, 70);
-        const env = new THREE.CanvasTexture(c);
-        env.mapping = THREE.EquirectangularReflectionMapping;
-        env.colorSpace = THREE.SRGBColorSpace;
-        scene.environment = env;
-      }
-    }
-    this._glassMat = new THREE.MeshStandardMaterial({
-      color: 0x9fc4e8,
-      metalness: 0.1,
-      roughness: 0.15,
-      transparent: true,
-      opacity: 0.35,
-      side: THREE.FrontSide,
-      depthWrite: false,
-      envMapIntensity: 2.5,
-    });
-    const glass = new THREE.Mesh(
-      // ponytail: slightly larger than the 12x12x24 sim grid - coplanar with
-      // the volume boxes the panes z-fight and lose; offset off their faces.
-      new RoundedBoxGeometry(
-        VOLUME_WORLD_SIZE_X + 0.6,
-        VOLUME_WORLD_SIZE_Y + 0.6,
-        VOLUME_WORLD_SIZE_Z + 0.6,
-        3,
-        1.2,
-      ),
-      this._glassMat,
-    );
-    this._glassMesh = glass;
-    scene.add(glass);
+    // Shared glass room (SmokeRoom builds it); the DVD Room just lights it.
+    super._afterInitVolume(scene);
   }
 
   _bounce() {
@@ -508,6 +436,7 @@ export class DvdRoom extends SmokeRoom {
     this.camera.position.z +=
       (Math.sin(this._orbitYaw) * 17 - this.camera.position.z) * k;
     this.camera.lookAt(0, 0, 0);
+    this._fitGlassToOutput();
 
     // Treble glows the logo (hot emissive so the bounce colour beats the fire
     // light); glass breathes with the bass.

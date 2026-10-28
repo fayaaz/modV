@@ -138,6 +138,10 @@ export class WaterRipple extends BaseScene {
       new THREE.Color(),
     ];
     this._pulse = 0;
+    this.speedScale = 1;
+    this.distortionScale = 1;
+    this.radiusScale = 1;
+    this.brightnessScale = 1;
     this._seeded = false;
     this._nextAmbient = 0.9;
     this._rw = 0;
@@ -300,10 +304,10 @@ export class WaterRipple extends BaseScene {
     this.uniforms.uTime.value = this.time;
     this.uniforms.uBass.value = this._motionBass;
     this.uniforms.uPulse.value = this._pulse;
-    this.uniforms.uDistortion.value = drive.distortion;
-    this.uniforms.uSpeed.value = drive.speed;
-    this.uniforms.uRadius.value = drive.radius;
-    this.uniforms.uBrightness.value = drive.brightness;
+    this.uniforms.uDistortion.value = drive.distortion * this.distortionScale;
+    this.uniforms.uSpeed.value = drive.speed * this.speedScale;
+    this.uniforms.uRadius.value = drive.radius * this.radiusScale;
+    this.uniforms.uBrightness.value = drive.brightness * this.brightnessScale;
     for (const impact of this.impacts) {
       impact.z += dt;
       if (impact.z > 5) impact.w = 0;

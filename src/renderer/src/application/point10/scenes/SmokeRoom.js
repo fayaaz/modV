@@ -3,13 +3,16 @@
 // grid's boundary (velocity damped to zero at the edges) traps the fire/smoke
 // inside the box - a "room with no escape". Fire/smoke radiate outward from the
 // sphere in all directions, pulse on hi-hats (small) and snares (big), and the
-// colour rotates on bass phrases. The camera is fixed. Requires WebGPU.
+// colour rotates on bass phrases. The camera is fixed. A thin glass box wraps
+// the sim; its top always sits just past the output's top edge so the box rim
+// never shows (see requiredGlassTop). Requires WebGPU.
 //
 // modV port of musicvis/src/scenes/SmokeRoom.js - see the note in
 // RollingFire.js: the WebGPURenderer + OffscreenCanvas come from the adapter,
 // modV's worker loop drives update()/render() instead of a private rAF loop,
 // and textures come from ../shared/textures.js.
 import * as THREE from "three/webgpu";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import {
   vec3,
   vec4,
@@ -73,6 +76,14 @@ const TEXEL_X = 1 / GRID_SIZE_X;
 const TEXEL_Y = 1 / GRID_SIZE_Y;
 const TEXEL_Z = 1 / GRID_SIZE_Z;
 const SPHERE_RADIUS = 0.9;
+// The glass room is slightly larger than the sim grid so its panes do not
+// z-fight the volume boxes. Its top tracks the output's top edge (see
+// requiredGlassTop) so the box edge never shows; the bottom stays put.
+const GLASS_PADDING = 0.6;
+const GLASS_HALF_X = (VOLUME_WORLD_SIZE_X + GLASS_PADDING) / 2;
+const GLASS_HALF_Y = (VOLUME_WORLD_SIZE_Y + GLASS_PADDING) / 2;
+const GLASS_HALF_Z = (VOLUME_WORLD_SIZE_Z + GLASS_PADDING) / 2;
+const GLASS_TOP_MARGIN = 0.75; // keep the edge safely past the output border
 // ponytail: AudioEngine fftSize=1024 @48kHz -> first 5 bins ≈ 0-280Hz (bass).
 const BASS_BINS = 5;
 const BLOOM_BASE = 0.12;
@@ -118,6 +129,51 @@ export class SmokeRoom extends BaseSceneWebGPU {
     }
   }
 
+  // World-space Y that puts the room's highest edge exactly on the output's
+  // top edge. For a point p, "above the top of the frame" is
+  //   (p - cam)·up > (p - cam)·forward * tan(fov / 2).
+  // Solve that for p.y over the four top corners and take the highest - the
+  // far corners are the ones that otherwise peek into frame. Aspect ratio does
+  // not enter because three's fov is vertical.
+  static requiredGlassTop(camera) {
+    camera.updateMatrixWorld();
+
+    const forward = camera.getWorldDirection(new THREE.Vector3());
+    const right = new THREE.Vector3()
+      .crossVectors(forward, camera.up)
+      .normalize();
+    const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+    const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+    const denominator = up.y - tanHalfFov * forward.y;
+    const { x: camX, y: camY, z: camZ } = camera.position;
+
+    let top = -Infinity;
+
+    for (const x of [-GLASS_HALF_X, GLASS_HALF_X]) {
+      for (const z of [-GLASS_HALF_Z, GLASS_HALF_Z]) {
+        const ex = x - camX;
+        const ez = z - camZ;
+        const offset =
+          ex * up.x +
+          ez * up.z -
+          tanHalfFov * (ex * forward.x + ez * forward.z);
+        top = Math.max(top, camY - offset / denominator);
+      }
+    }
+
+    return top;
+  }
+
+  // Height and centre for a bottom-anchored room that reaches `top`.
+  static glassFit(top) {
+    const topY = Math.max(top, GLASS_HALF_Y);
+
+    return {
+      height: topY + GLASS_HALF_Y,
+      centreY: (topY - GLASS_HALF_Y) / 2,
+    };
+  }
+
   // Hook: the mesh whose surface verts seed the sim. Async - a subclass
   // may fetch an asset (DVD Room's logo SVG). Base = the lava sphere.
   async _emitterGeometry() {
@@ -129,8 +185,97 @@ export class SmokeRoom extends BaseSceneWebGPU {
     return null;
   }
 
-  // Hook: extras after the volume is built (DVD Room adds its glass room).
-  _afterInitVolume() {}
+  // Extras after the volume is built. The glass room lives here so every smoke
+  // scene gets the same box; subclasses can override and call super.
+  _afterInitVolume(scene) {
+    // Thin glass room: plain standard material (physical/clearcoat shaders
+    // come out black on this WebGPU backend - verified opaque) with a dark
+    // PMREM studio for streaks; the fire light plays across the panes.
+    // Dark studio for the panes: a few bright bars on black, PMREM'd with the
+    // scene's own renderer. (Raw equirect env maps sample black in this
+    // WebGPU pipeline - A/B proved the glass contributes zero - and
+    // RoomEnvironment floods the whole room gray.) Falls back to a gradient
+    // canvas if PMREM ever throws.
+    try {
+      if (!this._webgpuRenderer) throw new Error("no renderer");
+      const envScene = new THREE.Scene();
+      const bar = (w, h, x, y) => {
+        const m = new THREE.Mesh(
+          new THREE.PlaneGeometry(w, h),
+          new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            side: THREE.DoubleSide,
+          }),
+        );
+        m.position.set(x, y, 0);
+        envScene.add(m);
+      };
+      bar(1.2, 4, -3.5, 0);
+      bar(1.2, 4, 3.5, 0);
+      bar(5, 1, 0, 2.5);
+      const pmrem = new THREE.PMREMGenerator(this._webgpuRenderer);
+      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+      pmrem.dispose();
+    } catch {
+      if (typeof document !== "undefined") {
+        const c = document.createElement("canvas");
+        c.width = 512;
+        c.height = 256;
+        const g = c.getContext("2d");
+        const grad = g.createLinearGradient(0, 0, 0, 256);
+        grad.addColorStop(0, "#3a4666");
+        grad.addColorStop(0.5, "#0a0d16");
+        grad.addColorStop(1, "#020307");
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 512, 256);
+        g.fillStyle = "rgba(255,255,255,1.0)";
+        g.fillRect(0, 0, 512, 70);
+        g.fillRect(0, 186, 512, 70);
+        const env = new THREE.CanvasTexture(c);
+        env.mapping = THREE.EquirectangularReflectionMapping;
+        env.colorSpace = THREE.SRGBColorSpace;
+        scene.environment = env;
+      }
+    }
+    this._glassMat = new THREE.MeshStandardMaterial({
+      color: 0x9fc4e8,
+      metalness: 0.1,
+      roughness: 0.15,
+      transparent: true,
+      opacity: 0.35,
+      side: THREE.FrontSide,
+      depthWrite: false,
+      envMapIntensity: 2.5,
+    });
+    const glass = new THREE.Mesh(
+      // slightly larger than the 12x12x24 sim grid - coplanar with the volume
+      // boxes the panes z-fight and lose; offset off their faces.
+      new RoundedBoxGeometry(
+        GLASS_HALF_X * 2,
+        GLASS_HALF_Y * 2,
+        GLASS_HALF_Z * 2,
+        3,
+        1.2,
+      ),
+      this._glassMat,
+    );
+    this._glassMesh = glass;
+    this._fitGlassToOutput();
+    scene.add(glass);
+  }
+
+  // Stretch the glass upwards so its top edge sits just past the output's top
+  // border. The bottom stays on the sim floor; only the height changes.
+  _fitGlassToOutput() {
+    const glass = this._glassMesh;
+    if (!glass) return;
+
+    const { height, centreY } = this.constructor.glassFit(
+      this.constructor.requiredGlassTop(this.camera) + GLASS_TOP_MARGIN,
+    );
+    glass.scale.y = height / (GLASS_HALF_Y * 2);
+    glass.position.y = centreY;
+  }
 
   // The emitter drives the sim uniforms each tick (base: fixed at the grid
   // centre, so the grid never moves and fire radiates above AND below).
@@ -211,6 +356,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this._fitGlassToOutput();
   }
 
   async _initVolume() {

@@ -1,5 +1,6 @@
 import { BaseScene } from "../BaseScene.js";
 import * as THREE from "three";
+import { createParticleTexture } from "../shared/particleSprite.js";
 
 export class ParticleField extends BaseScene {
   constructor(renderer, camera) {
@@ -9,6 +10,9 @@ export class ParticleField extends BaseScene {
 
   _init() {
     this.count = 5000;
+    this.particleSize = 0.15;
+    this.speedScale = 1;
+    this.opacity = 0.8;
     this.geometry = new THREE.BufferGeometry();
     this.positions = new Float32Array(this.count * 3);
     this.velocities = new Float32Array(this.count * 3);
@@ -45,6 +49,8 @@ export class ParticleField extends BaseScene {
       transparent: true,
       opacity: 0.8,
       sizeAttenuation: true,
+      map: createParticleTexture(),
+      alphaTest: 0.01,
     });
 
     this.points = new THREE.Points(this.geometry, this.material);
@@ -58,10 +64,13 @@ export class ParticleField extends BaseScene {
     const energy = audioData[0] / 255;
     const bass = audioData[0] / 255;
 
+    this.material.size = this.particleSize;
+    this.material.opacity = this.opacity;
+
     for (let i = 0; i < this.count; i++) {
-      let speed = 1;
+      let speed = this.speedScale;
       if (bass > 0.6) {
-        speed = 1 + bass * 3;
+        speed = (1 + bass * 3) * this.speedScale;
       }
 
       this.positions[i * 3] += this.velocities[i * 3] * speed;

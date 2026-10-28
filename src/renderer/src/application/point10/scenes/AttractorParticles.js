@@ -39,6 +39,7 @@ import {
   saturation,
   smoothstep,
   positionLocal,
+  uv,
   mx_noise_float,
   pass,
 } from "three/tsl";
@@ -47,6 +48,7 @@ import { BaseSceneWebGPU } from "../BaseSceneWebGPU.js";
 import { dropColorPulse, DROP, ROYGBIV_HUES } from "../shared/phraseColor.js";
 import { seededRand } from "../shared/random.js";
 import { loadTexture } from "../shared/textures.js";
+import { PARTICLE_SPRITE_INNER } from "../shared/particleAlpha.js";
 import moonDiffUrl from "../textures/moon_04_diff_1k.jpg?url";
 
 // ponytail: AudioEngine fftSize=2048 @48kHz -> first 5 bins ≈ 0-117Hz (bass).
@@ -131,6 +133,9 @@ export class AttractorParticles extends BaseSceneWebGPU {
     this._camAzimuth = 0;
     this._camPolar = 0;
     this._camRadius = 9.9;
+    this._particleSize = 1;
+    this._bloomScale = 1;
+    this._speedScale = 1;
     if (!this._available) {
       console.warn("AttractorParticles: WebGPU not available, scene disabled.");
       return;
@@ -178,7 +183,7 @@ export class AttractorParticles extends BaseSceneWebGPU {
     this._energy += (e - this._energy) * Math.min(1, dt * 10);
 
     const u = audioUniforms(this._bass, this._snare, this._hi, this._energy);
-    this._uMaxSpeed.value = u.maxSpeed;
+    this._uMaxSpeed.value = u.maxSpeed * this._speedScale;
     this._uAttractorMass.value = u.attractorMass;
     this._uSpinningStrength.value = u.spinningStrength;
     this._uParticleGlobalMass.value = u.particleGlobalMass;
@@ -516,6 +521,12 @@ export class AttractorParticles extends BaseSceneWebGPU {
       return vec4(finalColor, 1);
     })();
     material.scaleNode = particleMassMultiplier.mul(scale);
+    // SpriteNodeMaterial draws a square billboard by default; fade the corners
+    // so each particle is a round dot like the upstream example.
+    const spriteRadius = uv().sub(0.5).mul(2).length();
+    material.opacityNode = float(1).sub(
+      smoothstep(PARTICLE_SPRITE_INNER, 1, spriteRadius),
+    );
 
     const geometry = new THREE.PlaneGeometry(1, 1);
     const mesh = new THREE.InstancedMesh(geometry, material, count);
@@ -523,6 +534,7 @@ export class AttractorParticles extends BaseSceneWebGPU {
 
     // stash refs for the audio update()
     this._uMaxSpeed = maxSpeed;
+    this._uScale = scale;
     this._uAttractorMass = attractorMass;
     this._uSpinningStrength = spinningStrength;
     this._uParticleGlobalMass = particleGlobalMass;
@@ -553,10 +565,9 @@ export class AttractorParticles extends BaseSceneWebGPU {
     this._uTime.value += delta;
     this._uBassGlow.value = this._bass;
     // bass -> bloom strength (the ball's glow, like Ball of Fire)
-    this._bloomPass.strength.value = Math.min(
-      BLOOM_BASE + this._bass * BLOOM_PER_BASS,
-      4.0,
-    );
+    this._bloomPass.strength.value =
+      Math.min(BLOOM_BASE + this._bass * BLOOM_PER_BASS, 4.0) *
+      this._bloomScale;
 
     // Camera drifts around a sphere centred on the attractor centroid. A slow
     // azimuth sweep orbits the scene; the polar angle sways a little so the view

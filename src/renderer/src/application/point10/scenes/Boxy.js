@@ -329,19 +329,22 @@ export class Boxy extends BaseScene {
       this.composer = new EffectComposer(this.renderer);
       this.composer.setPixelRatio(this.renderer.getPixelRatio());
       this.composer.addPass(new RenderPass(this.group, this.camera));
-      this.composer.addPass(
-        new UnrealBloomPass(
-          size,
-          BLOOM.strength,
-          BLOOM.radius,
-          BLOOM.threshold,
-        ),
+      this._bloomPass = new UnrealBloomPass(
+        size,
+        BLOOM.strength,
+        BLOOM.radius,
+        BLOOM.threshold,
       );
+      this.composer.addPass(this._bloomPass);
       this.composer.addPass(new OutputPass());
     }
 
     this.p9audio = new P9Audio(this.audio);
     this.perm = makePerm(1);
+    this.scrollScale = 1;
+    this.glowScale = 1;
+    this.roughnessFloor = ROUGHNESS_FLOOR;
+    this.bloomScale = 1;
     this.size = { w: 2, h: 2 };
     if (this.renderer) {
       const s = this.renderer.getSize(new THREE.Vector2());
@@ -439,22 +442,25 @@ export class Boxy extends BaseScene {
     const drive = boxyDrive(
       this.p9audio.band(0, 1, 0, 0),
       this.p9audio.band(1, 1, 0, 0),
-      dt,
+      dt * this.scrollScale,
       this.perm,
     );
     this.perm = drive.perm;
     this.material.uniforms.gIn1.value.set(
       drive.in1.x,
-      drive.in1.y,
+      drive.in1.y * this.glowScale,
       drive.in1.z,
       0,
     );
     this.material.uniforms.gIn2.value.set(
-      drive.in2.x,
+      this.roughnessFloor,
       drive.in2.y,
       drive.in2.z,
       0,
     );
+    if (this._bloomPass) {
+      this._bloomPass.strength = BLOOM.strength * this.bloomScale;
+    }
   }
 
   get paintsCanvas() {
