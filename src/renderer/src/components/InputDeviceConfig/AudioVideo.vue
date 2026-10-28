@@ -106,40 +106,66 @@
           </grid>
         </c>
 
-        <c span="1..">
+        <c v-if="selectedVideoInputs.length === 0" span="1..">
           <grid columns="4">
-            <c span="1">Video Resolution</c>
-            <c span="2">
-              <Select
-                v-model="videoResolution"
-                class="light"
-                :disabled="switchingVideo"
-              >
-                <option value="default">Default</option>
-                <option value="640x480">480p</option>
-                <option value="1280x720">720p</option>
-                <option value="1920x1080">1080p</option>
-              </Select>
+            <c span="1"></c>
+            <c span="3" class="video-settings-hint">
+              Select a camera to choose its resolution and frame rate.
             </c>
-            <c>{{ appliedResolutionText }}</c>
           </grid>
         </c>
 
-        <c span="1..">
-          <grid columns="4">
+        <c
+          v-for="input in selectedVideoInputs"
+          :key="`settings-${input.deviceId}`"
+          span="1.."
+        >
+          <grid columns="4" class="video-settings">
+            <c span="1.." class="video-settings__title">{{ input.label }}</c>
+
+            <c span="1">Video Resolution</c>
+            <c span="2">
+              <Select
+                :model-value="videoResolutionValue(input.deviceId)"
+                class="light"
+                :disabled="switchingVideo"
+                @update:model-value="
+                  (value) => setVideoResolution(input.deviceId, value)
+                "
+              >
+                <option value="default">Default</option>
+                <option
+                  v-for="option in videoResolutionOptions(input.deviceId)"
+                  :key="`${option.width}x${option.height}`"
+                  :value="`${option.width}x${option.height}`"
+                >
+                  {{ option.width }}×{{ option.height }}
+                </option>
+              </Select>
+            </c>
+            <c>{{ appliedResolutionText(input.deviceId) }}</c>
+
             <c span="1">Video Frame Rate</c>
             <c span="2">
               <Select
-                v-model="videoFrameRate"
+                :model-value="videoFrameRateValue(input.deviceId)"
                 class="light"
                 :disabled="switchingVideo"
+                @update:model-value="
+                  (value) => setVideoFrameRate(input.deviceId, value)
+                "
               >
                 <option value="default">Default</option>
-                <option value="30">30</option>
-                <option value="60">60</option>
+                <option
+                  v-for="option in videoFrameRateOptions(input.deviceId)"
+                  :key="option.value"
+                  :value="String(option.value)"
+                >
+                  {{ option.label }}
+                </option>
               </Select>
             </c>
-            <c>{{ appliedFrameRateText }}</c>
+            <c>{{ appliedFrameRateText(input.deviceId) }}</c>
           </grid>
         </c>
 
@@ -158,6 +184,10 @@
 <script>
 import { createLogger } from "../../application/logger";
 import { isSystemAudioSource } from "../../application/system-audio";
+import {
+  buildFrameRateOptions,
+  buildResolutionOptions,
+} from "../../application/video-capabilities";
 
 const logger = createLogger("renderer:audio-input");
 
@@ -291,96 +321,10 @@ export default {
       );
     },
 
-    videoResolution: {
-      get() {
-        const { width, height } =
-          this.$modV.store.state.mediaStream.videoResolution || {};
-
-        if (width && height) {
-          return `${width}x${height}`;
-        }
-
-        return "default";
-      },
-
-      async set(value) {
-        if (this.switchingVideo) {
-          return;
-        }
-
-        const [width, height] = value.split("x");
-
-        const videoResolution = {
-          width: Number(width) || null,
-          height: Number(height) || null,
-        };
-
-        this.switchingVideo = true;
-
-        this.$modV.store.commit(
-          "mediaStream/SET_VIDEO_RESOLUTION",
-          videoResolution,
-        );
-        this.$modV._store.commit(
-          "mediaStream/SET_VIDEO_RESOLUTION",
-          videoResolution,
-        );
-
-        await this.applyVideoSettings();
-
-        this.switchingVideo = false;
-      },
-    },
-
-    videoFrameRate: {
-      get() {
-        const { videoFrameRate } = this.$modV.store.state.mediaStream;
-
-        return videoFrameRate ? String(videoFrameRate) : "default";
-      },
-
-      async set(value) {
-        if (this.switchingVideo) {
-          return;
-        }
-
-        const frameRate = Number(value) || null;
-
-        this.switchingVideo = true;
-
-        this.$modV.store.commit("mediaStream/SET_VIDEO_FRAME_RATE", {
-          frameRate,
-        });
-        this.$modV._store.commit("mediaStream/SET_VIDEO_FRAME_RATE", {
-          frameRate,
-        });
-
-        await this.applyVideoSettings();
-
-        this.switchingVideo = false;
-      },
-    },
-
-    appliedResolutionText() {
-      const { width, height } =
-        this.$modV.store.state.mediaStream.appliedVideoSettings || {};
-
-      if (!width || !height) {
-        return "";
-      }
-
-      return `(active: ${width}x${height})`;
-    },
-
-    appliedFrameRateText() {
-      const { frameRate } =
-        this.$modV.store.state.mediaStream.appliedVideoSettings || {};
-
-      if (!frameRate) {
-        return "";
-      }
-
-      return `(active: ${frameRate}fps)`;
+    selectedVideoInputs() {
+      return this.videoInputs.filter((input) =>
+        this.selectedVideoSourceIds.includes(input.deviceId),
+      );
     },
 
     maxGain() {
@@ -483,44 +427,282 @@ export default {
       this.$modV.stopCaptureForDevice?.(deviceId);
     },
 
-    toggleVideoDevice(deviceId, enabled) {
-      this.switchingVideo = true;
+    getDeviceVideoSettings(deviceId) {
+      const mediaStream = this.$modV.store.state.mediaStream;
+      const perDevice = mediaStream.videoSettings?.[deviceId];
 
-      if (enabled) {
-        this.$modV.setupMedia({ videoId: deviceId });
-      } else {
-        // Stop and remove this device stream if present
-        this.stopVideoDevice(deviceId);
+      const resolution =
+        perDevice && perDevice.resolution !== undefined
+          ? perDevice.resolution
+          : mediaStream.videoResolution || { width: null, height: null };
 
-        // Inform worker to remove aux for this device if one exists
-        this.$modV.store.dispatch("outputs/removeWebcamOutputForDevice", {
-          deviceId,
-        });
-        this.$modV.store.commit("mediaStream/REMOVE_SELECTED_VIDEO_SOURCE", {
-          videoId: deviceId,
-        });
-      }
+      const frameRate =
+        perDevice && perDevice.frameRate !== undefined
+          ? perDevice.frameRate
+          : mediaStream.videoFrameRate ?? null;
 
-      this.switchingVideo = false;
+      return { resolution, frameRate };
     },
 
-    async applyVideoSettings() {
-      const { selectedVideoSources, videoResolution, videoFrameRate } =
-        this.$modV.store.state.mediaStream;
+    videoCapabilitiesFor(deviceId) {
+      return (
+        this.$modV.store.state.mediaStream.videoCapabilities?.[deviceId] || {}
+      );
+    },
 
-      const deviceIds = [...(selectedVideoSources || [])];
+    videoResolutionValue(deviceId) {
+      const { resolution } = this.getDeviceVideoSettings(deviceId);
+
+      return resolution?.width && resolution?.height
+        ? `${resolution.width}x${resolution.height}`
+        : "default";
+    },
+
+    videoFrameRateValue(deviceId) {
+      const { frameRate } = this.getDeviceVideoSettings(deviceId);
+
+      return frameRate ? String(frameRate) : "default";
+    },
+
+    videoResolutionOptions(deviceId) {
+      const { resolution } = this.getDeviceVideoSettings(deviceId);
+      const capabilities = this.videoCapabilitiesFor(deviceId);
+      const options = Array.isArray(capabilities.resolutions)
+        ? capabilities.resolutions.map((mode) => ({ ...mode }))
+        : [];
+
+      if (!options.length) {
+        return buildResolutionOptions({}, resolution || {});
+      }
+
+      if (resolution?.width && resolution?.height) {
+        const current = {
+          width: resolution.width,
+          height: resolution.height,
+        };
+
+        if (!options.some((mode) => this.sameResolution(mode, current))) {
+          options.push(current);
+        }
+      }
+
+      return options.sort(
+        (a, b) => a.width * a.height - b.width * b.height,
+      );
+    },
+
+    videoFrameRateOptions(deviceId) {
+      const { frameRate } = this.getDeviceVideoSettings(deviceId);
+      const capabilities = this.videoCapabilitiesFor(deviceId);
+      const options = Array.isArray(capabilities.frameRates)
+        ? capabilities.frameRates.map((option) => ({ ...option }))
+        : [];
+
+      if (!options.length) {
+        return buildFrameRateOptions({}, { frameRate });
+      }
+
+      if (frameRate && !options.some((option) => option.value === frameRate)) {
+        options.push({ value: frameRate, label: `${frameRate} fps` });
+      }
+
+      return options.sort((a, b) => a.value - b.value);
+    },
+
+    sameResolution(a, b) {
+      return a.width === b.width && a.height === b.height;
+    },
+
+    appliedResolutionText(deviceId) {
+      const { width, height } =
+        this.$modV.store.state.mediaStream.appliedVideoSettings?.[deviceId] ||
+        {};
+
+      if (!width || !height) {
+        return "";
+      }
+
+      return `(active: ${width}x${height})`;
+    },
+
+    appliedFrameRateText(deviceId) {
+      const { frameRate } =
+        this.$modV.store.state.mediaStream.appliedVideoSettings?.[deviceId] ||
+        {};
+
+      if (!frameRate) {
+        return "";
+      }
+
+      return `(active: ${frameRate}fps)`;
+    },
+
+    async setVideoResolution(deviceId, value) {
+      const [width, height] = value.split("x");
+      const resolution =
+        value === "default"
+          ? { width: null, height: null }
+          : {
+              width: Number(width) || null,
+              height: Number(height) || null,
+            };
+
+      await this.updateVideoSettings(deviceId, { resolution });
+    },
+
+    async setVideoFrameRate(deviceId, value) {
+      const frameRate = value === "default" ? null : Number(value) || null;
+
+      await this.updateVideoSettings(deviceId, { frameRate });
+    },
+
+    async updateVideoSettings(deviceId, patch) {
+      if (this.switchingVideo) {
+        return;
+      }
+
+      this.switchingVideo = true;
+
+      const payload = { deviceId, ...patch };
+
+      this.$modV.store.commit("mediaStream/SET_VIDEO_SETTINGS", payload);
+      this.$modV._store.commit("mediaStream/SET_VIDEO_SETTINGS", payload);
+
+      try {
+        await this.applyVideoSettings(deviceId);
+      } finally {
+        this.switchingVideo = false;
+      }
+    },
+
+    syncSelectedVideoSources() {
+      const videoIds = [
+        ...(this.$modV.store.state.mediaStream.selectedVideoSources || []),
+      ];
+      const payload = { videoIds };
+
+      this.$modV.store.commit(
+        "mediaStream/SET_SELECTED_VIDEO_SOURCES",
+        payload,
+      );
+      this.$modV._store.commit(
+        "mediaStream/SET_SELECTED_VIDEO_SOURCES",
+        payload,
+      );
+    },
+
+    async toggleVideoDevice(deviceId, enabled) {
+      if (this.switchingVideo) {
+        return;
+      }
+
+      this.switchingVideo = true;
+
+      try {
+        if (enabled) {
+          const { resolution, frameRate } =
+            this.getDeviceVideoSettings(deviceId);
+
+          await this.$modV.setupMedia({
+            videoId: deviceId,
+            videoResolution: resolution,
+            videoFrameRate: frameRate,
+          });
+
+          this.syncSelectedVideoSources();
+        } else {
+          // Stop and remove this device stream if present
+          this.stopVideoDevice(deviceId);
+
+          // Inform worker to remove aux for this device if one exists
+          this.$modV.store.dispatch("outputs/removeWebcamOutputForDevice", {
+            deviceId,
+          });
+          this.$modV.store.commit("mediaStream/REMOVE_SELECTED_VIDEO_SOURCE", {
+            videoId: deviceId,
+          });
+          this.$modV._store.commit(
+            "mediaStream/REMOVE_SELECTED_VIDEO_SOURCE",
+            {
+              videoId: deviceId,
+            },
+          );
+        }
+      } catch (e) {
+        logger.error("the video input could not be changed", {
+          deviceId,
+          enabled,
+          error: e?.message || String(e),
+        });
+      } finally {
+        this.switchingVideo = false;
+      }
+    },
+
+    recordAppliedVideoSettings(deviceId, track) {
+      let settings = {};
+
+      try {
+        settings = track.getSettings?.() || {};
+      } catch (e) {
+        // The track may have ended while the constraints were applied.
+      }
+
+      this.$modV._store.commit("mediaStream/SET_APPLIED_VIDEO_SETTINGS", {
+        deviceId,
+        width: settings.width,
+        height: settings.height,
+        frameRate: settings.frameRate
+          ? Math.round(settings.frameRate)
+          : null,
+      });
+    },
+
+    async applyVideoSettings(deviceId) {
+      const { selectedVideoSources } = this.$modV.store.state.mediaStream;
+
+      const deviceIds = deviceId
+        ? [deviceId]
+        : [...(selectedVideoSources || [])];
 
       for (let i = 0; i < deviceIds.length; i++) {
-        const deviceId = deviceIds[i];
+        const id = deviceIds[i];
+        const { resolution, frameRate } = this.getDeviceVideoSettings(id);
+        const track = this.$modV._imageCaptures?.[id]?.track;
 
-        // setupMedia re-uses a live capture, so drop it first to force the
-        // new resolution / frame rate constraints to be applied
-        this.stopVideoDevice(deviceId);
+        // Apply constraints to the live track. Stopping and re-opening the
+        // same USB camera can deadlock the renderer, and this also avoids a
+        // visible frame drop while switching modes.
+        if (track && typeof track.applyConstraints === "function") {
+          const constraints = {
+            frameRate: { ideal: frameRate || 60 },
+          };
+
+          if (resolution?.width && resolution?.height) {
+            constraints.width = { ideal: resolution.width };
+            constraints.height = { ideal: resolution.height };
+          }
+
+          try {
+            await track.applyConstraints(constraints);
+            this.recordAppliedVideoSettings(id, track);
+            continue;
+          } catch (e) {
+            logger.warn("could not apply the video settings in place", {
+              deviceId: id,
+              error: e?.message || String(e),
+            });
+          }
+        }
+
+        // No live track (for example the camera was removed): fall back to a
+        // fresh capture with the requested constraints.
+        this.stopVideoDevice(id);
 
         await this.$modV.setupMedia({
-          videoId: deviceId,
-          videoResolution,
-          videoFrameRate,
+          videoId: id,
+          videoResolution: resolution,
+          videoFrameRate: frameRate,
         });
       }
     },
@@ -549,5 +731,18 @@ export default {
 
 .system-audio-error {
   color: #f88;
+}
+
+.video-settings {
+  margin-bottom: 6px;
+}
+
+.video-settings__title {
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+.video-settings-hint {
+  color: #9a9a9a;
 }
 </style>

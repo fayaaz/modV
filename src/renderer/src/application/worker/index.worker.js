@@ -391,13 +391,15 @@ async function start() {
         // Ensure we have a dedicated auxillary output for this device
         let deviceContext = store.state.outputs.webcams[deviceId];
         if (!deviceContext) {
-          const { videoResolution } = store.state.mediaStream;
+          const { videoResolution, videoSettings } = store.state.mediaStream;
+          const requested =
+            videoSettings?.[deviceId]?.resolution || videoResolution;
 
           const output = await store.dispatch("outputs/getAuxillaryOutput", {
             name: label || `webcam:${deviceId}`,
             reactToResize: false,
-            width: videoResolution?.width || bitmap.width,
-            height: videoResolution?.height || bitmap.height,
+            width: requested?.width || bitmap.width,
+            height: requested?.height || bitmap.height,
             group: "input",
           });
           store.dispatch("outputs/setWebcamOutputForDevice", {

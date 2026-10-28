@@ -2,6 +2,7 @@ import Meyda from "meyda";
 import constants from "./constants";
 import { createLogger } from "./logger";
 import { isSystemAudioSource } from "./system-audio";
+import { buildVideoOptions } from "./video-capabilities";
 
 const logger = createLogger("renderer:setup-media");
 
@@ -57,20 +58,13 @@ async function setupMedia({
   audioId,
   videoId,
   useDefaultDevices = false,
+  useDefaultVideoDevice = true,
   videoResolution,
   videoFrameRate,
   audioStream,
 } = {}) {
   const { mediaDeviceManager } = this;
   const mediaStreamState = this._store.state.mediaStream;
-
-  if (videoResolution === undefined) {
-    videoResolution = mediaStreamState.videoResolution;
-  }
-
-  if (videoFrameRate === undefined) {
-    videoFrameRate = mediaStreamState.videoFrameRate;
-  }
 
   const mediaStreamDevices = await mediaDeviceManager.enumerateDevices();
 
@@ -88,8 +82,27 @@ async function setupMedia({
     }
   }
 
-  if (!videoId && useDefaultDevices && mediaStreamDevices.video.length > 0) {
+  if (
+    !videoId &&
+    useDefaultDevices &&
+    useDefaultVideoDevice &&
+    mediaStreamDevices.video.length > 0
+  ) {
     videoSourceId = mediaStreamDevices.video[0].deviceId;
+  }
+
+  const deviceSettings = videoSourceId
+    ? mediaStreamState.videoSettings?.[videoSourceId]
+    : undefined;
+
+  if (videoResolution === undefined) {
+    videoResolution =
+      deviceSettings?.resolution ?? mediaStreamState.videoResolution;
+  }
+
+  if (videoFrameRate === undefined) {
+    videoFrameRate =
+      deviceSettings?.frameRate ?? mediaStreamState.videoFrameRate;
   }
 
   const streams = [];
@@ -158,12 +171,39 @@ async function setupMedia({
 
       // Report back what the device actually gave us
       if (typeof track.getSettings === "function") {
-        const { width, height, frameRate } = track.getSettings();
+        const settings = track.getSettings();
+
+        // Ask the camera which modes it supports so the picker can offer
+        // them instead of a hard-coded list.
+        let capabilities = {};
+
+        try {
+          if (typeof track.getCapabilities === "function") {
+            capabilities = track.getCapabilities();
+          }
+        } catch (e) {
+          logger.warn("could not read the camera capabilities", {
+            deviceId: videoSourceId,
+            message: e?.message,
+          });
+        }
+
+        const { resolutions, frameRates } = buildVideoOptions(
+          capabilities,
+          settings,
+        );
 
         this._store.commit("mediaStream/SET_APPLIED_VIDEO_SETTINGS", {
-          width,
-          height,
-          frameRate: frameRate ? Math.round(frameRate) : null,
+          deviceId: videoSourceId,
+          width: settings.width,
+          height: settings.height,
+          frameRate: settings.frameRate ? Math.round(settings.frameRate) : null,
+        });
+
+        this._store.commit("mediaStream/SET_VIDEO_CAPABILITIES", {
+          deviceId: videoSourceId,
+          resolutions,
+          frameRates,
         });
       }
 

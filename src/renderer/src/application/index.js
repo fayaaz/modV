@@ -214,20 +214,33 @@ class ModV {
     this.enumerateFonts();
 
     try {
-      await this.setupMedia({ useDefaultDevices: true });
-      // Activate any webcams persisted in local storage (selectedVideoSources)
-      const selected = this.store.state.mediaStream.selectedVideoSources || [];
-      if (selected.length) {
-        const available = new Set(
-          (this.mediaDeviceManager.videoSources || []).map((d) => d.deviceId),
-        );
-        for (let i = 0; i < selected.length; i++) {
-          const deviceId = selected[i];
-          if (available.has(deviceId) && !this._imageCaptures[deviceId]) {
-            // Fire and forget; setupMedia will short-circuit if already active
-            this.setupMedia({ videoId: deviceId }).catch(() => {});
-          }
-        }
+      // The selected cameras are persisted per device; capture them before
+      // setupMedia enumerates devices so no default camera is opened instead.
+      const savedSelection = [
+        ...(this.store.state.mediaStream.selectedVideoSources || []),
+      ];
+
+      await this.setupMedia({
+        useDefaultDevices: true,
+        useDefaultVideoDevice: false,
+      });
+
+      const available = new Set(
+        (this.mediaDeviceManager.videoSources || []).map((d) => d.deviceId),
+      );
+      const selected = savedSelection.filter((deviceId) =>
+        available.has(deviceId),
+      );
+
+      if (selected.length !== savedSelection.length) {
+        this._store.commit("mediaStream/SET_SELECTED_VIDEO_SOURCES", {
+          videoIds: selected,
+        });
+      }
+
+      for (const deviceId of selected) {
+        // setupMedia picks up the per-device resolution / frame rate itself
+        this.setupMedia({ videoId: deviceId }).catch(() => {});
       }
     } catch (e) {
       console.error(e);
