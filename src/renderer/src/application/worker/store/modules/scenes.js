@@ -30,6 +30,15 @@ import {
   SCENES_PLAYLIST_TYPE,
 } from "../../preset-serializer";
 import { createSerialTask } from "../../serial-task";
+import {
+  getRowCount,
+  getRowGroup,
+  getRowLabel,
+  isRowCellEmpty,
+  isSceneEnabled,
+  pickNextRowScene,
+  shouldAdvanceRow,
+} from "../../scene-rows";
 
 const fs = require("fs");
 const path = require("path");
@@ -399,7 +408,7 @@ function mapModuleInputIds(oldModule, newModule, inputIdMap) {
   }
 }
 
-async function restoreSceneInputs(scene, inputIdMap) {
+async function restoreSceneInputs(scene, inputIdMap, { scoped = false } = {}) {
   const inputLinks = getSceneInputLinks(scene);
   const tweenEntries = getSceneTweenEntries(scene);
   const tweenMap = new Map();
@@ -468,6 +477,10 @@ async function restoreSceneInputs(scene, inputIdMap) {
     });
   }
 
+  if (scoped) {
+    return;
+  }
+
   if (!scene.inputs || typeof scene.inputs !== "object") {
     return;
   }
@@ -490,7 +503,11 @@ async function restoreSceneInputs(scene, inputIdMap) {
   await store.dispatch("inputs/clearFocusedInput");
 }
 
-async function restoreSceneExpressions(scene, inputIdMap) {
+async function restoreSceneExpressions(
+  scene,
+  inputIdMap,
+  { merge = false } = {},
+) {
   if (!scene.expressions || typeof scene.expressions !== "object") {
     return;
   }
@@ -509,6 +526,29 @@ async function restoreSceneExpressions(scene, inputIdMap) {
       ...assignment,
       inputId: newInputId,
     };
+  }
+
+  if (merge) {
+    for (const assignment of Object.values(assignments)) {
+      if (typeof assignment.expression !== "string") {
+        continue;
+      }
+
+      const createdId = await store.dispatch("expressions/create", {
+        id: assignment.id,
+        inputId: assignment.inputId,
+        expression: assignment.expression,
+      });
+
+      if (createdId && assignment.evaluateEveryFrame) {
+        await store.dispatch("expressions/updateEvaluation", {
+          id: createdId,
+          evaluateEveryFrame: true,
+        });
+      }
+    }
+
+    return;
   }
 
   await store.dispatch("expressions/loadPresetData", { assignments });
@@ -794,6 +834,8 @@ function getDefaultState() {
       order: "in-order",
     },
     transitioning: false,
+    activeRows: {},
+    rowProgress: {},
   };
 }
 
@@ -804,11 +846,152 @@ const state = getDefaultState();
  * store so the per-frame tick doesn't flood the commitQueue with mutations.
  * Only meaningful changes (scene applied, performance config) are committed.
  */
-let phrase = createPhraseState();
-let dwell = 0;
 let transition = null;
 let pendingCleanup = [];
 const scheduleApplyScene = createSerialTask();
+
+const activeRows = reactive({});
+const rowTransitions = reactive({});
+const rowRuntime = new Map();
+let lastRowProgressCommit = 0;
+let legacyDwell = 0;
+let legacyPhrase = createPhraseState();
+
+function getLiveRowGroups() {
+  return store.state.groups.groups.filter((group) => !isGalleryGroup(group));
+}
+
+function assignMissingSceneRows() {
+  const groups = getLiveRowGroups();
+
+  for (let i = 0, len = groups.length; i < len; i++) {
+    if (getGroupSceneRow(groups[i]) === null) {
+      store.commit("groups/UPDATE_GROUP", {
+        groupId: groups[i].id,
+        data: { sceneRow: i },
+      });
+    }
+  }
+}
+
+function findLiveRowGroup(rowIndex) {
+  const row = Number(rowIndex);
+  const groups = getLiveRowGroups();
+  const match = groups.find(
+    (group) =>
+      group.sceneRow !== undefined &&
+      group.sceneRow !== null &&
+      Number(group.sceneRow) === row,
+  );
+
+  return match || groups[row] || null;
+}
+
+function clearRowTransition(rowIndex) {
+  const row = Number(rowIndex);
+  delete rowTransitions[row];
+  store.commit("scenes/CLEAR_ROW_PROGRESS", { rowIndex: row });
+}
+
+function clearAllRowTransitions() {
+  for (const rowIndex of Object.keys(rowTransitions)) {
+    delete rowTransitions[rowIndex];
+  }
+
+  store.commit("scenes/CLEAR_ALL_ROW_PROGRESS");
+}
+
+function resetLegacyRuntime() {
+  legacyDwell = 0;
+  legacyPhrase = createPhraseState();
+}
+
+function hasAnyRowCandidates(scenes, rowCount) {
+  const enabledScenes = getEnabledScenes(scenes);
+
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+    for (let i = 0, len = enabledScenes.length; i < len; i++) {
+      if (!isRowCellEmpty(enabledScenes[i], rowIndex)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function resetRowRuntime(rowIndex, dwell = 0) {
+  rowRuntime.set(Number(rowIndex), {
+    dwell,
+    phrase: createPhraseState(),
+  });
+}
+
+function resetAllRowRuntime(rowCount = 0, minSeconds = 0) {
+  rowRuntime.clear();
+
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+    const initialDwell = rowCount > 0 ? (rowIndex / rowCount) * minSeconds : 0;
+
+    resetRowRuntime(rowIndex, initialDwell);
+  }
+}
+
+function getRowRuntime(rowIndex, minSeconds = 0) {
+  const row = Number(rowIndex);
+  let runtime = rowRuntime.get(row);
+
+  if (!runtime) {
+    const rowCount = Math.max(
+      1,
+      getRowCount(store.state.scenes, store.state.groups.groups),
+    );
+    const initialDwell = minSeconds > 0 ? (row / rowCount) * minSeconds : 0;
+
+    runtime = {
+      dwell: initialDwell,
+      phrase: createPhraseState(),
+    };
+    rowRuntime.set(row, runtime);
+  }
+
+  return runtime;
+}
+
+function getGroupSceneRow(group) {
+  if (
+    !group ||
+    group.sceneRow === undefined ||
+    group.sceneRow === null ||
+    group.sceneRow === ""
+  ) {
+    return null;
+  }
+
+  const sceneRow = Number(group.sceneRow);
+
+  return Number.isFinite(sceneRow) ? sceneRow : null;
+}
+
+function orderRowGroups() {
+  const groups = store.state.groups.groups;
+  const galleryGroup = groups.find(isGalleryGroup) || null;
+  const ordered = groups
+    .filter((group) => !isGalleryGroup(group))
+    .map((group, index) => ({
+      group,
+      index,
+      sceneRow: getGroupSceneRow(group) ?? index,
+    }))
+    .sort((a, b) => a.sceneRow - b.sceneRow || a.index - b.index)
+    .map((item) => item.group);
+
+  if (galleryGroup) {
+    ordered.push(galleryGroup);
+  }
+
+  return ordered;
+}
 
 const getters = {
   getById: (state) => (sceneId) =>
@@ -842,14 +1025,56 @@ const getters = {
       to: transition.to.map((item) => item.groupId),
     };
   },
+
+  rowCount: (state, getters, rootState) =>
+    getRowCount(state.scenes, rootState.groups.groups),
+
+  activeRows: (state) => state.activeRows,
+
+  activeRow: (state) => (rowIndex) =>
+    state.activeRows[Number(rowIndex)] || null,
+
+  // The render loop reads the live transition for a smooth fade. The renderer
+  // store has no access to worker module state, so it falls back to the
+  // throttled `rowProgress` mirror committed by `tick`.
+  rowTransition: () => (rowIndex) => rowTransitions[Number(rowIndex)] || null,
+
+  rowTransitionProgress: (state) => (rowIndex) => {
+    const row = Number(rowIndex);
+    const rowTransition = rowTransitions[row];
+
+    if (rowTransition) {
+      const duration =
+        Number.isFinite(rowTransition.duration) && rowTransition.duration > 0
+          ? rowTransition.duration
+          : normalizeTransitionDuration(undefined);
+
+      return Math.min(1, rowTransition.elapsed / duration);
+    }
+
+    const progress = Number(state.rowProgress[row]);
+
+    return Number.isFinite(progress) ? Math.min(1, progress) : 1;
+  },
+
+  performanceRows: (state, getters) => {
+    const rows = [];
+
+    for (let rowIndex = 0; rowIndex < getters.rowCount; rowIndex++) {
+      rows.push({
+        index: rowIndex,
+        label: getRowLabel(state.scenes, rowIndex),
+        active: getters.activeRows[rowIndex] || null,
+        progress: getters.rowTransitionProgress(rowIndex),
+      });
+    }
+
+    return rows;
+  },
 };
 
 function isGalleryGroup(group) {
   return group.name === constants.GALLERY_GROUP_NAME;
-}
-
-function isSceneEnabled(scene) {
-  return scene.enabled !== false;
 }
 
 function getEnabledScenes(scenes) {
@@ -1466,6 +1691,248 @@ const actions = {
     return scheduleApplyScene(() => context.dispatch("applySceneNow", payload));
   },
 
+  applySceneRow(context, payload) {
+    return scheduleApplyScene(() =>
+      context.dispatch("applySceneRowNow", payload),
+    );
+  },
+
+  async applySceneRowNow({ commit, state }, { sceneId, rowIndex }) {
+    const scene = state.scenes.find((item) => item.id === sceneId);
+
+    if (!scene) {
+      return null;
+    }
+
+    const normalizedScene = normalizeScene(scene);
+
+    if (!normalizedScene) {
+      return null;
+    }
+
+    const row = Number(rowIndex);
+
+    if (!Number.isInteger(row) || row < 0) {
+      return null;
+    }
+
+    const snapshot = getRowGroup(normalizedScene, row);
+
+    if (!snapshot || isRowCellEmpty(normalizedScene, row)) {
+      return null;
+    }
+
+    await completeTransition(commit);
+    clearRowTransition(row);
+    assignMissingSceneRows();
+
+    const oldGroup = findLiveRowGroup(row);
+    const oldModuleIds = oldGroup ? [...(oldGroup.modules || [])] : [];
+    const oldInputIds = new Set();
+    let fromCanvas = null;
+    let fromAlpha = 0;
+
+    const oldCanvas =
+      oldGroup && oldGroup.context && oldGroup.context.context
+        ? oldGroup.context.context.canvas
+        : null;
+
+    if (oldGroup && oldModuleIds.length && oldCanvas) {
+      fromCanvas = new OffscreenCanvas(oldCanvas.width, oldCanvas.height);
+      fromCanvas.getContext("2d").drawImage(oldCanvas, 0, 0);
+      fromAlpha = oldGroup.alpha ?? 1;
+    }
+
+    for (let i = 0, len = oldModuleIds.length; i < len; i++) {
+      const module = store.state.modules.active[oldModuleIds[i]];
+
+      if (module) {
+        addModuleInputIds(module, oldInputIds);
+      }
+    }
+
+    if (oldGroup) {
+      for (let i = 0, len = GROUP_INPUT_NAMES.length; i < len; i++) {
+        const inputId = oldGroup[`${GROUP_INPUT_NAMES[i]}InputId`];
+
+        if (inputId) {
+          oldInputIds.add(inputId);
+        }
+      }
+    }
+
+    const groupData = { ...snapshot };
+    delete groupData.id;
+    delete groupData.modules;
+    delete groupData.context;
+    delete groupData.sceneId;
+    delete groupData.sceneRow;
+    delete groupData.alphaInputId;
+    delete groupData.enabledInputId;
+    delete groupData.clearingInputId;
+    delete groupData.inheritInputId;
+    delete groupData.compositeOperationInputId;
+    delete groupData.pipelineInputId;
+    delete groupData.writeToSwap;
+    delete groupData.readFromSwap;
+
+    const targetAlpha = snapshot.alpha ?? 1;
+    let group;
+
+    if (oldGroup) {
+      store.commit("groups/UPDATE_GROUP", {
+        groupId: oldGroup.id,
+        data: {
+          ...groupData,
+          sceneId: scene.id,
+          sceneRow: row,
+          alpha: targetAlpha,
+        },
+      });
+
+      group =
+        store.state.groups.groups.find((item) => item.id === oldGroup.id) ||
+        oldGroup;
+    } else {
+      group = await store.dispatch("groups/createGroup", {
+        ...groupData,
+        sceneId: scene.id,
+        sceneRow: row,
+        alpha: targetAlpha,
+      });
+    }
+
+    const inputIdMap = {};
+    mapGroupInputIds(snapshot, group, inputIdMap);
+
+    const moduleSnapshots = normalizedScene.modules || {};
+    const snapshotModuleIds = snapshot.modules || [];
+    const newModuleIds = [];
+
+    for (let i = 0, len = snapshotModuleIds.length; i < len; i++) {
+      const moduleSnapshot = moduleSnapshots[snapshotModuleIds[i]];
+
+      if (!moduleSnapshot) {
+        continue;
+      }
+
+      const module = await store.dispatch("modules/makeActiveModule", {
+        moduleName: moduleSnapshot.$moduleName,
+        existingModule: moduleSnapshot,
+        generateNewIds: true,
+      });
+
+      if (!module) {
+        continue;
+      }
+
+      mapModuleInputIds(moduleSnapshot, module, inputIdMap);
+      newModuleIds.push(module.$id);
+    }
+
+    store.commit("groups/REPLACE_GROUP_MODULES", {
+      groupId: group.id,
+      modules: newModuleIds,
+    });
+
+    for (let i = 0, len = oldModuleIds.length; i < len; i++) {
+      const moduleId = oldModuleIds[i];
+
+      if (!store.state.modules.active[moduleId]) {
+        continue;
+      }
+
+      try {
+        await store.dispatch("modules/removeActiveModule", { moduleId });
+      } catch (e) {
+        console.error("Could not remove a replaced row Module", e);
+      }
+    }
+
+    const oldAssignments = Object.values(
+      store.state.expressions.assignments || {},
+    );
+
+    for (let i = 0, len = oldAssignments.length; i < len; i++) {
+      const assignment = oldAssignments[i];
+
+      if (oldInputIds.has(assignment.inputId)) {
+        await store.dispatch("expressions/remove", { id: assignment.id });
+      }
+    }
+
+    for (let i = 0, len = GROUP_INPUT_NAMES.length; i < len; i++) {
+      const inputId = group[`${GROUP_INPUT_NAMES[i]}InputId`];
+
+      if (inputId) {
+        await store.dispatch("inputs/removeInputLink", { inputId });
+      }
+    }
+
+    await restoreSceneInputs(normalizedScene, inputIdMap, { scoped: true });
+    await restoreSceneExpressions(normalizedScene, inputIdMap, { merge: true });
+
+    const sceneGroupIdMap = {};
+
+    for (let i = 0, len = normalizedScene.groups.length; i < len; i++) {
+      const sceneGroup = normalizedScene.groups[i];
+      const liveGroup = findLiveRowGroup(i);
+
+      if (sceneGroup.id && liveGroup) {
+        sceneGroupIdMap[sceneGroup.id] = liveGroup.id;
+      }
+    }
+
+    const inheritFrom =
+      typeof snapshot.inheritFrom === "string" &&
+      sceneGroupIdMap[snapshot.inheritFrom] !== undefined
+        ? sceneGroupIdMap[snapshot.inheritFrom]
+        : -1;
+
+    store.commit("groups/UPDATE_GROUP", {
+      groupId: group.id,
+      data: { inheritFrom },
+    });
+
+    activeRows[row] = { sceneId: scene.id, groupId: group.id };
+    store.commit("scenes/SET_ACTIVE_ROW", {
+      rowIndex: row,
+      sceneId: scene.id,
+      groupId: group.id,
+    });
+
+    // Keep the UI's "Current scene" (and the legacy whole-Scene autopilot)
+    // aligned with the top row when a performance grid cell is triggered.
+    if (row === 0) {
+      commit("UPDATE_PERFORMANCE", { currentSceneId: scene.id });
+    }
+
+    const orderedGroups = orderRowGroups();
+
+    await store.dispatch("groups/orderByIds", {
+      ids: orderedGroups.map((item) => item.id),
+    });
+
+    if (fromCanvas && targetAlpha > 0) {
+      rowTransitions[row] = reactive({
+        groupId: group.id,
+        fromCanvas,
+        fromAlpha,
+        elapsed: 0,
+        duration: normalizeTransitionDuration(
+          state.performance.transitionSeconds,
+        ),
+      });
+      store.commit("scenes/SET_ROW_PROGRESS", { rowIndex: row, progress: 0 });
+    } else {
+      clearRowTransition(row);
+    }
+
+    resetRowRuntime(row, 0);
+
+    return { sceneId: scene.id, groupId: group.id };
+  },
+
   async applySceneNow({ commit, state }, { sceneId }) {
     const scene = state.scenes.find((scene) => scene.id === sceneId);
 
@@ -1479,11 +1946,9 @@ const actions = {
       return;
     }
 
-    dwell = 0;
-    phrase = createPhraseState();
-
     // Finish any in-flight crossfade first so nothing is left orphaned.
     await completeTransition(commit);
+    clearAllRowTransitions();
 
     const oldGroups = store.state.groups.groups.filter(
       (group) => !isGalleryGroup(group),
@@ -1516,6 +1981,7 @@ const actions = {
       delete groupData.modules;
       delete groupData.context;
       delete groupData.sceneId;
+      delete groupData.sceneRow;
       delete groupData.alphaInputId;
       delete groupData.enabledInputId;
       delete groupData.clearingInputId;
@@ -1531,6 +1997,7 @@ const actions = {
         ...groupData,
         alpha: 0,
         sceneId: scene.id,
+        sceneRow: i,
       });
 
       if (oldGroupId) {
@@ -1601,6 +2068,36 @@ const actions = {
       }
     }
 
+    clearAllRowTransitions();
+    resetLegacyRuntime();
+
+    for (const rowIndex of Object.keys(activeRows)) {
+      delete activeRows[rowIndex];
+    }
+
+    const nextActiveRows = {};
+
+    for (let i = 0, len = createdGroups.length; i < len; i++) {
+      activeRows[i] = {
+        sceneId: scene.id,
+        groupId: createdGroups[i].groupId,
+      };
+      nextActiveRows[i] = {
+        sceneId: scene.id,
+        groupId: createdGroups[i].groupId,
+      };
+    }
+
+    commit("SET_ACTIVE_ROWS", nextActiveRows);
+
+    const performanceMinSeconds = normalizePerformanceTiming(
+      state.performance,
+    ).minSeconds;
+    resetAllRowRuntime(
+      getRowCount(state.scenes, store.state.groups.groups),
+      performanceMinSeconds,
+    );
+
     commit("UPDATE_PERFORMANCE", { currentSceneId: scene.id });
 
     const transitionName = pickTransitionName(state.performance);
@@ -1664,6 +2161,18 @@ const actions = {
 
   async removeScene({ commit, state }, { sceneId }) {
     await completeTransition(commit);
+
+    for (const rowIndex of Object.keys(activeRows)) {
+      const row = Number(rowIndex);
+      const active = activeRows[rowIndex];
+
+      if (active && active.sceneId === sceneId) {
+        delete activeRows[rowIndex];
+        commit("CLEAR_ACTIVE_ROW", { rowIndex: row });
+        clearRowTransition(row);
+        rowRuntime.delete(row);
+      }
+    }
 
     const groups = store.state.groups.groups.filter(
       (group) => group.sceneId === sceneId,
@@ -1866,16 +2375,18 @@ const actions = {
     }
   },
 
-  setPerformanceEnabled({ commit }, { enabled }) {
-    dwell = 0;
-    phrase = createPhraseState();
+  setPerformanceEnabled({ commit, state }, { enabled }) {
+    resetLegacyRuntime();
+    resetAllRowRuntime(
+      getRowCount(state.scenes, store.state.groups.groups),
+      normalizePerformanceTiming(state.performance).minSeconds,
+    );
 
     commit("UPDATE_PERFORMANCE", { enabled });
   },
 
   async startPerformance({ commit, state, dispatch }) {
-    dwell = 0;
-    phrase = createPhraseState();
+    resetLegacyRuntime();
 
     commit("UPDATE_PERFORMANCE", { enabled: true });
 
@@ -1885,18 +2396,76 @@ const actions = {
       return;
     }
 
-    const currentSceneEnabled = enabledScenes.some(
-      (scene) => scene.id === state.performance.currentSceneId,
-    );
+    const rowCount = getRowCount(state.scenes, store.state.groups.groups);
+    const rowCandidates = hasAnyRowCandidates(state.scenes, rowCount);
 
-    if (!currentSceneEnabled) {
-      await dispatch("nextScene");
+    if (!rowCandidates) {
+      const currentScene = state.scenes.find(
+        (scene) => scene.id === state.performance.currentSceneId,
+      );
+
+      if (!currentScene || !isSceneEnabled(currentScene)) {
+        await dispatch("nextScene");
+      }
+
+      return;
     }
+
+    const activeRowIndexes = [];
+
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+      const active = activeRows[rowIndex];
+      const scene =
+        active && state.scenes.find((item) => item.id === active.sceneId);
+      const group = findLiveRowGroup(rowIndex);
+
+      if (
+        active &&
+        scene &&
+        isSceneEnabled(scene) &&
+        !isRowCellEmpty(scene, rowIndex) &&
+        group &&
+        group.id === active.groupId
+      ) {
+        activeRowIndexes.push(rowIndex);
+      }
+    }
+
+    if (!activeRowIndexes.length) {
+      await dispatch("nextScene");
+    } else {
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+        if (activeRowIndexes.includes(rowIndex)) {
+          continue;
+        }
+
+        const active = activeRows[rowIndex];
+        const scene = pickNextRowScene({
+          scenes: state.scenes,
+          rowIndex,
+          currentSceneId: active ? active.sceneId : null,
+          order: state.performance.order,
+        });
+
+        if (scene) {
+          await dispatch("applySceneRow", {
+            sceneId: scene.id,
+            rowIndex,
+          });
+        }
+      }
+    }
+
+    resetAllRowRuntime(
+      rowCount,
+      normalizePerformanceTiming(state.performance).minSeconds,
+    );
   },
 
   async stopPerformance({ commit }) {
-    dwell = 0;
+    resetLegacyRuntime();
     await completeTransition(commit);
+    clearAllRowTransitions();
     commit("UPDATE_PERFORMANCE", { enabled: false });
   },
 
@@ -1912,6 +2481,28 @@ const actions = {
     }
 
     await dispatch("applyScene", { sceneId: scene.id });
+  },
+
+  async nextSceneForRow({ state, dispatch }, { rowIndex }) {
+    const row = Number(rowIndex);
+
+    if (!Number.isInteger(row) || row < 0) {
+      return;
+    }
+
+    const active = activeRows[row];
+    const scene = pickNextRowScene({
+      scenes: state.scenes,
+      rowIndex: row,
+      currentSceneId: active ? active.sceneId : null,
+      order: state.performance.order,
+    });
+
+    if (!scene) {
+      return;
+    }
+
+    await dispatch("applySceneRow", { sceneId: scene.id, rowIndex: row });
   },
 
   setSceneEnabled({ commit, state }, { sceneId, enabled }) {
@@ -1976,6 +2567,56 @@ const actions = {
     // on screen for the whole stall.
     const dt = Math.min(0.1, rawDt);
 
+    const rowTransitionIndexes = Object.keys(rowTransitions);
+
+    for (let i = 0, len = rowTransitionIndexes.length; i < len; i++) {
+      const rowIndex = rowTransitionIndexes[i];
+      const rowTransition = rowTransitions[rowIndex];
+
+      if (!rowTransition) {
+        continue;
+      }
+
+      rowTransition.elapsed += rawDt;
+
+      const duration =
+        Number.isFinite(rowTransition.duration) && rowTransition.duration > 0
+          ? rowTransition.duration
+          : normalizeTransitionDuration(undefined);
+
+      if (rowTransition.elapsed >= duration) {
+        delete rowTransitions[rowIndex];
+        commit("CLEAR_ROW_PROGRESS", { rowIndex: Number(rowIndex) });
+      }
+    }
+
+    if (rowTransitionIndexes.length) {
+      const now = Date.now();
+
+      if (now - lastRowProgressCommit >= 100) {
+        for (const rowIndex of Object.keys(rowTransitions)) {
+          const rowTransition = rowTransitions[rowIndex];
+
+          if (!rowTransition) {
+            continue;
+          }
+
+          const duration =
+            Number.isFinite(rowTransition.duration) &&
+            rowTransition.duration > 0
+              ? rowTransition.duration
+              : normalizeTransitionDuration(undefined);
+
+          commit("SET_ROW_PROGRESS", {
+            rowIndex: Number(rowIndex),
+            progress: Math.min(1, rowTransition.elapsed / duration),
+          });
+        }
+
+        lastRowProgressCommit = now;
+      }
+    }
+
     if (transition) {
       transition.elapsed += rawDt;
 
@@ -2018,8 +2659,6 @@ const actions = {
         }
 
         transition = null;
-        dwell = 0;
-        phrase = createPhraseState();
 
         try {
           await cleanupPendingGroups();
@@ -2034,48 +2673,143 @@ const actions = {
     }
 
     const performance = state.performance;
-    const enabledScenes = getEnabledScenes(state.scenes);
 
-    if (!performance.enabled || !enabledScenes.length) {
+    if (!performance.enabled) {
       return;
     }
 
-    const currentScene = state.scenes.find(
-      (scene) => scene.id === performance.currentSceneId,
-    );
+    const rowCount = getRowCount(state.scenes, store.state.groups.groups);
 
-    if (!currentScene || !isSceneEnabled(currentScene)) {
-      await dispatch("nextScene");
-
-      return;
-    }
-
-    if (enabledScenes.length < 2) {
+    if (!rowCount) {
       return;
     }
 
     const { bands } = store.state.meyda;
     const bass = bands ? bands.bass : 0;
+    const rowCandidates = hasAnyRowCandidates(state.scenes, rowCount);
 
-    const phraseUpdate = updatePhrase(phrase, bass, dt);
-    phrase = phraseUpdate.state;
+    // Legacy Scenes can contain Groups with no Modules. There is nothing to
+    // swap per row, so keep the original whole-Scene autopilot for them.
+    if (!rowCandidates) {
+      const currentScene = state.scenes.find(
+        (scene) => scene.id === performance.currentSceneId,
+      );
+      const enabledScenes = getEnabledScenes(state.scenes);
 
-    const { minSeconds, maxSeconds } = resolveSceneTiming(
-      currentScene,
-      performance,
-    );
+      if (!currentScene || !isSceneEnabled(currentScene)) {
+        await dispatch("nextScene");
+        return;
+      }
 
-    dwell += dt;
+      if (enabledScenes.length < 2) {
+        return;
+      }
 
-    const chance = switchChance(dwell, minSeconds, maxSeconds);
-    const musical = phraseUpdate.flipped && Math.random() < chance;
-    const forced = dwell >= maxSeconds;
+      const phraseUpdate = updatePhrase(legacyPhrase, bass, dt);
+      legacyPhrase = phraseUpdate.state;
 
-    if (musical || forced) {
-      dwell = 0;
-      phrase = { ...phrase, t: 0 };
+      const { minSeconds, maxSeconds } = resolveSceneTiming(
+        currentScene,
+        performance,
+      );
 
-      await dispatch("nextScene");
+      legacyDwell += dt;
+
+      const chance = switchChance(legacyDwell, minSeconds, maxSeconds);
+      const musical = phraseUpdate.flipped && Math.random() < chance;
+      const forced = legacyDwell >= maxSeconds;
+
+      if (musical || forced) {
+        legacyDwell = 0;
+        legacyPhrase = { ...legacyPhrase, t: 0 };
+        await dispatch("nextScene");
+      }
+
+      return;
+    }
+
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+      if (rowTransitions[rowIndex]) {
+        continue;
+      }
+
+      const active = activeRows[rowIndex];
+      const currentScene =
+        active && state.scenes.find((item) => item.id === active.sceneId);
+      const currentGroup = findLiveRowGroup(rowIndex);
+
+      if (
+        !active ||
+        !currentScene ||
+        !isSceneEnabled(currentScene) ||
+        isRowCellEmpty(currentScene, rowIndex) ||
+        !currentGroup ||
+        currentGroup.id !== active.groupId
+      ) {
+        const nextScene = pickNextRowScene({
+          scenes: state.scenes,
+          rowIndex,
+          currentSceneId: active ? active.sceneId : null,
+          order: performance.order,
+        });
+
+        if (nextScene) {
+          await dispatch("applySceneRow", {
+            sceneId: nextScene.id,
+            rowIndex,
+          });
+        }
+
+        continue;
+      }
+
+      const candidateCount = getEnabledScenes(state.scenes).reduce(
+        (count, scene) => count + (isRowCellEmpty(scene, rowIndex) ? 0 : 1),
+        0,
+      );
+
+      if (candidateCount < 2) {
+        continue;
+      }
+
+      const runtime = getRowRuntime(rowIndex);
+      const phraseUpdate = updatePhrase(runtime.phrase, bass, dt);
+      runtime.phrase = phraseUpdate.state;
+
+      const { minSeconds, maxSeconds } = resolveSceneTiming(
+        currentScene,
+        performance,
+      );
+
+      runtime.dwell += dt;
+
+      const { advance } = shouldAdvanceRow({
+        dwell: runtime.dwell,
+        minSeconds,
+        maxSeconds,
+        phraseFlipped: phraseUpdate.flipped,
+      });
+
+      if (!advance) {
+        continue;
+      }
+
+      runtime.dwell = 0;
+      runtime.phrase = { ...runtime.phrase, t: 0 };
+
+      const nextScene = pickNextRowScene({
+        scenes: state.scenes,
+        rowIndex,
+        currentSceneId: currentScene.id,
+        order: performance.order,
+      });
+
+      if (nextScene) {
+        await dispatch("applySceneRow", {
+          sceneId: nextScene.id,
+          rowIndex,
+        });
+      }
     }
   },
 };
@@ -2120,6 +2854,30 @@ const mutations = {
     state.transitioning = transitioning;
   },
 
+  SET_ACTIVE_ROWS(state, activeRows) {
+    state.activeRows = { ...activeRows };
+  },
+
+  SET_ACTIVE_ROW(state, { rowIndex, sceneId, groupId }) {
+    state.activeRows[rowIndex] = { sceneId, groupId };
+  },
+
+  CLEAR_ACTIVE_ROW(state, { rowIndex }) {
+    delete state.activeRows[rowIndex];
+  },
+
+  SET_ROW_PROGRESS(state, { rowIndex, progress }) {
+    state.rowProgress[rowIndex] = progress;
+  },
+
+  CLEAR_ROW_PROGRESS(state, { rowIndex }) {
+    delete state.rowProgress[rowIndex];
+  },
+
+  CLEAR_ALL_ROW_PROGRESS(state) {
+    state.rowProgress = {};
+  },
+
   SET_DEFAULTS_SEEDED(state, defaultsSeeded) {
     state.defaultsSeeded = defaultsSeeded;
   },
@@ -2134,6 +2892,16 @@ const mutations = {
 
   RESET_STATE(state) {
     Object.assign(state, getDefaultState());
+
+    for (const rowIndex of Object.keys(activeRows)) {
+      delete activeRows[rowIndex];
+    }
+
+    for (const rowIndex of Object.keys(rowTransitions)) {
+      delete rowTransitions[rowIndex];
+    }
+
+    rowRuntime.clear();
   },
 };
 

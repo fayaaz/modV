@@ -1,0 +1,468 @@
+import { expect, test } from "@playwright/test";
+import constants, {
+  GROUP_ENABLED,
+} from "../../../../src/renderer/src/application/constants";
+import { modVApp } from "../../pageObjectModel";
+
+const uniqueName = (prefix) => `${prefix} ${Date.now()}-${Math.random()}`;
+
+async function createGroup(name) {
+  return modVApp.evaluateWorker(
+    async ({ name, enabled }) => {
+      const group = await self.store.dispatch("groups/createGroup", {
+        name,
+        enabled,
+      });
+
+      return group.id;
+    },
+    { name, enabled: GROUP_ENABLED },
+  );
+}
+
+async function addModuleToGroup(groupId, moduleName) {
+  return modVApp.evaluateWorker(
+    async ({ groupId, moduleName }) => {
+      const module = await self.store.dispatch("modules/makeActiveModule", {
+        moduleName,
+        moduleMeta: { enabled: true },
+      });
+
+      self.store.commit("groups/ADD_MODULE_TO_GROUP", {
+        moduleId: module.$id,
+        groupId,
+      });
+
+      return module.$id;
+    },
+    { groupId, moduleName },
+  );
+}
+
+async function saveScene(name) {
+  return modVApp.evaluateWorker(
+    async ({ name }) =>
+      self.store.dispatch("scenes/saveCurrentAsScene", { name }),
+    { name },
+  );
+}
+
+async function removeScene(sceneId) {
+  await modVApp.evaluateWorker(
+    async ({ sceneId }) => {
+      await self.store.dispatch("scenes/removeScene", { sceneId });
+    },
+    { sceneId },
+  );
+}
+
+async function removeUserGroups() {
+  await modVApp.evaluateWorker(
+    async ({ galleryGroupName }) => {
+      await self.store.dispatch("scenes/stopPerformance");
+
+      const userGroups = self.store.state.groups.groups.filter(
+        (group) => group.name !== galleryGroupName,
+      );
+
+      for (let i = 0; i < userGroups.length; i++) {
+        await self.store.dispatch("groups/removeGroup", {
+          groupId: userGroups[i].id,
+        });
+      }
+
+      const groupModuleIds = new Set(
+        self.store.state.groups.groups.flatMap((group) => group.modules),
+      );
+
+      for (const module of Object.values(self.store.state.modules.active)) {
+        if (!groupModuleIds.has(module.$id) && !module.meta.isGallery) {
+          await self.store.dispatch("modules/removeActiveModule", {
+            moduleId: module.$id,
+          });
+        }
+      }
+    },
+    { galleryGroupName: constants.GALLERY_GROUP_NAME },
+  );
+}
+
+async function ensureUserGroup() {
+  await modVApp.evaluateWorker(
+    async ({ galleryGroupName, enabled }) => {
+      const userGroups = self.store.state.groups.groups.filter(
+        (group) => group.name !== galleryGroupName,
+      );
+
+      if (!userGroups.length) {
+        await self.store.dispatch("groups/createGroup", { enabled });
+      }
+    },
+    {
+      galleryGroupName: constants.GALLERY_GROUP_NAME,
+      enabled: GROUP_ENABLED,
+    },
+  );
+}
+
+async function useNoTransition() {
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/updatePerformance", {
+      enabled: false,
+      allowedTransitions: ["None"],
+      transitionSeconds: 0.1,
+      order: "in-order",
+    });
+  });
+}
+
+async function applyScene(sceneId) {
+  await modVApp.evaluateWorker(
+    async ({ sceneId }) => {
+      await self.store.dispatch("scenes/applyScene", { sceneId });
+    },
+    { sceneId },
+  );
+}
+
+async function applySceneRow(sceneId, rowIndex) {
+  await modVApp.evaluateWorker(
+    async ({ sceneId, rowIndex }) => {
+      await self.store.dispatch("scenes/applySceneRow", {
+        sceneId,
+        rowIndex,
+      });
+    },
+    { sceneId, rowIndex },
+  );
+}
+
+async function getRowTransitionState(rowIndex) {
+  return modVApp.evaluateWorker(
+    async ({ rowIndex }) => {
+      const transition = self.store.getters["scenes/rowTransition"](rowIndex);
+
+      return {
+        hasTransition: !!transition,
+        progress: self.store.getters["scenes/rowTransitionProgress"](rowIndex),
+      };
+    },
+    { rowIndex },
+  );
+}
+
+async function getGridState() {
+  return modVApp.evaluateWorker(
+    async ({ galleryGroupName }) => {
+      const groups = self.store.state.groups.groups
+        .filter((group) => group.name !== galleryGroupName)
+        .map((group) => ({
+          id: group.id,
+          name: group.name,
+          sceneRow: group.sceneRow,
+          modules: [...group.modules],
+          moduleNames: group.modules.map(
+            (moduleId) =>
+              self.store.state.modules.active[moduleId] &&
+              self.store.state.modules.active[moduleId].$moduleName,
+          ),
+        }))
+        .sort((a, b) => {
+          if (a.sceneRow === b.sceneRow) {
+            return 0;
+          }
+
+          return a.sceneRow - b.sceneRow;
+        });
+
+      return {
+        groups,
+        activeRows: JSON.parse(
+          JSON.stringify(self.store.getters["scenes/activeRows"]),
+        ),
+      };
+    },
+    { galleryGroupName: constants.GALLERY_GROUP_NAME },
+  );
+}
+
+test("applying a row Scene only replaces that row", async () => {
+  const prefix = uniqueName("E2E Row Apply");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const a0 = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(a0, "Ball");
+  const a1 = await createGroup(`${prefix} A1`);
+  await addModuleToGroup(a1, "Bands");
+  const sceneA = await saveScene(`${prefix} A`);
+
+  await removeUserGroups();
+
+  const b0 = await createGroup(`${prefix} B0`);
+  await addModuleToGroup(b0, "Bands");
+  const b1 = await createGroup(`${prefix} B1`);
+  await addModuleToGroup(b1, "Ball");
+  const sceneB = await saveScene(`${prefix} B`);
+
+  await applyScene(sceneA.id);
+
+  const before = await getGridState();
+
+  expect(before.groups).toHaveLength(2);
+  expect(before.groups[0]).toEqual(
+    expect.objectContaining({
+      name: `${prefix} A0`,
+      sceneRow: 0,
+      moduleNames: ["Ball"],
+    }),
+  );
+  expect(before.groups[1]).toEqual(
+    expect.objectContaining({
+      name: `${prefix} A1`,
+      sceneRow: 1,
+      moduleNames: ["Bands"],
+    }),
+  );
+  expect(before.activeRows[0].sceneId).toBe(sceneA.id);
+  expect(before.activeRows[1].sceneId).toBe(sceneA.id);
+
+  const rowOneGroupId = before.groups[1].id;
+  const rowOneModules = before.groups[1].modules;
+
+  await applySceneRow(sceneB.id, 0);
+
+  const after = await getGridState();
+
+  expect(after.groups[0].id).toBe(before.groups[0].id);
+  expect(after.groups[0].name).toBe(`${prefix} B0`);
+  expect(after.groups[0].moduleNames).toEqual(["Bands"]);
+  expect(after.groups[0].modules).not.toEqual(before.groups[0].modules);
+  expect(after.groups[1].id).toBe(rowOneGroupId);
+  expect(after.groups[1].name).toBe(`${prefix} A1`);
+  expect(after.groups[1].modules).toEqual(rowOneModules);
+  expect(after.activeRows[0].sceneId).toBe(sceneB.id);
+  expect(after.activeRows[1].sceneId).toBe(sceneA.id);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("a column Scene apply clears a row the Scene does not define", async () => {
+  const prefix = uniqueName("E2E Column Rows");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const a0 = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(a0, "Ball");
+  const a1 = await createGroup(`${prefix} A1`);
+  await addModuleToGroup(a1, "Bands");
+  const sceneA = await saveScene(`${prefix} A`);
+
+  await removeUserGroups();
+
+  const c0 = await createGroup(`${prefix} C0`);
+  await addModuleToGroup(c0, "Ball");
+  const sceneC = await saveScene(`${prefix} C`);
+
+  await applyScene(sceneA.id);
+
+  const afterA = await getGridState();
+
+  expect(afterA.groups).toHaveLength(2);
+  expect(afterA.activeRows[0]).toBeTruthy();
+  expect(afterA.activeRows[1]).toBeTruthy();
+
+  await applyScene(sceneC.id);
+
+  const afterC = await getGridState();
+
+  expect(afterC.groups).toHaveLength(1);
+  expect(afterC.groups[0].name).toBe(`${prefix} C0`);
+  expect(afterC.activeRows[0].sceneId).toBe(sceneC.id);
+  expect(afterC.activeRows[1]).toBeFalsy();
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneC.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("a row Scene apply fades in and finishes", async () => {
+  const prefix = uniqueName("E2E Row Fade");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const a0 = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(a0, "Ball");
+  const a1 = await createGroup(`${prefix} A1`);
+  await addModuleToGroup(a1, "Bands");
+  const sceneA = await saveScene(`${prefix} A`);
+
+  await removeUserGroups();
+
+  const b0 = await createGroup(`${prefix} B0`);
+  await addModuleToGroup(b0, "Bands");
+  const b1 = await createGroup(`${prefix} B1`);
+  await addModuleToGroup(b1, "Ball");
+  const sceneB = await saveScene(`${prefix} B`);
+
+  await applyScene(sceneA.id);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/updatePerformance", {
+      enabled: false,
+      transitionSeconds: 0.5,
+    });
+  });
+
+  const immediately = await modVApp.evaluateWorker(
+    async ({ sceneId, rowIndex }) => {
+      await self.store.dispatch("scenes/applySceneRow", {
+        sceneId,
+        rowIndex,
+      });
+
+      const transition = self.store.getters["scenes/rowTransition"](rowIndex);
+
+      return {
+        hasTransition: !!transition,
+        progress: self.store.getters["scenes/rowTransitionProgress"](rowIndex),
+      };
+    },
+    { sceneId: sceneB.id, rowIndex: 0 },
+  );
+
+  expect(immediately.hasTransition).toBe(true);
+  expect(immediately.progress).toBeLessThan(1);
+
+  await modVApp.evaluateWorker(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  });
+
+  const after = await getRowTransitionState(0);
+
+  expect(after.hasTransition).toBe(false);
+  expect(after.progress).toBe(1);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("the Scenes grid marks the applied row cell as active", async () => {
+  const prefix = uniqueName("E2E Grid DOM");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const groupId = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(`${prefix} A`);
+
+  await applySceneRow(scene.id, 0);
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const cell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="0"]`,
+  );
+
+  await expect(cell).toHaveClass(/scenes__gridCell--active/);
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("hovering a grid cell previews the saved group and leaves a still", async () => {
+  const prefix = uniqueName("E2E Grid Preview");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const firstGroupId = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(firstGroupId, "Ball");
+  await addModuleToGroup(firstGroupId, "Bands");
+  const secondGroupId = await createGroup(`${prefix} A1`);
+  await addModuleToGroup(secondGroupId, "Ball");
+  const scene = await saveScene(`${prefix} A`);
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const firstCell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="0"]`,
+  );
+  const secondCell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="1"]`,
+  );
+  const firstPreview = firstCell.locator("canvas.scenes__gridPreviewCanvas");
+  const secondPreview = secondCell.locator("canvas.scenes__gridPreviewCanvas");
+
+  await firstCell.hover();
+  await expect(firstPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+  await expect(firstPreview).toBeVisible();
+  await expect
+    .poll(() => modVApp.evaluateWorkerState("scenePreview"))
+    .toMatchObject({
+      active: true,
+      sceneId: scene.id,
+      rowIndex: 0,
+      moduleCount: 2,
+      rendered: true,
+    });
+
+  await secondCell.hover();
+  await expect(firstPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+  await expect(firstPreview).toBeVisible();
+  await expect(secondPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+  await expect(secondPreview).toBeVisible();
+  await expect
+    .poll(() => modVApp.evaluateWorkerState("scenePreview"))
+    .toMatchObject({
+      active: true,
+      sceneId: scene.id,
+      rowIndex: 1,
+      moduleCount: 1,
+      rendered: true,
+    });
+
+  await page.locator(".scenes__gridCorner").hover();
+  await expect(firstPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+  await expect(secondPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+  await expect
+    .poll(() => modVApp.evaluateWorkerState("scenePreview"))
+    .toMatchObject({
+      active: false,
+      frozen: true,
+      rowIndex: 1,
+      rendered: true,
+    });
+
+  await firstCell.hover();
+  await expect
+    .poll(() => modVApp.evaluateWorkerState("scenePreview"))
+    .toMatchObject({
+      active: true,
+      sceneId: scene.id,
+      rowIndex: 0,
+      moduleCount: 2,
+      rendered: true,
+    });
+  await expect(firstPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+  await expect(secondPreview).toHaveClass(/scenes__gridPreviewCanvas--visible/);
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});

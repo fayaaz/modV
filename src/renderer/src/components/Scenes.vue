@@ -2,7 +2,16 @@
   <div
     v-infoView="{ title: iVTitle, body: iVBody, id: 'Scenes Panel' }"
     v-searchTerms="{
-      terms: ['scenes', 'performance', 'phrase', 'crossfade'],
+      terms: [
+        'scenes',
+        'performance',
+        'phrase',
+        'crossfade',
+        'grid',
+        'rows',
+        'layers',
+        'clips',
+      ],
       title: 'Scenes',
       type: 'Panel',
     }"
@@ -120,73 +129,174 @@
       </c>
     </grid>
 
-    <div class="scene-container">
-      <div
-        v-for="scene in scenes"
-        :key="scene.id"
-        class="scene"
-        :class="{
-          'scene--current': scene.id === performance.currentSceneId,
-          'scene--disabled': scene.enabled === false,
-        }"
-      >
-        <div class="scene__details">
-          <div class="scene__name" @dblclick="startSceneRename(scene)">
-            <TextInput
-              v-if="editingSceneId === scene.id"
-              ref="sceneNameInput"
-              v-model="localSceneName"
-              @keypress.enter="commitSceneRename(scene)"
-              @blur="commitSceneRename(scene)"
-              @keydown.esc="cancelSceneRename"
-            />
-            <span v-else>{{ scene.name }}</span>
-          </div>
-          <div class="scene__layers">
-            {{ sceneGroupCount(scene) }} groups &middot;
-            {{ sceneModuleCount(scene) }} modules
-          </div>
-          <div class="scene__timing">
-            <span class="scene__timingLabel">Time</span>
-            <Number
-              :model-value="sceneMin(scene)"
-              class="scene__timeInput"
-              :min="1"
-              :step="1"
-              @update:model-value="(value) => setSceneMin(scene, value)"
-            />
-            <span>&ndash;</span>
-            <Number
-              :model-value="sceneMax(scene)"
-              class="scene__timeInput"
-              :min="2"
-              :step="1"
-              @update:model-value="(value) => setSceneMax(scene, value)"
-            />
-            <span>s</span>
-            <Button
-              v-if="scene.timingOverride"
-              class="light scene__defaultsButton"
-              title="Use the default scene times"
-              @click="resetSceneTiming(scene)"
-            >
-              Defaults
-            </Button>
-          </div>
-        </div>
-        <div class="scene__controls">
-          <label class="scene__enabled">
+    <div v-if="scenes.length" class="scenes__gridWrapper">
+      <div class="scenes__grid" :style="{ gridTemplateColumns }">
+        <div class="scenes__gridCorner">Layers</div>
+        <div
+          v-for="scene in scenes"
+          :key="`header-${scene.id}`"
+          class="scenes__gridHeader"
+          :class="{
+            'scenes__gridHeader--active': sceneColumnActive(scene),
+            'scenes__gridHeader--disabled': scene.enabled === false,
+          }"
+          :title="`Apply ${scene.name}`"
+          @click="applyScene(scene)"
+        >
+          <span class="scenes__gridHeaderName">{{ scene.name }}</span>
+          <label class="scenes__gridHeaderEnabled" @click.stop>
             <Checkbox
               :model-value="scene.enabled !== false"
+              @click.stop
               @update:model-value="(value) => setSceneEnabled(scene, value)"
             />
-            <span>Enabled</span>
           </label>
-          <Button class="light" @click="applyScene(scene)">Apply</Button>
-          <Button class="light" @click="removeScene(scene)">Delete</Button>
         </div>
+
+        <template v-for="row in rows" :key="`row-${row.index}`">
+          <div class="scenes__gridRowLabel" :title="row.label">
+            {{ row.label }}
+          </div>
+          <div
+            v-for="scene in scenes"
+            :key="`cell-${scene.id}-${row.index}`"
+            class="scenes__gridCell"
+            :data-scene-id="scene.id"
+            :data-row-index="row.index"
+            :class="{
+              'scenes__gridCell--empty': isRowCellEmpty(scene, row.index),
+              'scenes__gridCell--active': isRowActive(scene, row),
+              'scenes__gridCell--transitioning': isRowTransitioning(scene, row),
+              'scenes__gridCell--disabled': scene.enabled === false,
+            }"
+            @click="
+              isRowCellEmpty(scene, row.index)
+                ? null
+                : applySceneRow(scene, row.index)
+            "
+            @mouseenter="showScenePreview(scene, row.index, $event)"
+            @mouseleave="hideScenePreview"
+          >
+            <template v-if="!isRowCellEmpty(scene, row.index)">
+              <span class="scenes__gridCellCount">
+                {{ sceneGroupModuleCount(scene, sceneGroupForRow(scene, row.index)) }}
+                module{{
+                  sceneGroupModuleCount(scene, sceneGroupForRow(scene, row.index)) ===
+                  1
+                    ? ""
+                    : "s"
+                }}
+              </span>
+              <span class="scenes__gridCellModule">
+                {{
+                  sceneGroupModuleName(
+                    scene,
+                    sceneGroupForRow(scene, row.index),
+                  )
+                }}
+              </span>
+            </template>
+            <span v-else class="scenes__gridCellPlaceholder">Empty</span>
+
+            <div
+              v-if="isRowTransitioning(scene, row)"
+              class="scenes__gridProgress"
+            >
+              <div
+                class="scenes__gridProgressBar"
+                :style="{ width: `${Math.round(row.progress * 100)}%` }"
+              />
+            </div>
+
+            <canvas
+              class="scenes__gridPreviewCanvas"
+              :class="{
+                'scenes__gridPreviewCanvas--visible':
+                  previewFrames[`${scene.id}:${row.index}`],
+              }"
+              width="320"
+              height="180"
+              aria-hidden="true"
+            ></canvas>
+          </div>
+        </template>
       </div>
     </div>
+    <p v-else class="scenes__empty">
+      No Scenes yet. Save the current setup as a Scene to fill the grid.
+    </p>
+
+    <details class="scenes__manage">
+      <summary>Manage Scenes</summary>
+
+      <div class="scene-container">
+        <div
+          v-for="scene in scenes"
+          :key="scene.id"
+          class="scene"
+          :class="{
+            'scene--current': scene.id === performance.currentSceneId,
+            'scene--disabled': scene.enabled === false,
+          }"
+        >
+          <div class="scene__details">
+            <div class="scene__name" @dblclick="startSceneRename(scene)">
+              <TextInput
+                v-if="editingSceneId === scene.id"
+                ref="sceneNameInput"
+                v-model="localSceneName"
+                @keypress.enter="commitSceneRename(scene)"
+                @blur="commitSceneRename(scene)"
+                @keydown.esc="cancelSceneRename"
+              />
+              <span v-else>{{ scene.name }}</span>
+            </div>
+            <div class="scene__layers">
+              {{ sceneGroupCount(scene) }} groups &middot;
+              {{ sceneModuleCount(scene) }} modules
+            </div>
+            <div class="scene__timing">
+              <span class="scene__timingLabel">Time</span>
+              <Number
+                :model-value="sceneMin(scene)"
+                class="scene__timeInput"
+                :min="1"
+                :step="1"
+                @update:model-value="(value) => setSceneMin(scene, value)"
+              />
+              <span>&ndash;</span>
+              <Number
+                :model-value="sceneMax(scene)"
+                class="scene__timeInput"
+                :min="2"
+                :step="1"
+                @update:model-value="(value) => setSceneMax(scene, value)"
+              />
+              <span>s</span>
+              <Button
+                v-if="scene.timingOverride"
+                class="light scene__defaultsButton"
+                title="Use the default scene times"
+                @click="resetSceneTiming(scene)"
+              >
+                Defaults
+              </Button>
+            </div>
+          </div>
+          <div class="scene__controls">
+            <label class="scene__enabled">
+              <Checkbox
+                :model-value="scene.enabled !== false"
+                @update:model-value="(value) => setSceneEnabled(scene, value)"
+              />
+              <span>Enabled</span>
+            </label>
+            <Button class="light" @click="applyScene(scene)">Apply</Button>
+            <Button class="light" @click="removeScene(scene)">Delete</Button>
+          </div>
+        </div>
+      </div>
+    </details>
 
     <grid columns="6" class="scenes__footer">
       <c span="1..">
@@ -220,6 +330,10 @@ import {
   NATIVE_TRANSITION_NAMES,
 } from "../application/scene-transition-defs";
 import { resolveSceneTiming } from "../application/worker/scene-timing";
+import {
+  getRowGroup,
+  isRowCellEmpty as isSceneRowCellEmpty,
+} from "../application/worker/scene-rows";
 
 const { ipcRenderer } = window.electron;
 
@@ -228,17 +342,31 @@ export default {
     return {
       iVTitle: "Scenes",
       iVBody:
-        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
+        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. The grid shows Scenes as columns and Group layers as rows: click a column header to apply a whole Scene, or a cell to swap just that row's layer. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
       newSceneName: "",
       editingSceneId: null,
       localSceneName: "",
       sceneSaveTimer: null,
+      previewKey: null,
+      previewFrames: {},
     };
   },
 
   computed: {
     scenes() {
       return this.$modV.store.state.scenes.scenes;
+    },
+
+    rows() {
+      return this.$modV.store.getters["scenes/performanceRows"];
+    },
+
+    scenePreviewState() {
+      return this.$modV.store.state.scenePreview;
+    },
+
+    gridTemplateColumns() {
+      return `120px repeat(${this.scenes.length}, minmax(140px, 1fr))`;
     },
 
     performance() {
@@ -350,12 +478,38 @@ export default {
     },
   },
 
+  watch: {
+    scenePreviewState: {
+      deep: true,
+      handler(state) {
+        if (
+          state &&
+          state.active &&
+          state.rendered &&
+          state.sceneId !== null &&
+          state.rowIndex !== null
+        ) {
+          this.previewFrames[`${state.sceneId}:${state.rowIndex}`] = true;
+        }
+      },
+    },
+
+    scenes() {
+      this.pruneScenePreviews();
+    },
+  },
+
+  created() {
+    this.transferredPreviewCanvases = new WeakSet();
+  },
+
   mounted() {
     this.loadFromDisk();
   },
 
   beforeUnmount() {
     clearTimeout(this.sceneSaveTimer);
+    this.$modV.store.dispatch("scenePreview/dispose");
   },
 
   methods: {
@@ -376,6 +530,188 @@ export default {
       }
 
       return Array.isArray(scene.layers) ? scene.layers.length : 0;
+    },
+
+    applySceneRow(scene, rowIndex) {
+      this.$modV.store.dispatch("scenes/applySceneRow", {
+        sceneId: scene.id,
+        rowIndex,
+      });
+    },
+
+    scenePreviewSize(cell) {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      let width = Math.max(1, Math.round(cell.offsetWidth * dpr));
+      let height = Math.max(1, Math.round(cell.offsetHeight * dpr));
+      const scale = Math.min(1, 480 / width, 270 / height);
+
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+
+      return { width, height };
+    },
+
+    showScenePreview(scene, rowIndex, event) {
+      if (this.isRowCellEmpty(scene, rowIndex)) {
+        this.hideScenePreview();
+        return;
+      }
+
+      const key = `${scene.id}:${rowIndex}`;
+      const state = this.scenePreviewState;
+
+      if (
+        this.previewKey === key &&
+        state.active &&
+        state.sceneId === scene.id &&
+        state.rowIndex === rowIndex
+      ) {
+        return;
+      }
+
+      const cell = event.currentTarget;
+      const canvas = cell.querySelector(".scenes__gridPreviewCanvas");
+
+      if (!canvas || !canvas.transferControlToOffscreen) {
+        return;
+      }
+
+      const size = this.scenePreviewSize(cell);
+      const payload = {
+        key,
+        sceneId: scene.id,
+        rowIndex,
+        width: size.width,
+        height: size.height,
+      };
+      let transfer;
+
+      if (!this.transferredPreviewCanvases.has(canvas)) {
+        const offscreen = canvas.transferControlToOffscreen();
+        this.transferredPreviewCanvases.add(canvas);
+        payload.canvas = offscreen;
+        transfer = [offscreen];
+      }
+
+      delete this.previewFrames[key];
+      this.previewKey = key;
+      this.$modV.store.dispatch("scenePreview/start", payload, transfer);
+    },
+
+    hideScenePreview() {
+      const key = this.previewKey;
+
+      if (key === null) {
+        return;
+      }
+
+      this.previewKey = null;
+
+      const state = this.scenePreviewState;
+      const stateKey =
+        state.sceneId === null ? null : `${state.sceneId}:${state.rowIndex}`;
+
+      if (stateKey === key && state.rendered) {
+        this.$modV.store.dispatch("scenePreview/freeze", { key });
+        return;
+      }
+
+      this.$modV.store.dispatch("scenePreview/stop", { key });
+    },
+
+    pruneScenePreviews() {
+      const valid = new Set();
+
+      for (let i = 0; i < this.scenes.length; i++) {
+        for (let j = 0; j < this.rows.length; j++) {
+          valid.add(`${this.scenes[i].id}:${this.rows[j].index}`);
+        }
+      }
+
+      for (const key of Object.keys(this.previewFrames)) {
+        if (!valid.has(key)) {
+          delete this.previewFrames[key];
+        }
+      }
+
+      const state = this.scenePreviewState;
+
+      if (state.sceneId !== null) {
+        const activeKey = `${state.sceneId}:${state.rowIndex}`;
+
+        if (!valid.has(activeKey) && this.previewKey === activeKey) {
+          this.previewKey = null;
+        }
+      }
+
+      this.$modV.store.dispatch("scenePreview/prune", {
+        keys: Array.from(valid),
+      });
+    },
+
+    isRowActive(scene, row) {
+      return !!row && !!row.active && row.active.sceneId === scene.id;
+    },
+
+    sceneColumnActive(scene) {
+      return this.rows.some((row) => this.isRowActive(scene, row));
+    },
+
+    sceneGroupForRow(scene, rowIndex) {
+      return getRowGroup(scene, rowIndex);
+    },
+
+    sceneGroupModuleCount(scene, group) {
+      if (!group) {
+        return 0;
+      }
+
+      const modules = group.modules;
+
+      if (Array.isArray(modules)) {
+        return modules.length;
+      }
+
+      if (modules && typeof modules === "object") {
+        return Object.keys(modules).length;
+      }
+
+      return 0;
+    },
+
+    sceneGroupModuleName(scene, group) {
+      if (!group) {
+        return "";
+      }
+
+      const modules = group.modules;
+      let moduleId = null;
+
+      if (Array.isArray(modules)) {
+        moduleId = modules[0];
+      } else if (modules && typeof modules === "object") {
+        moduleId = Object.keys(modules)[0];
+      }
+
+      if (!moduleId) {
+        return "";
+      }
+
+      const module = scene.modules && scene.modules[moduleId];
+
+      if (!module) {
+        return "";
+      }
+
+      return (module.meta && module.meta.name) || module.$moduleName || "";
+    },
+
+    isRowCellEmpty(scene, rowIndex) {
+      return isSceneRowCellEmpty(scene, rowIndex);
+    },
+
+    isRowTransitioning(scene, row) {
+      return this.isRowActive(scene, row) && row.progress < 1;
     },
 
     sceneMin(scene) {
@@ -628,10 +964,212 @@ grid.scenes__performance {
   grid-row-gap: 4px;
 }
 
+div.scenes__gridWrapper {
+  padding: 0 8px 8px;
+  overflow-x: auto;
+}
+
+div.scenes__grid {
+  display: grid;
+  gap: 3px;
+  align-items: stretch;
+  min-width: max-content;
+  position: relative;
+}
+
+div.scenes__gridCorner,
+div.scenes__gridHeader,
+div.scenes__gridRowLabel,
+div.scenes__gridCell {
+  box-sizing: border-box;
+  padding: 6px 8px;
+  background: #282828;
+  border-left: 3px solid transparent;
+}
+
+div.scenes__gridCorner,
+div.scenes__gridRowLabel {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+div.scenes__gridCorner {
+  z-index: 3;
+  background: #303030;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+div.scenes__gridHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  background: #303030;
+}
+
+div.scenes__gridHeader:hover {
+  background: #3a3a3a;
+}
+
+div.scenes__gridHeader--active {
+  border-left-color: #00c0ff;
+}
+
+div.scenes__gridHeader--disabled {
+  opacity: 0.45;
+}
+
+span.scenes__gridHeaderName {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+label.scenes__gridHeaderEnabled {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+div.scenes__gridRowLabel {
+  display: flex;
+  align-items: center;
+  background: #303030;
+}
+
+div.scenes__gridCell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  aspect-ratio: 16 / 9;
+  min-height: 42px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+div.scenes__gridCell:hover {
+  background: #303030;
+}
+
+div.scenes__gridCell--empty {
+  cursor: default;
+  background: #222;
+}
+
+div.scenes__gridCell--empty:hover {
+  background: #222;
+}
+
+div.scenes__gridCell--disabled {
+  opacity: 0.45;
+}
+
+div.scenes__gridCell--active {
+  border-left-color: #00c0ff;
+  background: #2d3539;
+}
+
+div.scenes__gridCell--transitioning {
+  outline: 1px solid rgba(0, 192, 255, 0.45);
+  outline-offset: -1px;
+}
+
+span.scenes__gridCellCount {
+  font-size: 11px;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+span.scenes__gridCellModule {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+span.scenes__gridCellPlaceholder {
+  font-size: 12px;
+  font-style: italic;
+  opacity: 0.35;
+}
+
+div.scenes__gridProgress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: rgba(0, 192, 255, 0.18);
+}
+
+div.scenes__gridProgressBar {
+  height: 100%;
+  background: #00c0ff;
+  transition: width 80ms linear;
+}
+
+canvas.scenes__gridPreviewCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 120ms linear;
+}
+
+canvas.scenes__gridPreviewCanvas--visible {
+  visibility: visible;
+  opacity: 1;
+}
+
+p.scenes__empty {
+  margin: 0;
+  padding: 4px 8px 12px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+details.scenes__manage {
+  padding: 0 8px;
+}
+
+details.scenes__manage > summary {
+  cursor: pointer;
+  padding: 6px 0;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.8;
+  user-select: none;
+}
+
+details.scenes__manage > summary:hover {
+  opacity: 1;
+}
+
 div.scene-container {
   flex: 1;
   overflow-y: auto;
-  padding: 0 8px;
+  padding: 0;
 }
 
 div.scene {

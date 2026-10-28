@@ -6,6 +6,8 @@ import constants, { GROUP_DISABLED, GROUP_ENABLED } from "../constants";
 import NdiWorker from "./ndi-worker.worker.js?worker";
 import { applyWindow } from "meyda/dist/esm/utilities";
 import { renderSceneTransition } from "./scene-transition";
+import { renderRowFade } from "./row-transition";
+import { renderScenePreview } from "./scene-preview";
 
 const meyda = { windowing: applyWindow };
 
@@ -167,7 +169,28 @@ async function loop(delta, features, fftOutput) {
     renderersWithTick[i].tick();
   }
 
+  // Hover previews render into their own small canvas. Only one is ever live,
+  // and the preview module caps itself at 30fps so it stays off the main
+  // composition's critical path.
+  const previewResult = renderScenePreview({
+    registered,
+    renderers,
+    features,
+    meyda,
+    video,
+    kick,
+    fftCanvas: fftOutput.context.canvas,
+    delta,
+    osc: store.state.osc.data,
+  });
+
+  if (previewResult && previewResult.firstFrame) {
+    store.commit("scenePreview/SET_RENDERED");
+  }
+
   let lastCanvas = main.canvas;
+  const renderedCanvasByGroupId = {};
+  const rowFadeCanvasByGroupId = {};
 
   const groupsLength = groupIndexRenderOrder.length;
   for (let i = 0; i < groupsLength; ++i) {
@@ -227,7 +250,8 @@ async function loop(delta, features, fftOutput) {
         inheritFrom === -1
           ? lastCanvas
           : inheritedGroup && inheritedGroup.context
-            ? inheritedGroup.context.context.canvas
+            ? renderedCanvasByGroupId[inheritedGroup.id] ||
+              inheritedGroup.context.context.canvas
             : null;
 
       if (canvasToInherit) {
@@ -356,8 +380,46 @@ async function loop(delta, features, fftOutput) {
       }
     }
 
+    let effectiveCanvas = drawTo.canvas;
+
+    if (!isGalleryGroup && Number.isFinite(group.sceneRow)) {
+      const rowIndex = group.sceneRow;
+      const rowTransition = store.getters["scenes/rowTransition"](rowIndex);
+
+      if (
+        rowTransition &&
+        rowTransition.groupId === group.id &&
+        rowTransition.fromCanvas
+      ) {
+        const progress =
+          store.getters["scenes/rowTransitionProgress"](rowIndex);
+
+        if (Number.isFinite(progress) && progress < 1) {
+          try {
+            effectiveCanvas =
+              renderRowFade({
+                fromCanvas: rowTransition.fromCanvas,
+                toCanvas: drawTo.canvas,
+                progress,
+                width: drawTo.canvas.width,
+                height: drawTo.canvas.height,
+                rowIndex,
+                fromAlpha: rowTransition.fromAlpha,
+              }) || drawTo.canvas;
+
+            rowFadeCanvasByGroupId[group.id] = effectiveCanvas;
+          } catch (e) {
+            console.error("Could not render a row transition", e);
+            effectiveCanvas = drawTo.canvas;
+          }
+        }
+      }
+    }
+
+    renderedCanvasByGroupId[group.id] = effectiveCanvas;
+
     if (!group.hidden && group.enabled === GROUP_ENABLED) {
-      lastCanvas = drawTo.canvas;
+      lastCanvas = effectiveCanvas;
     }
   }
 
@@ -454,7 +516,7 @@ async function loop(delta, features, fftOutput) {
         main.globalAlpha = alpha;
       }
 
-      main.drawImage(context.canvas, 0, 0);
+      main.drawImage(rowFadeCanvasByGroupId[group.id] || context.canvas, 0, 0);
       main.restore();
     }
   }
