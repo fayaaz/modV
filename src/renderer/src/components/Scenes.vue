@@ -145,8 +145,9 @@
             'scenes__gridHeader--active': sceneColumnActive(scene),
             'scenes__gridHeader--disabled': scene.enabled === false,
           }"
-          :title="`Apply ${scene.name}`"
+          :title="`Apply ${scene.name}. Right-click for more options.`"
           @click="applyScene(scene)"
+          v-contextMenu="() => SceneHeaderContextMenu({ scene })"
         >
           <span class="scenes__gridHeaderName">{{ scene.name }}</span>
           <label class="scenes__gridHeaderEnabled" @click.stop>
@@ -376,6 +377,7 @@ import {
   getRowGroup,
   isRowCellEmpty as isSceneRowCellEmpty,
 } from "../application/worker/scene-rows";
+import { SceneHeaderContextMenu } from "../menus/context/sceneHeaderContextMenu.js";
 
 const { ipcRenderer } = window.electron;
 
@@ -566,6 +568,8 @@ export default {
   },
 
   methods: {
+    SceneHeaderContextMenu,
+
     sceneGroupCount(scene) {
       if (Array.isArray(scene.groups)) {
         return scene.groups.length;

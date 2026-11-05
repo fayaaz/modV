@@ -43,6 +43,7 @@ import {
   shouldAdvanceRow,
   strictMatchesRowName,
 } from "../../scene-rows";
+import { buildCapturedGroups } from "../../scene-capture";
 
 const fs = require("fs");
 const path = require("path");
@@ -1835,6 +1836,74 @@ const actions = {
     commit("ADD_SCENE", scene);
 
     return JSON.parse(JSON.stringify(scene));
+  },
+
+  /**
+   * Writes the current live state of an applied Scene back into its Scene
+   * document. Only the live Groups stamped with the Scene's `sceneId` are
+   * captured (never transition ghosts, the Gallery group or other Scenes'
+   * groups), and capture is refused while performance mode is running.
+   */
+  async captureLiveStateToScene(
+    { commit, dispatch, state, rootState },
+    { sceneId } = {},
+  ) {
+    if (state.performance.enabled) {
+      return { error: "performance" };
+    }
+
+    const scene = state.scenes.find((scene) => scene.id === sceneId);
+
+    if (!scene) {
+      return { error: "not-found" };
+    }
+
+    await completeTransition(commit);
+    await completeAllRowTransitions();
+
+    const captured = buildCapturedGroups(scene, rootState.groups.groups);
+
+    if (!captured) {
+      return { error: "not-applied" };
+    }
+
+    const moduleIds = [];
+    for (let i = 0, len = captured.groups.length; i < len; i++) {
+      const group = captured.groups[i];
+
+      if (group) {
+        moduleIds.push(...group.modules);
+      }
+    }
+
+    const presetData = await store.dispatch("modules/createPresetData");
+    const moduleSnapshots = {};
+
+    for (let i = 0, len = moduleIds.length; i < len; i++) {
+      const moduleId = moduleIds[i];
+
+      if (presetData[moduleId]) {
+        moduleSnapshots[moduleId] = presetData[moduleId];
+      }
+    }
+
+    const scoped = createScopedSceneData(captured.groups, moduleSnapshots);
+
+    const updated = {
+      ...JSON.parse(JSON.stringify(scene)),
+      groups: scoped.groups,
+      modules: scoped.modules,
+      inputs: scoped.inputs,
+      expressions: scoped.expressions,
+      tweens: scoped.tweens,
+      midi: scoped.midi,
+    };
+
+    commit("ADD_SCENE", updated);
+
+    await dispatch("persistScenes");
+
+    return { scene: updated };
   },
 
   /**
