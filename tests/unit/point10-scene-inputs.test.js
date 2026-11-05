@@ -3,7 +3,6 @@ import { ChromaticLine } from "../../src/renderer/src/application/point10/scenes
 import { CubeFloor } from "../../src/renderer/src/application/point10/scenes/CubeFloor.js";
 import { Mycelium } from "../../src/renderer/src/application/point10/scenes/Mycelium.js";
 import { ParticleField } from "../../src/renderer/src/application/point10/scenes/ParticleField.js";
-import { RingOfFire } from "../../src/renderer/src/application/point10/scenes/RingOfFire.js";
 import { SpectrumBars } from "../../src/renderer/src/application/point10/scenes/SpectrumBars.js";
 import { Waveform } from "../../src/renderer/src/application/point10/scenes/Waveform.js";
 
@@ -71,19 +70,6 @@ describe("Point10 scene inputs change the output", () => {
 
     expect(scene.bars[0].scale.y).toBeCloseTo(16);
     expect(scene.group.rotation.y).toBeCloseTo(0.5);
-  });
-
-  it("scales the Ring of Fire pulse", () => {
-    const scene = new RingOfFire(null, null);
-    const audio = loud();
-    scene.pulseScale = 1;
-    scene.update(0.016, audio);
-    const base = scene.rings[0].mesh.scale.x;
-
-    scene.pulseScale = 2;
-    scene.update(0.016, audio);
-
-    expect(scene.rings[0].mesh.scale.x).toBeCloseTo(1 + (base - 1) * 2, 5);
   });
 
   it("applies the Chromatic Line amplitude and chroma", () => {

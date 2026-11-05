@@ -254,7 +254,11 @@ const actions = {
 
   createPresetData() {
     return state.groups
-      .filter((group) => group.name !== constants.GALLERY_GROUP_NAME)
+      .filter(
+        (group) =>
+          group.name !== constants.GALLERY_GROUP_NAME &&
+          group.transitionGhost !== true,
+      )
       .map((group) => {
         const clonedGroup = { ...group };
         delete clonedGroup.context;

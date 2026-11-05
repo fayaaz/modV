@@ -23,21 +23,150 @@ export const getSceneGroups = (scene) =>
 
 export const isSceneEnabled = (scene) => !!scene && scene.enabled !== false;
 
-export const isRowCellEmpty = (scene, rowIndex) => {
+export const getRowNameIndex = (rowNames, rowIndex) => {
+  const list = Array.isArray(rowNames) ? rowNames : [];
+  const name = list[rowIndex];
+
+  return typeof name === "string" ? name.trim() : "";
+};
+
+/**
+ * Strips a trailing number (and any separator before it) from a name, so the
+ * matching below treats "Effects", "Effects 2" and "effects2" as one family.
+ */
+const baseName = (value) =>
+  String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/ ?\d+$/, "");
+
+/**
+ * A row matches a Group whose name is exactly the row name (case-insensitive)
+ * or starts with it plus a space, so "webcam" also matches "webcam 2".
+ */
+export const strictMatchesRowName = (group, rowName) => {
+  if (!group || typeof group.name !== "string") {
+    return false;
+  }
+
+  const key = group.name.trim().toLowerCase();
+  const rowKey = String(rowName).trim().toLowerCase();
+
+  if (!rowKey) {
+    return false;
+  }
+
+  return key === rowKey || key.startsWith(`${rowKey} `);
+};
+
+/**
+ * Same as `strictMatchesRowName`, but trailing numbers are ignored after the
+ * strict match, so "effects2" also matches the "Effects" group and a
+ * "2d Scenes" row keeps its own family.
+ */
+export const matchesRowName = (group, rowName) => {
+  if (strictMatchesRowName(group, rowName)) {
+    return true;
+  }
+
+  if (!group || typeof group.name !== "string") {
+    return false;
+  }
+
+  const keyBase = baseName(group.name);
+  const rowBase = baseName(rowName);
+
+  return !!keyBase && !!rowBase && keyBase === rowBase;
+};
+
+/**
+ * A digit-suffixed row ("effects2") only falls back to the base-named group
+ * ("Effects") when no sibling row already owns that family — otherwise two
+ * rows would claim the same Group twice.
+ */
+export const rowFamilyIsShared = (rowIndex, rowNames) => {
+  const list = Array.isArray(rowNames) ? rowNames : [];
+  const rowKey = getRowNameIndex(list, rowIndex);
+
+  if (!rowKey) {
+    return false;
+  }
+
+  const family = baseName(rowKey);
+
+  if (!family) {
+    return false;
+  }
+
+  for (let i = 0, len = list.length; i < len; i++) {
+    if (i === rowIndex || typeof list[i] !== "string" || !list[i].trim()) {
+      continue;
+    }
+
+    if (baseName(list[i]) === family) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+/**
+ * Named rows match their Scene Group by name (case-insensitive) instead of by
+ * position. Rows without a name keep the legacy positional lookup.
+ */
+export const getRowGroup = (scene, rowIndex, rowNames) => {
   const groups = getSceneGroups(scene);
-  const group = groups[rowIndex];
+
+  const rowName = getRowNameIndex(rowNames, rowIndex);
+
+  if (!rowName) {
+    return groups[rowIndex] || null;
+  }
+
+  const rowKey = String(rowName).trim().toLowerCase();
+
+  // Strict matches (exact name or word-prefixed name) always win, so a
+  // "2"-suffixed row cannot grab its base-named Group from the base row.
+  for (let i = 0, len = groups.length; i < len; i++) {
+    if (strictMatchesRowName(groups[i], rowKey)) {
+      return groups[i];
+    }
+  }
+
+  // The loose digit-suffix fallback ("effects2" → "Effects") only applies
+  // when no sibling row already owns that name family.
+  if (rowFamilyIsShared(rowIndex, rowNames)) {
+    return null;
+  }
+
+  for (let i = 0, len = groups.length; i < len; i++) {
+    if (matchesRowName(groups[i], rowKey)) {
+      return groups[i];
+    }
+  }
+
+  return null;
+};
+
+export const isRowCellEmpty = (scene, rowIndex, rowNames) => {
+  const group = getRowGroup(scene, rowIndex, rowNames);
 
   return !group || !hasModules(group);
 };
 
-export const getRowGroup = (scene, rowIndex) => {
-  const groups = getSceneGroups(scene);
+export const normalizeRowNames = (value) => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
 
-  return groups[rowIndex] || null;
+  // Index-exact: names are positions, so blanks and duplicates are kept and
+  // only whitespace is cleaned up.
+  return value.map((name) => (typeof name === "string" ? name.trim() : ""));
 };
 
-export const getRowCount = (scenes, liveGroups = []) => {
-  let rowCount = 0;
+export const getRowCount = (scenes, liveGroups = [], rowNames) => {
+  let rowCount = normalizeRowNames(rowNames).length;
 
   const sceneList = Array.isArray(scenes) ? scenes : [];
 
@@ -55,7 +184,7 @@ export const getRowCount = (scenes, liveGroups = []) => {
   for (let i = 0, len = liveList.length; i < len; i++) {
     const group = liveList[i];
 
-    if (isGalleryGroup(group)) {
+    if (isGalleryGroup(group) || group.transitionGhost === true) {
       continue;
     }
 
@@ -73,12 +202,23 @@ export const getRowCount = (scenes, liveGroups = []) => {
   return Math.max(0, rowCount);
 };
 
-export const getRowLabel = (scenes, rowIndex) => {
+export const getRowLabel = (scenes, rowIndex, rowNames) => {
+  const rowName = getRowNameIndex(rowNames, rowIndex);
+
+  if (rowName) {
+    return rowName;
+  }
+
   const sceneList = Array.isArray(scenes) ? scenes : [];
   const counts = new Map();
+  // Scenes without a group on this row count as unnamed too, so a name shared
+  // by a handful of legacy Scenes cannot dress an unnamed row up as something
+  // it is not.
+  const denominator = sceneList.length || 1;
 
   for (let i = 0, len = sceneList.length; i < len; i++) {
-    const group = getSceneGroups(sceneList[i])[rowIndex];
+    const groups = getSceneGroups(sceneList[i]);
+    const group = groups[rowIndex];
     const name = group && group.name;
 
     if (typeof name !== "string" || !name) {
@@ -96,7 +236,7 @@ export const getRowLabel = (scenes, rowIndex) => {
   let bestCount = 0;
 
   for (const [name, count] of counts) {
-    if (count > bestCount) {
+    if (count * 2 > denominator && count > bestCount) {
       label = name;
       bestCount = count;
     }
@@ -105,9 +245,10 @@ export const getRowLabel = (scenes, rowIndex) => {
   return label || `Row ${rowIndex + 1}`;
 };
 
-const getCandidateScenes = (scenes, rowIndex) =>
+const getCandidateScenes = (scenes, rowIndex, rowNames) =>
   (Array.isArray(scenes) ? scenes : []).filter(
-    (scene) => isSceneEnabled(scene) && !isRowCellEmpty(scene, rowIndex),
+    (scene) =>
+      isSceneEnabled(scene) && !isRowCellEmpty(scene, rowIndex, rowNames),
   );
 
 export const pickNextRowScene = ({
@@ -116,8 +257,9 @@ export const pickNextRowScene = ({
   currentSceneId,
   order = "in-order",
   random = Math.random,
+  rowNames,
 }) => {
-  const candidates = getCandidateScenes(scenes, rowIndex);
+  const candidates = getCandidateScenes(scenes, rowIndex, rowNames);
 
   if (candidates.length === 0) {
     return null;

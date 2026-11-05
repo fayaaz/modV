@@ -36,8 +36,12 @@ import {
   getRowLabel,
   isRowCellEmpty,
   isSceneEnabled,
+  matchesRowName,
+  normalizeRowNames,
   pickNextRowScene,
+  rowFamilyIsShared,
   shouldAdvanceRow,
+  strictMatchesRowName,
 } from "../../scene-rows";
 
 const fs = require("fs");
@@ -244,6 +248,7 @@ const PLAYLIST_PERFORMANCE_KEYS = [
   "transitionSeconds",
   "allowedTransitions",
   "order",
+  "rowNames",
 ];
 
 function getPlaylistPerformance(performance) {
@@ -714,27 +719,40 @@ function findModuleLinkTarget(
   return null;
 }
 
-async function createBassLink({ inputId, module, propName, group }) {
-  const range = module
-    ? getBassLinkRange(module, propName)
-    : { min: 0.55, max: 1 };
+async function createBassLink({
+  inputId,
+  module,
+  propName,
+  group,
+  feature = "bass",
+  range: rangeOverride,
+}) {
+  const range =
+    rangeOverride ||
+    (module ? getBassLinkRange(module, propName) : { min: 0.55, max: 1 });
 
   await store.dispatch("inputs/createInputLink", {
     inputId: inputId || group.alphaInputId,
     type: "getter",
     location: "meyda/getFeature",
     source: "meyda",
-    args: ["bass"],
+    args: [feature],
     min: range.min,
     max: range.max,
   });
 }
 
-async function createBpmTweenLink({ inputId, module, propName, group }) {
+async function createBpmTweenLink({
+  inputId,
+  module,
+  propName,
+  group,
+  range: rangeOverride,
+}) {
   const targetInputId = inputId || group.alphaInputId;
-  const range = module
-    ? getBpmLinkRange(module, propName)
-    : { min: 0.4, max: 1 };
+  const range =
+    rangeOverride ||
+    (module ? getBpmLinkRange(module, propName) : { min: 0.4, max: 1 });
 
   await store.dispatch("dataTypes/createType", {
     type: "tween",
@@ -762,14 +780,160 @@ async function createBpmTweenLink({ inputId, module, propName, group }) {
   });
 }
 
+const GROUP_CONTROL_INPUTS = {
+  alpha: "alphaInputId",
+  enabled: "enabledInputId",
+  compositeOperation: "compositeOperationInputId",
+};
+
+const MODULE_CONTROL_INPUTS = {
+  alpha: "alphaInputId",
+  enabled: "enabledInputId",
+  compositeOperation: "compositeOperationInputId",
+};
+
+function getGroupControlInputId(group, control) {
+  const key = GROUP_CONTROL_INPUTS[control];
+
+  return key ? group[key] : null;
+}
+
+function getModuleControlInputId(module, control) {
+  const metaKey = MODULE_CONTROL_INPUTS[control];
+
+  if (metaKey) {
+    return module.meta && module.meta[metaKey];
+  }
+
+  return module.$props && module.$props[control]
+    ? module.$props[control].id
+    : null;
+}
+
+function findModuleEntryInGroup(moduleEntries, group, moduleName) {
+  for (let i = 0, len = moduleEntries.length; i < len; i++) {
+    const entry = moduleEntries[i];
+    const module = entry.module;
+
+    if (!group.modules.includes(module.$id)) {
+      continue;
+    }
+
+    if (
+      module.$moduleName === moduleName ||
+      (module.meta && module.meta.name === moduleName)
+    ) {
+      return entry;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolves a declarative Scene link (`group`, optional `module` and `control`)
+ * to the live Input id it targets. Group-only links control the Group's alpha
+ * by default, while module links control a named Module control (alpha,
+ * enabled, compositeOperation) or one of its numeric props.
+ */
+function resolveSceneLinkTarget(groups, moduleEntries, link) {
+  const group = groups.find((item) => item.name === link.group);
+
+  if (!group) {
+    return null;
+  }
+
+  const control = link.control || "alpha";
+
+  if (!link.module) {
+    const inputId = getGroupControlInputId(group, control);
+
+    return inputId ? { inputId, group } : null;
+  }
+
+  const entry = findModuleEntryInGroup(moduleEntries, group, link.module);
+
+  if (!entry) {
+    return null;
+  }
+
+  const inputId = getModuleControlInputId(entry.module, control);
+
+  if (!inputId) {
+    return null;
+  }
+
+  return { inputId, module: entry.module, propName: control, group };
+}
+
+function getExplicitLinkRange(link, target) {
+  const fallback = target.module
+    ? getBassLinkRange(target.module, target.propName)
+    : { min: 0.2, max: 1 };
+
+  return {
+    min: Number.isFinite(link.min) ? link.min : fallback.min,
+    max: Number.isFinite(link.max) ? link.max : fallback.max,
+  };
+}
+
+async function applyExplicitSceneInputLinks(
+  groups,
+  moduleEntries,
+  definition,
+  excludedInputIds,
+) {
+  const links = Array.isArray(definition && definition.inputLinks)
+    ? definition.inputLinks
+    : [];
+
+  for (let i = 0, len = links.length; i < len; i++) {
+    const link = links[i];
+    const target = resolveSceneLinkTarget(groups, moduleEntries, link);
+
+    if (!target) {
+      console.warn(
+        `Default Scene "${definition.name}" could not link "${link.group}${
+          link.module ? `/${link.module}` : ""
+        }" to ${link.feature || "bass"}`,
+      );
+      continue;
+    }
+
+    const range = getExplicitLinkRange(link, target);
+
+    if (link.source === "tween") {
+      await createBpmTweenLink({ ...target, range });
+    } else {
+      await createBassLink({
+        ...target,
+        feature: link.feature || "bass",
+        range,
+      });
+    }
+
+    excludedInputIds.add(target.inputId);
+  }
+}
+
 /**
  * Gives the ready-made Scenes a musical starting point: at least one control
- * follows the bass band and one follows a BPM-synced Tween. The targets are
- * picked from the Modules the Scene already uses, falling back to a Group's
- * alpha when a Scene has no suitable numeric control.
+ * follows the bass band and one follows a BPM-synced Tween. A Scene may pin
+ * specific controls (for example a Foreground filter's alpha to bass) with its
+ * own `inputLinks`; those are applied first and the automatic picks skip them.
+ * Remaining targets are picked from the Modules the Scene already uses,
+ * falling back to a Group's alpha when a Scene has no suitable numeric control.
  */
-async function applyDefaultSceneInputLinks(groups, moduleEntries) {
+async function applyDefaultSceneInputLinks(groups, moduleEntries, definition) {
   const excludedInputIds = new Set();
+
+  await applyExplicitSceneInputLinks(
+    groups,
+    moduleEntries,
+    definition || {},
+    excludedInputIds,
+  );
+
   let bassTarget = findModuleLinkTarget(
     groups,
     moduleEntries,
@@ -779,7 +943,13 @@ async function applyDefaultSceneInputLinks(groups, moduleEntries) {
   );
 
   if (!bassTarget) {
-    const group = groups.find((item) => item.name === "Effects") || groups[0];
+    const candidateGroups = ["Effects", "Foreground", "Background"]
+      .map((name) => groups.find((group) => group.name === name))
+      .filter(Boolean)
+      .concat(groups);
+    const group = candidateGroups.find(
+      (item) => !excludedInputIds.has(item.alphaInputId),
+    );
 
     if (group) {
       bassTarget = { inputId: group.alphaInputId, group };
@@ -832,6 +1002,7 @@ function getDefaultState() {
       transitionSeconds: 2,
       allowedTransitions: [],
       order: "in-order",
+      rowNames: [],
     },
     transitioning: false,
     activeRows: {},
@@ -858,7 +1029,9 @@ let legacyDwell = 0;
 let legacyPhrase = createPhraseState();
 
 function getLiveRowGroups() {
-  return store.state.groups.groups.filter((group) => !isGalleryGroup(group));
+  return store.state.groups.groups.filter(
+    (group) => !isGalleryGroup(group) && group.transitionGhost !== true,
+  );
 }
 
 function assignMissingSceneRows() {
@@ -887,8 +1060,78 @@ function findLiveRowGroup(rowIndex) {
   return match || groups[row] || null;
 }
 
+function groupExists(groupId) {
+  return store.state.groups.groups.some((group) => group.id === groupId);
+}
+
+/**
+ * Removes a row transition and its outgoing (ghost) Group. The ghost Group
+ * still owns the old Modules, so removing it is what releases them once the
+ * fade has finished.
+ */
+async function removeRowTransition(rowIndex) {
+  const row = Number(rowIndex);
+  const rowTransition = rowTransitions[row];
+
+  delete rowTransitions[row];
+  store.commit("scenes/CLEAR_ROW_PROGRESS", { rowIndex: row });
+
+  if (!rowTransition || !rowTransition.ghostGroupId) {
+    return;
+  }
+
+  if (!groupExists(rowTransition.ghostGroupId)) {
+    return;
+  }
+
+  try {
+    await store.dispatch("groups/removeGroup", {
+      groupId: rowTransition.ghostGroupId,
+    });
+  } catch (e) {
+    console.error("Could not remove a fading Scene Group", e);
+  }
+}
+
+/**
+ * Finishes a row fade straight away: the incoming Group gets its target alpha
+ * and the outgoing ghost Group (and its Modules) is removed.
+ */
+async function completeRowTransition(rowIndex) {
+  const row = Number(rowIndex);
+  const rowTransition = rowTransitions[row];
+
+  if (!rowTransition) {
+    return;
+  }
+
+  const group = store.state.groups.groups.find(
+    (item) => item.id === rowTransition.groupId,
+  );
+
+  if (group) {
+    store.commit("groups/UPDATE_GROUP", {
+      groupId: group.id,
+      data: { alpha: rowTransition.targetAlpha },
+    });
+  }
+
+  await removeRowTransition(row);
+}
+
+async function completeAllRowTransitions() {
+  const rows = Object.keys(rowTransitions);
+
+  for (let i = 0, len = rows.length; i < len; i++) {
+    await completeRowTransition(rows[i]);
+  }
+
+  store.commit("scenes/CLEAR_ALL_ROW_PROGRESS");
+}
+
 function clearRowTransition(rowIndex) {
   const row = Number(rowIndex);
+
   delete rowTransitions[row];
   store.commit("scenes/CLEAR_ROW_PROGRESS", { rowIndex: row });
 }
@@ -906,12 +1149,12 @@ function resetLegacyRuntime() {
   legacyPhrase = createPhraseState();
 }
 
-function hasAnyRowCandidates(scenes, rowCount) {
+function hasAnyRowCandidates(scenes, rowCount, rowNames) {
   const enabledScenes = getEnabledScenes(scenes);
 
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
     for (let i = 0, len = enabledScenes.length; i < len; i++) {
-      if (!isRowCellEmpty(enabledScenes[i], rowIndex)) {
+      if (!isRowCellEmpty(enabledScenes[i], rowIndex, rowNames)) {
         return true;
       }
     }
@@ -944,7 +1187,12 @@ function getRowRuntime(rowIndex, minSeconds = 0) {
   if (!runtime) {
     const rowCount = Math.max(
       1,
-      getRowCount(store.state.scenes, store.state.groups.groups),
+      getRowCount(
+        store.state.scenes,
+        store.state.groups.groups,
+        store.state.scenes.performance &&
+          store.state.scenes.performance.rowNames,
+      ),
     );
     const initialDwell = minSeconds > 0 ? (row / rowCount) * minSeconds : 0;
 
@@ -983,7 +1231,13 @@ function orderRowGroups() {
       index,
       sceneRow: getGroupSceneRow(group) ?? index,
     }))
-    .sort((a, b) => a.sceneRow - b.sceneRow || a.index - b.index)
+    .sort(
+      (a, b) =>
+        a.sceneRow - b.sceneRow ||
+        Number(b.group.transitionGhost === true) -
+          Number(a.group.transitionGhost === true) ||
+        a.index - b.index,
+    )
     .map((item) => item.group);
 
   if (galleryGroup) {
@@ -991,6 +1245,86 @@ function orderRowGroups() {
   }
 
   return ordered;
+}
+
+/**
+ * Reassigns live Group sceneRow values so named rows keep their Groups: the
+ * first unclaimed Group matching a row's name is pinned to that row, and the
+ * remaining Groups keep their relative order in the unclaimed rows. This is
+ * what makes renaming a row snap the grid (and the live Group order) into the
+ * right position.
+ */
+function remapRowGroupsForNames(names) {
+  const groups = getLiveRowGroups();
+  const takenGroups = new Set();
+  const takenRows = new Set();
+  const updates = [];
+
+  for (let i = 0, len = names.length; i < len; i++) {
+    const name = names[i];
+
+    if (!name) {
+      continue;
+    }
+
+    // Match strictly first so a "2" row cannot steal its base group from the
+    // base row; the loose digit-suffix fallback only applies to rows whose
+    // family no sibling row claims.
+    let group = groups.find(
+      (item) => !takenGroups.has(item.id) && strictMatchesRowName(item, name),
+    );
+
+    if (!group && !rowFamilyIsShared(i, names)) {
+      group = groups.find(
+        (item) => !takenGroups.has(item.id) && matchesRowName(item, name),
+      );
+    }
+
+    if (group) {
+      takenGroups.add(group.id);
+      takenRows.add(i);
+      updates.push({ groupId: group.id, sceneRow: i });
+    }
+  }
+
+  const remaining = groups
+    .filter((group) => !takenGroups.has(group.id))
+    .map((group, index) => ({
+      group,
+      index,
+      sceneRow: getGroupSceneRow(group) ?? index,
+    }))
+    .sort((a, b) => a.sceneRow - b.sceneRow || a.index - b.index);
+
+  let nextFree = -1;
+
+  for (const item of remaining) {
+    // Unclaimed Groups slot below the named rows so a named row always owns
+    // its position at the top of the grid.
+    let target = Math.max(item.sceneRow, names.length);
+
+    while (takenRows.has(target)) {
+      target++;
+    }
+
+    takenRows.add(target);
+    nextFree = Math.max(nextFree, target);
+    updates.push({ groupId: item.group.id, sceneRow: target });
+  }
+
+  for (const update of updates) {
+    if (
+      update.sceneRow !==
+      getGroupSceneRow(
+        store.state.groups.groups.find((group) => group.id === update.groupId),
+      )
+    ) {
+      store.commit("groups/UPDATE_GROUP", {
+        groupId: update.groupId,
+        data: { sceneRow: update.sceneRow },
+      });
+    }
+  }
 }
 
 const getters = {
@@ -1027,7 +1361,11 @@ const getters = {
   },
 
   rowCount: (state, getters, rootState) =>
-    getRowCount(state.scenes, rootState.groups.groups),
+    getRowCount(
+      state.scenes,
+      rootState.groups.groups,
+      state.performance.rowNames,
+    ),
 
   activeRows: (state) => state.activeRows,
 
@@ -1063,7 +1401,7 @@ const getters = {
     for (let rowIndex = 0; rowIndex < getters.rowCount; rowIndex++) {
       rows.push({
         index: rowIndex,
-        label: getRowLabel(state.scenes, rowIndex),
+        label: getRowLabel(state.scenes, rowIndex, state.performance.rowNames),
         active: getters.activeRows[rowIndex] || null,
         progress: getters.rowTransitionProgress(rowIndex),
       });
@@ -1119,6 +1457,10 @@ function normalizePerformanceData(data) {
     normalized.allowedTransitions = [legacyTransition];
   } else if (hasAllowedTransitions) {
     normalized.allowedTransitions = [];
+  }
+
+  if (normalized.rowNames !== undefined) {
+    normalized.rowNames = normalizeRowNames(normalized.rowNames);
   }
 
   return normalized;
@@ -1363,7 +1705,11 @@ async function buildSceneSnapshot(definition) {
       .map((groupId) => store.getters["groups/getById"](groupId))
       .filter(Boolean);
 
-    await applyDefaultSceneInputLinks(createdGroups, createdModules);
+    await applyDefaultSceneInputLinks(
+      createdGroups,
+      createdModules,
+      definition,
+    );
 
     const groupSnapshots = [];
     const moduleIds = [];
@@ -1471,6 +1817,7 @@ const actions = {
     const name = args.name || `Scene ${state.scenes.length + 1}`;
 
     await completeTransition(commit);
+    await completeAllRowTransitions();
 
     const timing = normalizePerformanceTiming(state.performance);
     const presetData = await createPresetData(store);
@@ -1716,32 +2063,21 @@ const actions = {
       return null;
     }
 
-    const snapshot = getRowGroup(normalizedScene, row);
+    const rowNames = state.performance.rowNames;
+    const snapshot = getRowGroup(normalizedScene, row, rowNames);
 
-    if (!snapshot || isRowCellEmpty(normalizedScene, row)) {
+    if (!snapshot || isRowCellEmpty(normalizedScene, row, rowNames)) {
       return null;
     }
 
     await completeTransition(commit);
-    clearRowTransition(row);
+    await completeRowTransition(row);
     assignMissingSceneRows();
 
     const oldGroup = findLiveRowGroup(row);
     const oldModuleIds = oldGroup ? [...(oldGroup.modules || [])] : [];
     const oldInputIds = new Set();
-    let fromCanvas = null;
-    let fromAlpha = 0;
-
-    const oldCanvas =
-      oldGroup && oldGroup.context && oldGroup.context.context
-        ? oldGroup.context.context.canvas
-        : null;
-
-    if (oldGroup && oldModuleIds.length && oldCanvas) {
-      fromCanvas = new OffscreenCanvas(oldCanvas.width, oldCanvas.height);
-      fromCanvas.getContext("2d").drawImage(oldCanvas, 0, 0);
-      fromAlpha = oldGroup.alpha ?? 1;
-    }
+    const oldGroupInputIds = new Set();
 
     for (let i = 0, len = oldModuleIds.length; i < len; i++) {
       const module = store.state.modules.active[oldModuleIds[i]];
@@ -1757,6 +2093,7 @@ const actions = {
 
         if (inputId) {
           oldInputIds.add(inputId);
+          oldGroupInputIds.add(inputId);
         }
       }
     }
@@ -1777,9 +2114,46 @@ const actions = {
     delete groupData.readFromSwap;
 
     const targetAlpha = snapshot.alpha ?? 1;
+    // Keep the outgoing Group and its Modules alive while the row crossfades.
+    // Capturing its canvas instead (the old behaviour) froze the outgoing
+    // visuals for the whole fade.
+    const fade = !!(oldGroup && oldModuleIds.length > 0 && targetAlpha > 0);
+    const fromAlpha = oldGroup ? oldGroup.alpha ?? 1 : 0;
+    let ghostGroup = null;
     let group;
 
-    if (oldGroup) {
+    if (fade) {
+      ghostGroup = await store.dispatch("groups/createGroup", {
+        name: oldGroup.name,
+        enabled: oldGroup.enabled,
+        hidden: oldGroup.hidden,
+        inherit: oldGroup.inherit,
+        inheritFrom: oldGroup.inheritFrom,
+        clearing: oldGroup.clearing,
+        pipeline: oldGroup.pipeline,
+        compositeOperation: oldGroup.compositeOperation,
+        drawToCanvasId: oldGroup.drawToCanvasId,
+        modules: oldModuleIds,
+        alpha: fromAlpha,
+        sceneId: oldGroup.sceneId,
+        sceneRow: row,
+        transitionGhost: true,
+      });
+
+      store.commit("groups/UPDATE_GROUP", {
+        groupId: oldGroup.id,
+        data: {
+          ...groupData,
+          sceneId: scene.id,
+          sceneRow: row,
+          alpha: 0,
+        },
+      });
+
+      group =
+        store.state.groups.groups.find((item) => item.id === oldGroup.id) ||
+        oldGroup;
+    } else if (oldGroup) {
       store.commit("groups/UPDATE_GROUP", {
         groupId: oldGroup.id,
         data: {
@@ -1835,20 +2209,28 @@ const actions = {
       modules: newModuleIds,
     });
 
-    for (let i = 0, len = oldModuleIds.length; i < len; i++) {
-      const moduleId = oldModuleIds[i];
+    // The ghost Group owns the old Modules while it fades out, so they must
+    // stay active until the transition finishes and removes it.
+    if (!fade) {
+      for (let i = 0, len = oldModuleIds.length; i < len; i++) {
+        const moduleId = oldModuleIds[i];
 
-      if (!store.state.modules.active[moduleId]) {
-        continue;
-      }
+        if (!store.state.modules.active[moduleId]) {
+          continue;
+        }
 
-      try {
-        await store.dispatch("modules/removeActiveModule", { moduleId });
-      } catch (e) {
-        console.error("Could not remove a replaced row Module", e);
+        try {
+          await store.dispatch("modules/removeActiveModule", { moduleId });
+        } catch (e) {
+          console.error("Could not remove a replaced row Module", e);
+        }
       }
     }
 
+    // Expressions on the replaced Group's own inputs belong to the incoming
+    // Group, so they are always cleared. Module expressions only go when the
+    // old Modules are actually removed.
+    const staleInputIds = fade ? oldGroupInputIds : oldInputIds;
     const oldAssignments = Object.values(
       store.state.expressions.assignments || {},
     );
@@ -1856,7 +2238,7 @@ const actions = {
     for (let i = 0, len = oldAssignments.length; i < len; i++) {
       const assignment = oldAssignments[i];
 
-      if (oldInputIds.has(assignment.inputId)) {
+      if (staleInputIds.has(assignment.inputId)) {
         await store.dispatch("expressions/remove", { id: assignment.id });
       }
     }
@@ -1878,7 +2260,7 @@ const actions = {
       const sceneGroup = normalizedScene.groups[i];
       const liveGroup = findLiveRowGroup(i);
 
-      if (sceneGroup.id && liveGroup) {
+      if (sceneGroup && sceneGroup.id && liveGroup) {
         sceneGroupIdMap[sceneGroup.id] = liveGroup.id;
       }
     }
@@ -1913,11 +2295,12 @@ const actions = {
       ids: orderedGroups.map((item) => item.id),
     });
 
-    if (fromCanvas && targetAlpha > 0) {
+    if (fade && ghostGroup) {
       rowTransitions[row] = reactive({
         groupId: group.id,
-        fromCanvas,
+        ghostGroupId: ghostGroup.id,
         fromAlpha,
+        targetAlpha,
         elapsed: 0,
         duration: normalizeTransitionDuration(
           state.performance.transitionSeconds,
@@ -1948,7 +2331,7 @@ const actions = {
 
     // Finish any in-flight crossfade first so nothing is left orphaned.
     await completeTransition(commit);
-    clearAllRowTransitions();
+    await completeAllRowTransitions();
 
     const oldGroups = store.state.groups.groups.filter(
       (group) => !isGalleryGroup(group),
@@ -1973,6 +2356,12 @@ const actions = {
 
     for (let i = 0, len = groupSnapshots.length; i < len; i++) {
       const snapshot = groupSnapshots[i];
+
+      if (!snapshot) {
+        // Row holes (from Ctrl+drag copies) contain no Group.
+        continue;
+      }
+
       const oldGroupId = snapshot.id;
       const moduleIds = snapshot.modules || [];
 
@@ -2054,6 +2443,10 @@ const actions = {
     for (let i = 0, len = groupSnapshots.length; i < len; i++) {
       const snapshot = groupSnapshots[i];
 
+      if (!snapshot) {
+        continue;
+      }
+
       if (typeof snapshot.inheritFrom !== "string") {
         continue;
       }
@@ -2094,7 +2487,11 @@ const actions = {
       state.performance,
     ).minSeconds;
     resetAllRowRuntime(
-      getRowCount(state.scenes, store.state.groups.groups),
+      getRowCount(
+        state.scenes,
+        store.state.groups.groups,
+        state.performance.rowNames,
+      ),
       performanceMinSeconds,
     );
 
@@ -2161,6 +2558,7 @@ const actions = {
 
   async removeScene({ commit, state }, { sceneId }) {
     await completeTransition(commit);
+    await completeAllRowTransitions();
 
     for (const rowIndex of Object.keys(activeRows)) {
       const row = Number(rowIndex);
@@ -2378,7 +2776,11 @@ const actions = {
   setPerformanceEnabled({ commit, state }, { enabled }) {
     resetLegacyRuntime();
     resetAllRowRuntime(
-      getRowCount(state.scenes, store.state.groups.groups),
+      getRowCount(
+        state.scenes,
+        store.state.groups.groups,
+        state.performance.rowNames,
+      ),
       normalizePerformanceTiming(state.performance).minSeconds,
     );
 
@@ -2396,8 +2798,16 @@ const actions = {
       return;
     }
 
-    const rowCount = getRowCount(state.scenes, store.state.groups.groups);
-    const rowCandidates = hasAnyRowCandidates(state.scenes, rowCount);
+    const rowCount = getRowCount(
+      state.scenes,
+      store.state.groups.groups,
+      state.performance.rowNames,
+    );
+    const rowCandidates = hasAnyRowCandidates(
+      state.scenes,
+      rowCount,
+      state.performance.rowNames,
+    );
 
     if (!rowCandidates) {
       const currentScene = state.scenes.find(
@@ -2423,7 +2833,7 @@ const actions = {
         active &&
         scene &&
         isSceneEnabled(scene) &&
-        !isRowCellEmpty(scene, rowIndex) &&
+        !isRowCellEmpty(scene, rowIndex, state.performance.rowNames) &&
         group &&
         group.id === active.groupId
       ) {
@@ -2445,6 +2855,7 @@ const actions = {
           rowIndex,
           currentSceneId: active ? active.sceneId : null,
           order: state.performance.order,
+          rowNames: state.performance.rowNames,
         });
 
         if (scene) {
@@ -2465,7 +2876,7 @@ const actions = {
   async stopPerformance({ commit }) {
     resetLegacyRuntime();
     await completeTransition(commit);
-    clearAllRowTransitions();
+    await completeAllRowTransitions();
     commit("UPDATE_PERFORMANCE", { enabled: false });
   },
 
@@ -2496,6 +2907,7 @@ const actions = {
       rowIndex: row,
       currentSceneId: active ? active.sceneId : null,
       order: state.performance.order,
+      rowNames: state.performance.rowNames,
     });
 
     if (!scene) {
@@ -2528,6 +2940,207 @@ const actions = {
         ...normalizePerformanceData(data),
       }),
     );
+  },
+
+  /**
+   * Sets the named performance rows (an array of strings, null/"" meaning an
+   * unnamed legacy positional row). Naming/reordering a row also reorders the
+   * live Groups so the grid and the layer stack snap into place.
+   */
+  async setRowNames({ commit, state, dispatch }, { rowNames }) {
+    const normalized = normalizeRowNames(rowNames);
+
+    commit("UPDATE_PERFORMANCE", { rowNames: normalized });
+    remapRowGroupsForNames(normalized);
+
+    await store.dispatch("groups/orderByIds", {
+      ids: orderRowGroups().map((item) => item.id),
+    });
+
+    resetAllRowRuntime(
+      getRowCount(state.scenes, store.state.groups.groups, normalized),
+      normalizePerformanceTiming(state.performance).minSeconds,
+    );
+
+    await dispatch("persistScenes");
+
+    return normalized;
+  },
+
+  async copySceneCellToScene(
+    { commit, state },
+    { fromSceneId, toSceneId, fromRowIndex, toRowIndex } = {},
+  ) {
+    const fromScene = state.scenes.find((scene) => scene.id === fromSceneId);
+    const toScene = state.scenes.find((scene) => scene.id === toSceneId);
+
+    if (
+      !fromScene ||
+      !toScene ||
+      fromScene.id === toScene.id ||
+      !Number.isInteger(fromRowIndex) ||
+      !Number.isInteger(toRowIndex) ||
+      fromRowIndex < 0 ||
+      toRowIndex < 0
+    ) {
+      return null;
+    }
+
+    const rowNames = state.performance.rowNames;
+    const sourceScene = normalizeScene(fromScene);
+
+    if (!sourceScene) {
+      return null;
+    }
+
+    const sourceGroup = getRowGroup(sourceScene, fromRowIndex, rowNames);
+
+    if (!sourceGroup || isRowCellEmpty(sourceScene, fromRowIndex, rowNames)) {
+      return null;
+    }
+
+    const moduleSnapshots = sourceScene.modules || {};
+
+    const copiedModuleIds = (sourceGroup.modules || []).filter(
+      (moduleId) => !!moduleSnapshots[moduleId],
+    );
+
+    // Saved input ids the copy carries with it, so inputs, input links,
+    // expression assignments and tweens ride along exactly.
+    const copiedInputIds = new Set();
+
+    for (let i = 0, len = GROUP_INPUT_NAMES.length; i < len; i++) {
+      const inputId = sourceGroup[`${GROUP_INPUT_NAMES[i]}InputId`];
+
+      if (inputId) {
+        copiedInputIds.add(inputId);
+      }
+    }
+
+    for (const moduleId of copiedModuleIds) {
+      addModuleInputIds(moduleSnapshots[moduleId], copiedInputIds);
+    }
+
+    const data = {};
+
+    data.modules = { ...(toScene.modules || {}) };
+
+    for (const moduleId of copiedModuleIds) {
+      data.modules[moduleId] = clone(moduleSnapshots[moduleId]);
+    }
+
+    // Row holes (null entries) are how copied rows leave space in scenes that
+    // have fewer groups; trailing holes are meaningless, so trim them.
+    const groups = Array.isArray(toScene.groups) ? clone(toScene.groups) : [];
+
+    while (groups.length <= toRowIndex) {
+      groups.push(null);
+    }
+
+    groups[toRowIndex] = clone(sourceGroup);
+
+    while (groups.length && groups[groups.length - 1] === null) {
+      groups.pop();
+    }
+
+    data.groups = groups;
+
+    const sourceInputs = sourceScene.inputs || {};
+    const sourceInputLinks = getSceneInputLinks(sourceScene);
+    const toInputs =
+      toScene.inputs && typeof toScene.inputs === "object"
+        ? clone(toScene.inputs)
+        : {};
+    const inputs = {
+      ...(sourceInputs.inputs || {}),
+      ...(toInputs.inputs || {}),
+    };
+    const inputLinks = {
+      ...(toInputs.inputLinks || {}),
+      ...getSceneInputLinks(toScene),
+    };
+
+    for (const inputId of copiedInputIds) {
+      const input = sourceInputs.inputs && sourceInputs.inputs[inputId];
+
+      if (input) {
+        inputs[inputId] = clone(input);
+      }
+
+      const link = sourceInputLinks[inputId];
+
+      if (link) {
+        inputLinks[inputId] = clone(link);
+      }
+    }
+
+    data.inputs = {
+      focusedInput: toInputs.focusedInput || { id: null, title: null },
+      inputs,
+      inputLinks,
+    };
+
+    // Tweens (id->tween) merged back into whatever shape the target uses.
+    const tweenMap = new Map();
+    const toTween = toScene.tweens || {};
+
+    if (Array.isArray(toTween)) {
+      for (const tween of toTween) {
+        if (tween && tween.id) {
+          tweenMap.set(tween.id, tween);
+        }
+      }
+    } else if (typeof toTween === "object") {
+      for (const [id, tween] of getSceneTweenEntries({ tweens: toTween })) {
+        tweenMap.set(id, tween);
+      }
+    }
+
+    for (const inputId of Object.keys(inputLinks)) {
+      if (!copiedInputIds.has(inputId)) {
+        continue;
+      }
+
+      const link = inputLinks[inputId] || {};
+
+      if (link.source === "tween") {
+        const sourceTweenMap = new Map(getSceneTweenEntries(sourceScene));
+        const tween =
+          sourceTweenMap.get(inputId) || sourceTweenMap.get(link.id);
+
+        if (tween && tween.id) {
+          tweenMap.set(tween.id, clone(tween));
+        } else {
+          delete inputLinks[inputId];
+        }
+      }
+    }
+
+    if (Array.isArray(toTween)) {
+      data.tweens = Array.from(tweenMap.values());
+    } else if (typeof toTween === "object") {
+      data.tweens = Object.fromEntries(tweenMap.entries());
+    }
+
+    const toAssignments =
+      toScene.expressions && typeof toScene.expressions === "object"
+        ? { ...(toScene.expressions.assignments || {}) }
+        : {};
+
+    const sourceAssignments =
+      (sourceScene.expressions && sourceScene.expressions.assignments) || {};
+
+    for (const assignment of Object.values(sourceAssignments)) {
+      if (assignment && copiedInputIds.has(assignment.inputId)) {
+        toAssignments[assignment.id] = clone(assignment);
+      }
+    }
+
+    data.expressions = { assignments: toAssignments };
+
+    commit("UPDATE_SCENE", { sceneId: toScene.id, data });
+
+    return JSON.parse(JSON.stringify(toScene));
   },
 
   /**
@@ -2583,10 +3196,40 @@ const actions = {
         Number.isFinite(rowTransition.duration) && rowTransition.duration > 0
           ? rowTransition.duration
           : normalizeTransitionDuration(undefined);
+      const progress = Math.min(1, rowTransition.elapsed / duration);
+      const eased = progress * progress * (3 - 2 * progress);
+      const targetAlpha = Number.isFinite(rowTransition.targetAlpha)
+        ? rowTransition.targetAlpha
+        : 1;
+      const fromAlpha = Number.isFinite(rowTransition.fromAlpha)
+        ? rowTransition.fromAlpha
+        : 1;
 
-      if (rowTransition.elapsed >= duration) {
-        delete rowTransitions[rowIndex];
-        commit("CLEAR_ROW_PROGRESS", { rowIndex: Number(rowIndex) });
+      // Fade the incoming Group in and the still-rendering outgoing Group out
+      // together, so the outgoing visuals keep moving through the fade.
+      if (
+        store.state.groups.groups.some((g) => g.id === rowTransition.groupId)
+      ) {
+        store.commit("groups/UPDATE_GROUP", {
+          groupId: rowTransition.groupId,
+          data: { alpha: targetAlpha * eased },
+        });
+      }
+
+      if (
+        rowTransition.ghostGroupId &&
+        store.state.groups.groups.some(
+          (g) => g.id === rowTransition.ghostGroupId,
+        )
+      ) {
+        store.commit("groups/UPDATE_GROUP", {
+          groupId: rowTransition.ghostGroupId,
+          data: { alpha: fromAlpha * (1 - eased) },
+        });
+      }
+
+      if (progress >= 1) {
+        await completeRowTransition(rowIndex);
       }
     }
 
@@ -2678,7 +3321,11 @@ const actions = {
       return;
     }
 
-    const rowCount = getRowCount(state.scenes, store.state.groups.groups);
+    const rowCount = getRowCount(
+      state.scenes,
+      store.state.groups.groups,
+      performance.rowNames,
+    );
 
     if (!rowCount) {
       return;
@@ -2686,7 +3333,11 @@ const actions = {
 
     const { bands } = store.state.meyda;
     const bass = bands ? bands.bass : 0;
-    const rowCandidates = hasAnyRowCandidates(state.scenes, rowCount);
+    const rowCandidates = hasAnyRowCandidates(
+      state.scenes,
+      rowCount,
+      performance.rowNames,
+    );
 
     // Legacy Scenes can contain Groups with no Modules. There is nothing to
     // swap per row, so keep the original whole-Scene autopilot for them.
@@ -2742,7 +3393,7 @@ const actions = {
         !active ||
         !currentScene ||
         !isSceneEnabled(currentScene) ||
-        isRowCellEmpty(currentScene, rowIndex) ||
+        isRowCellEmpty(currentScene, rowIndex, performance.rowNames) ||
         !currentGroup ||
         currentGroup.id !== active.groupId
       ) {
@@ -2751,6 +3402,7 @@ const actions = {
           rowIndex,
           currentSceneId: active ? active.sceneId : null,
           order: performance.order,
+          rowNames: performance.rowNames,
         });
 
         if (nextScene) {
@@ -2764,7 +3416,9 @@ const actions = {
       }
 
       const candidateCount = getEnabledScenes(state.scenes).reduce(
-        (count, scene) => count + (isRowCellEmpty(scene, rowIndex) ? 0 : 1),
+        (count, scene) =>
+          count +
+          (isRowCellEmpty(scene, rowIndex, performance.rowNames) ? 0 : 1),
         0,
       );
 
@@ -2802,6 +3456,7 @@ const actions = {
         rowIndex,
         currentSceneId: currentScene.id,
         order: performance.order,
+        rowNames: performance.rowNames,
       });
 
       if (nextScene) {

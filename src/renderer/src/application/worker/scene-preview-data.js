@@ -22,12 +22,12 @@ const getModuleIds = (group) => {
  * are built from these snapshots, never from the live Groups, so hovering a
  * cell cannot disturb the running composition.
  */
-export function getSceneRowPreview(scene, rowIndex) {
-  if (isRowCellEmpty(scene, rowIndex)) {
+export function getSceneRowPreview(scene, rowIndex, rowNames) {
+  if (isRowCellEmpty(scene, rowIndex, rowNames)) {
     return null;
   }
 
-  const group = getRowGroup(scene, rowIndex);
+  const group = getRowGroup(scene, rowIndex, rowNames);
   const moduleSnapshots = scene.modules || {};
   const modules = getModuleIds(group)
     .map((moduleId) => moduleSnapshots[moduleId])

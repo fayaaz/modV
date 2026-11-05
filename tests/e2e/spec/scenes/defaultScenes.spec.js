@@ -135,7 +135,7 @@ test("ships a version 3 batch of glitch, kaleidoscope and twirl scenes", async (
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(3);
+  expect(DEFAULTS_VERSION).toBe(4);
   expect(newBatch.length).toBeGreaterThanOrEqual(10);
 
   for (const scene of newBatch) {
@@ -211,6 +211,81 @@ test("seeds the version 3 scenes with every module intact", async () => {
       ).toEqual(groupDefinition.modules.map((module) => module.name));
     }
   }
+});
+
+test("version 4 scenes use the varied Point10 scenes", async () => {
+  const registered = await modVApp.evaluateWorkerState("modules.registered");
+  const variedBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 4,
+  );
+  const unusedPoint10Scenes = [
+    "Point10 Around Plus",
+    "Point10 Attractor Particles",
+    "Point10 Boxy",
+    "Point10 DVD Room",
+    "Point10 It Is Coming For You",
+    "Point10 Light Tunnel",
+    "Point10 Square Tunnel",
+    "Point10 Wormhole",
+  ];
+
+  expect(variedBatch.length).toBeGreaterThanOrEqual(12);
+
+  for (const scene of variedBatch) {
+    for (const name of getModuleNames(scene)) {
+      expect(registered[name], `${scene.name}: ${name}`).toBeDefined();
+    }
+  }
+
+  const names = new Set(variedBatch.flatMap(getModuleNames));
+
+  for (const name of unusedPoint10Scenes) {
+    expect(names.has(name), name).toBe(true);
+  }
+});
+
+test("version 4 scenes pin foreground and background alpha to bass", async () => {
+  const scenes = await modVApp.evaluateWorkerState("scenes.scenes");
+  const byName = new Map(scenes.map((scene) => [scene.name, scene]));
+  const variedBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 4,
+  );
+  let pinned = 0;
+
+  for (const definition of variedBatch) {
+    const scene = byName.get(definition.name);
+
+    expect(scene, definition.name).toBeTruthy();
+
+    const links = Object.values(
+      (scene.inputs && scene.inputs.inputLinks) || {},
+    );
+    const groupAlphaIds = new Set(
+      (scene.groups || []).map((group) => group.alphaInputId).filter(Boolean),
+    );
+    const moduleAlphaIds = new Set(
+      Object.values(scene.modules || {})
+        .map((module) => module.meta && module.meta.alphaInputId)
+        .filter(Boolean),
+    );
+
+    for (const link of definition.inputLinks || []) {
+      const match = links.find(
+        (candidate) =>
+          candidate.source === "meyda" &&
+          Array.isArray(candidate.args) &&
+          candidate.args[0] === link.feature &&
+          (groupAlphaIds.has(candidate.id) || moduleAlphaIds.has(candidate.id)),
+      );
+
+      expect(match, `${definition.name}: ${link.group}`).toBeTruthy();
+      expect(match.min).toBe(link.min);
+      expect(match.max).toBe(link.max);
+      pinned++;
+    }
+  }
+
+  expect(pinned).toBeGreaterThanOrEqual(8);
 });
 
 test("default scenes chain controls to bass and a BPM tween", async () => {

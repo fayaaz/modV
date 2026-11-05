@@ -35,6 +35,10 @@ const newBatch = DEFAULT_SCENES.filter(
   (scene) => scene.introducedVersion === 3,
 );
 
+const variedBatch = DEFAULT_SCENES.filter(
+  (scene) => scene.introducedVersion === 4,
+);
+
 const getGroup = (scene, name) =>
   scene.groups.find((group) => group.name === name);
 
@@ -47,12 +51,12 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 3", () => {
-    expect(DEFAULTS_VERSION).toBe(3);
+  it("bumps the defaults version to 4", () => {
+    expect(DEFAULTS_VERSION).toBe(4);
   });
 
-  it("ships at least 33 default scenes with unique names", () => {
-    expect(DEFAULT_SCENES.length).toBeGreaterThanOrEqual(33);
+  it("ships at least 47 default scenes with unique names", () => {
+    expect(DEFAULT_SCENES.length).toBeGreaterThanOrEqual(47);
 
     const keys = DEFAULT_SCENES.map((scene) => sceneKey(scene.name));
 
@@ -65,7 +69,7 @@ describe("default scenes", () => {
       (scene) => scene.introducedVersion < 3,
     );
 
-    expect(legacy.length).toBeGreaterThanOrEqual(21);
+    expect(legacy.length).toBeGreaterThanOrEqual(20);
     expect(
       legacy.every(
         (scene) =>
@@ -76,6 +80,61 @@ describe("default scenes", () => {
 
   it("adds at least 10 scenes in the version 3 batch", () => {
     expect(newBatch.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it("adds at least 12 varied Point10 scenes in the version 4 batch", () => {
+    expect(variedBatch.length).toBeGreaterThanOrEqual(12);
+  });
+
+  it("uses the previously unused Point10 scenes in the version 4 batch", () => {
+    const unusedPoint10Scenes = [
+      "Point10 Around Plus",
+      "Point10 Attractor Particles",
+      "Point10 Boxy",
+      "Point10 DVD Room",
+      "Point10 It Is Coming For You",
+      "Point10 Light Tunnel",
+      "Point10 Square Tunnel",
+      "Point10 Wormhole",
+    ];
+    const names = new Set(variedBatch.flatMap(getModuleNames));
+
+    for (const name of unusedPoint10Scenes) {
+      expect(names.has(name), name).toBe(true);
+    }
+  });
+
+  it("does not use the removed Point10 Ring Of Fire module", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Point10 Ring Of Fire"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("pins some version 4 foreground or background controls to bass", () => {
+    const withLinks = variedBatch.filter(
+      (scene) => Array.isArray(scene.inputLinks) && scene.inputLinks.length > 0,
+    );
+
+    expect(withLinks.length).toBeGreaterThanOrEqual(8);
+
+    for (const scene of withLinks) {
+      for (const link of scene.inputLinks) {
+        expect(["Background", "Foreground"]).toContain(link.group);
+        expect(link.control).toBe("alpha");
+        expect(typeof link.feature).toBe("string");
+        expect(link.min).toBeLessThan(link.max);
+
+        const group = getGroup(scene, link.group);
+
+        expect(group).toBeTruthy();
+
+        if (link.module) {
+          expect(getModulesInGroup(scene, link.group)).toContain(link.module);
+        }
+      }
+    }
   });
 
   it("gives every scene the three required groups with the right inherit flags", () => {
@@ -187,19 +246,34 @@ describe("default scenes", () => {
     expect(dimmed.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("only seeds the version 3 batch for installs on version 2", () => {
+  it("seeds the version 3 and 4 batches for installs on version 2", () => {
     const selected = getScenesToSeed({
       defaultsVersion: 2,
       seededNames: getDefaultSceneNamesUpTo(2),
       existingNames: [],
     });
+    const newerBatch = DEFAULT_SCENES.filter(
+      (scene) => scene.introducedVersion > 2,
+    );
 
     expect(selected.map((scene) => scene.name)).toEqual(
-      newBatch.map((scene) => scene.name),
+      newerBatch.map((scene) => scene.name),
     );
   });
 
-  it("does not offer the version 3 batch to installs on version 3", () => {
+  it("only seeds the version 4 batch for installs on version 3", () => {
+    const selected = getScenesToSeed({
+      defaultsVersion: 3,
+      seededNames: getDefaultSceneNamesUpTo(3),
+      existingNames: [],
+    });
+
+    expect(selected.map((scene) => scene.name)).toEqual(
+      variedBatch.map((scene) => scene.name),
+    );
+  });
+
+  it("does not offer any default batch to installs on the latest version", () => {
     const selected = getScenesToSeed({
       defaultsVersion: DEFAULTS_VERSION,
       seededNames: getDefaultSceneNamesUpTo(DEFAULTS_VERSION),

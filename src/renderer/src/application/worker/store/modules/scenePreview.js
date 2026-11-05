@@ -45,9 +45,13 @@ const actions = {
       }
       const scene = rootState.scenes.scenes.find((item) => item.id === sceneId);
       const row = Number(rowIndex);
+      const rowNames =
+        (rootState.scenes.performance &&
+          rootState.scenes.performance.rowNames) ||
+        [];
       const preview =
         scene && Number.isInteger(row) && row >= 0
-          ? getSceneRowPreview(scene, row)
+          ? getSceneRowPreview(scene, row, rowNames)
           : null;
 
       if (!preview) {

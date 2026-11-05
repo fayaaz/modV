@@ -6,7 +6,6 @@ import constants, { GROUP_DISABLED, GROUP_ENABLED } from "../constants";
 import NdiWorker from "./ndi-worker.worker.js?worker";
 import { applyWindow } from "meyda/dist/esm/utilities";
 import { renderSceneTransition } from "./scene-transition";
-import { renderRowFade } from "./row-transition";
 import { renderScenePreview } from "./scene-preview";
 
 const meyda = { windowing: applyWindow };
@@ -190,7 +189,6 @@ async function loop(delta, features, fftOutput) {
 
   let lastCanvas = main.canvas;
   const renderedCanvasByGroupId = {};
-  const rowFadeCanvasByGroupId = {};
 
   const groupsLength = groupIndexRenderOrder.length;
   for (let i = 0; i < groupsLength; ++i) {
@@ -380,45 +378,17 @@ async function loop(delta, features, fftOutput) {
       }
     }
 
-    let effectiveCanvas = drawTo.canvas;
-
-    if (!isGalleryGroup && Number.isFinite(group.sceneRow)) {
-      const rowIndex = group.sceneRow;
-      const rowTransition = store.getters["scenes/rowTransition"](rowIndex);
-
-      if (
-        rowTransition &&
-        rowTransition.groupId === group.id &&
-        rowTransition.fromCanvas
-      ) {
-        const progress =
-          store.getters["scenes/rowTransitionProgress"](rowIndex);
-
-        if (Number.isFinite(progress) && progress < 1) {
-          try {
-            effectiveCanvas =
-              renderRowFade({
-                fromCanvas: rowTransition.fromCanvas,
-                toCanvas: drawTo.canvas,
-                progress,
-                width: drawTo.canvas.width,
-                height: drawTo.canvas.height,
-                rowIndex,
-                fromAlpha: rowTransition.fromAlpha,
-              }) || drawTo.canvas;
-
-            rowFadeCanvasByGroupId[group.id] = effectiveCanvas;
-          } catch (e) {
-            console.error("Could not render a row transition", e);
-            effectiveCanvas = drawTo.canvas;
-          }
-        }
-      }
-    }
+    const effectiveCanvas = drawTo.canvas;
 
     renderedCanvasByGroupId[group.id] = effectiveCanvas;
 
-    if (!group.hidden && group.enabled === GROUP_ENABLED) {
+    // A fading ghost renders its own outgoing visuals, but must not become the
+    // canvas the next row inherits from: the incoming Group owns the row.
+    if (
+      !group.hidden &&
+      group.enabled === GROUP_ENABLED &&
+      group.transitionGhost !== true
+    ) {
       lastCanvas = effectiveCanvas;
     }
   }
@@ -516,7 +486,7 @@ async function loop(delta, features, fftOutput) {
         main.globalAlpha = alpha;
       }
 
-      main.drawImage(rowFadeCanvasByGroupId[group.id] || context.canvas, 0, 0);
+      main.drawImage(context.canvas, 0, 0);
       main.restore();
     }
   }

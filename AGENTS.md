@@ -95,6 +95,8 @@ Gotchas:
 - Global performance timing applies to Scenes without an explicit per-Scene override (`timingOverride`); editing a Scene's Time fields creates an override. Dwell only advances while no transition is running.
 - `scenes/stopPerformance` completes any in-flight crossfade (transition state plus pending Group cleanup) before disabling performance mode, so a stopped performance mode never leaves a stale transition or orphaned Groups behind.
 - Scene JSON lives in the project media directory under `scene/` (read/save handlers in `src/main/media-manager/`, `delete-scene` IPC in `src/main/window-prefs.js`). UI: `src/renderer/src/components/Scenes.vue`.
+- Rows can be named (`worker/scene-rows.js`): a named row matches its Group by name (case-insensitive, exact or word-prefix, first match wins) instead of by position, and `performance.rowNames` is persisted in `scenes.json` and travels in playlists. Unnamed rows keep the positional lookup. `scenes/setRowNames` remaps the live layer stack (`groups/orderByIds`) so named rows snap into place.
+- Ctrl+drag a grid cell onto a cell of another Scene to copy that Group exactly (`scenes/copySceneCellToScene`): the Group and Module snapshots are copied verbatim (ids included — Scene documents are applied by rebuilding Groups/Modules with fresh ids), together with the saved inputs, input links, expression assignments and tweens. Rows the target Scene does not define become `null` holes in `groups`; the apply loop skips them and keeps the row indexes aligned. The drop only fires if `dragover` calls `preventDefault()` — the highlight is drawn from component state, so it looks correct even when the browser rejects the drop.
 
 ## Lint & formatting
 

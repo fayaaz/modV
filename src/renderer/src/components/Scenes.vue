@@ -131,7 +131,12 @@
 
     <div v-if="scenes.length" class="scenes__gridWrapper">
       <div class="scenes__grid" :style="{ gridTemplateColumns }">
-        <div class="scenes__gridCorner">Layers</div>
+        <div class="scenes__gridCorner">
+          <span>Layers</span>
+          <button class="light scenes__addRowButton" @click="addRow">
+            + Row
+          </button>
+        </div>
         <div
           v-for="scene in scenes"
           :key="`header-${scene.id}`"
@@ -154,8 +159,36 @@
         </div>
 
         <template v-for="row in rows" :key="`row-${row.index}`">
-          <div class="scenes__gridRowLabel" :title="row.label">
-            {{ row.label }}
+          <div
+            class="scenes__gridRowLabel"
+            :class="{ 'scenes__gridRowLabel--dragging': dragRowIndex === row.index }"
+            :draggable="editingRowIndex !== row.index"
+            :title="row.label"
+            @dragstart="onRowDragStart(row.index, $event)"
+            @dragover.prevent
+            @drop="onRowDrop(row.index, $event)"
+          >
+            <TextInput
+              v-if="editingRowIndex === row.index"
+              ref="rowNameInput"
+              v-model="localRowName"
+              class="scenes__rowNameInput"
+              @keypress.enter="commitRowRename(row.index)"
+              @blur="commitRowRename(row.index)"
+              @keydown.esc="cancelRowRename"
+            />
+            <template v-else>
+              <span class="scenes__gridRowLabelText" @dblclick="startRowRename(row.index)">
+                {{ row.label }}
+              </span>
+              <button
+                class="light scenes__rowDeleteButton"
+                title="Delete row"
+                @click="removeRow(row.index)"
+              >
+                &times;
+              </button>
+            </template>
           </div>
           <div
             v-for="scene in scenes"
@@ -168,12 +201,21 @@
               'scenes__gridCell--active': isRowActive(scene, row),
               'scenes__gridCell--transitioning': isRowTransitioning(scene, row),
               'scenes__gridCell--disabled': scene.enabled === false,
+              'scenes__gridCell--paste':
+                this.cellDragTarget &&
+                this.cellDragTarget.sceneId === scene.id &&
+                this.cellDragTarget.rowIndex === row.index,
             }"
+            :draggable="true"
             @click="
               isRowCellEmpty(scene, row.index)
                 ? null
                 : applySceneRow(scene, row.index)
             "
+            @dragstart="onCellDragStart(scene, row.index, $event)"
+            @dragover="onCellDragOver(scene, row.index, $event)"
+            @drop="onCellDrop(scene, row.index, $event)"
+            @dragend="onCellDragEnd"
             @mouseenter="showScenePreview(scene, row.index, $event)"
             @mouseleave="hideScenePreview"
           >
@@ -342,10 +384,15 @@ export default {
     return {
       iVTitle: "Scenes",
       iVBody:
-        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. The grid shows Scenes as columns and Group layers as rows: click a column header to apply a whole Scene, or a cell to swap just that row's layer. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
+        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. The grid shows Scenes as columns and Group layers as rows: click a column header to apply a whole Scene, or a cell to swap just that row's layer. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. Ctrl-drag a grid cell onto another Scene to copy its Group exactly. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
       newSceneName: "",
       editingSceneId: null,
       localSceneName: "",
+      editingRowIndex: null,
+      localRowName: "",
+      dragRowIndex: null,
+      cellDragSource: null,
+      cellDragTarget: null,
       sceneSaveTimer: null,
       previewKey: null,
       previewFrames: {},
@@ -371,6 +418,12 @@ export default {
 
     performance() {
       return this.$modV.store.state.scenes.performance;
+    },
+
+    rowNames() {
+      return Array.isArray(this.performance.rowNames)
+        ? this.performance.rowNames
+        : [];
     },
 
     transitioning() {
@@ -658,7 +711,7 @@ export default {
     },
 
     sceneGroupForRow(scene, rowIndex) {
-      return getRowGroup(scene, rowIndex);
+      return getRowGroup(scene, rowIndex, this.rowNames);
     },
 
     sceneGroupModuleCount(scene, group) {
@@ -707,7 +760,162 @@ export default {
     },
 
     isRowCellEmpty(scene, rowIndex) {
-      return isSceneRowCellEmpty(scene, rowIndex);
+      return isSceneRowCellEmpty(scene, rowIndex, this.rowNames);
+    },
+
+    startRowRename(rowIndex) {
+      if (this.editingRowIndex === rowIndex) {
+        return;
+      }
+
+      this.editingRowIndex = rowIndex;
+      this.localRowName = this.rowNames[rowIndex] || "";
+
+      this.$nextTick(() => {
+        const refs = this.$refs.rowNameInput;
+        const input = Array.isArray(refs) ? refs[0] : refs;
+
+        if (input) {
+          input.focus();
+        }
+      });
+    },
+
+    cancelRowRename() {
+      this.editingRowIndex = null;
+    },
+
+    async commitRowRename(rowIndex) {
+      if (this.editingRowIndex !== rowIndex) {
+        return;
+      }
+
+      this.editingRowIndex = null;
+
+      const name = (this.localRowName || "").trim();
+
+      if (name === (this.rowNames[rowIndex] || "").trim()) {
+        return;
+      }
+
+      const names = this.rowNames.slice();
+      names[rowIndex] = name;
+
+      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+    },
+
+    async addRow() {
+      const names = this.rowNames.concat("");
+      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+      this.startRowRename(names.length - 1);
+    },
+
+    async removeRow(rowIndex) {
+      const names = this.rowNames.slice();
+
+      names.splice(rowIndex, 1);
+      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+    },
+
+    onRowDragStart(rowIndex, event) {
+      this.dragRowIndex = rowIndex;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(rowIndex));
+    },
+
+    async onRowDrop(rowIndex, event) {
+      // A cell copy carries an empty text/plain payload, which would read as
+      // row 0; ignore row reordering while a cell is being dragged.
+      if (this.cellDragSource) {
+        return;
+      }
+
+      const fromIndex = Number(event.dataTransfer.getData("text/plain"));
+      this.dragRowIndex = null;
+
+      if (!Number.isInteger(fromIndex) || fromIndex < 0) {
+        return;
+      }
+
+      if (fromIndex === rowIndex) {
+        return;
+      }
+
+      const names = this.rowNames.slice();
+      const [moved] = names.splice(fromIndex, 1);
+      names.splice(rowIndex, 0, moved);
+
+      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+    },
+
+    onCellDragStart(scene, rowIndex, event) {
+      // Only Ctrl+drag copies a cell; plain drags are ignored so the click-to-
+      // apply behaviour and hover previews keep working as before.
+      if (!event.ctrlKey && !event.metaKey) {
+        // Cancel the drag entirely, otherwise a click with a little pointer
+        // movement starts a data-less drag and swallows the click-to-apply.
+        event.preventDefault();
+        return;
+      }
+
+      event.dataTransfer.effectAllowed = "copy";
+      // Chromium only starts a drag once some data is set, and the empty
+      // payload keeps row-label drags (which put an index in text/plain)
+      // from being mistaken for a cell drag.
+      event.dataTransfer.setData("text/plain", "");
+      this.cellDragSource = { sceneId: scene.id, rowIndex };
+      this.cellDragTarget = null;
+    },
+
+    onCellDragEnd() {
+      this.cellDragSource = null;
+      this.cellDragTarget = null;
+    },
+
+    onCellDragOver(scene, rowIndex, event) {
+      if (
+        !this.cellDragSource ||
+        (this.cellDragSource.sceneId === scene.id &&
+          this.cellDragSource.rowIndex === rowIndex)
+      ) {
+        return;
+      }
+
+      // Without preventDefault the browser never fires `drop`; the highlight
+      // is our own state, so the UI looks right while the drop is rejected.
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      this.cellDragTarget = { sceneId: scene.id, rowIndex };
+    },
+
+    async onCellDrop(scene, rowIndex, event) {
+      const source = this.cellDragSource;
+      this.cellDragSource = null;
+      this.cellDragTarget = null;
+
+      if (!source) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (source.sceneId === scene.id && source.rowIndex === rowIndex) {
+        return;
+      }
+
+      const updated = await this.$modV.store.dispatch(
+        "scenes/copySceneCellToScene",
+        {
+          fromSceneId: source.sceneId,
+          fromRowIndex: source.rowIndex,
+          toSceneId: scene.id,
+          toRowIndex: rowIndex,
+        },
+      );
+
+      if (updated) {
+        this.persistScene(updated);
+      }
     },
 
     isRowTransitioning(scene, row) {
@@ -1047,7 +1255,53 @@ label.scenes__gridHeaderEnabled {
 div.scenes__gridRowLabel {
   display: flex;
   align-items: center;
+  gap: 4px;
   background: #303030;
+}
+
+span.scenes__gridRowLabelText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+div.scenes__gridRowLabel--dragging {
+  opacity: 0.5;
+}
+
+button.scenes__rowDeleteButton {
+  opacity: 0;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+div.scenes__gridRowLabel:hover button.scenes__rowDeleteButton {
+  opacity: 0.7;
+}
+
+button.scenes__rowDeleteButton:hover {
+  opacity: 1;
+}
+
+input.scenes__rowNameInput {
+  width: 100%;
+  min-width: 0;
+}
+
+div.scenes__gridCorner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+button.scenes__addRowButton {
+  font-size: 11px;
+  padding: 2px 6px;
+  flex-shrink: 0;
 }
 
 div.scenes__gridCell {
@@ -1086,6 +1340,11 @@ div.scenes__gridCell--active {
 div.scenes__gridCell--transitioning {
   outline: 1px solid rgba(0, 192, 255, 0.45);
   outline-offset: -1px;
+}
+
+div.scenes__gridCell--paste {
+  outline: 2px dashed rgba(0, 192, 255, 0.8);
+  outline-offset: -2px;
 }
 
 span.scenes__gridCellCount {

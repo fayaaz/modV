@@ -7,6 +7,7 @@ import {
   getSceneGroups,
   isRowCellEmpty,
   isSceneEnabled,
+  normalizeRowNames,
   pickNextRowScene,
   shouldAdvanceRow,
 } from "../../src/renderer/src/application/worker/scene-rows.js";
@@ -85,6 +86,86 @@ describe("getRowGroup", () => {
     expect(getRowGroup({}, 0)).toBeNull();
     expect(getRowGroup(null, 0)).toBeNull();
   });
+
+  it("matches a named row case-insensitively by group name", () => {
+    const webcam = group("WEBCAM", ["cam"]);
+    expect(getRowGroup(scene("s", [webcam, b()]), 0, ["webcam"])).toBe(webcam);
+    expect(getRowGroup(scene("s", [a(), webcam, b()]), 0, ["Webcam"])).toBe(
+      webcam,
+    );
+  });
+
+  it("matches word-prefixed group names but not unrelated names", () => {
+    const cam2 = group("Webcam 2", ["cam-2"]);
+    expect(getRowGroup(scene("s", [cam2]), 0, ["webcam"])).toBe(cam2);
+    expect(getRowGroup(scene("s", [cam2]), 0, ["webcam 2"])).toBe(cam2);
+    expect(getRowGroup(scene("s", [cam2]), 0, ["cam"])).toBeNull();
+    expect(getRowGroup(scene("s", [cam2]), 1, ["cam", "webcam 2"])).toBe(cam2);
+  });
+
+  it("matches digit-suffixed group names with or without a separator", () => {
+    const fx = group("Effects", ["fx"]);
+    const fx2 = group("Effects 2", ["fx-2"]);
+    const fxTight = group("Effects2", ["fx-tight"]);
+
+    // "effects2" typed without a space still finds the "Effects" group
+    expect(getRowGroup(scene("s", [fx]), 0, ["effects2"])).toBe(fx);
+    // ...and a named row finds a digit-suffixed group without a space
+    expect(getRowGroup(scene("s", [fxTight]), 0, ["effects"])).toBe(fxTight);
+    expect(getRowGroup(scene("s", [fx2]), 0, ["effects"])).toBe(fx2);
+    // larger suffixes match the same base name
+    expect(getRowGroup(scene("s", [fx]), 0, ["Effects 10"])).toBe(fx);
+  });
+
+  it("solo digit-suffixed rows match the base group, but not when another row owns the base name", () => {
+    const fx = group("Effects", ["fx"]);
+    const get = (rowNames, rowIndex) =>
+      getRowGroup(scene("s", [fx, b()]), rowIndex, rowNames);
+
+    // A solo "effects2" row finds the "Effects" group...
+    expect(get(["effects2"], 0)).toBe(fx);
+    // ...but when a sibling row is already the "Effects" family, the
+    // suffixed row stays empty instead of claiming the same group twice.
+    expect(get(["Effects", "effects2"], 1)).toBeNull();
+    expect(get(["Effects", "effects2"], 0)).toBe(fx);
+    // Three-digit family members get their own rows when groups exist.
+    const fx2 = group("Effects 2", ["fx-2"]);
+    expect(
+      getRowGroup(scene("s", [fx, fx2]), 1, ["Effects", "Effects 2"]),
+    ).toBe(fx2);
+  });
+
+  it("does not match digit-suffixed names across different base names", () => {
+    expect(
+      getRowGroup(scene("s", [group("Webcam 2", ["cam-2"])]), 0, ["cam"]),
+    ).toBeNull();
+    // but "cam2" belongs to the same family as a "cam" row
+    expect(
+      getRowGroup(scene("s", [group("CAM2", ["cam-2"])]), 0, ["cam"]),
+    ).not.toBeNull();
+  });
+
+  it("returns empty for a named row with no matching group even at other indexes", () => {
+    expect(getRowGroup(scene("s", [a(), b()]), 0, ["webcam"])).toBeNull();
+  });
+
+  it("returns only the first matching group for a named row", () => {
+    const first = group("Webcam", ["cam-1"]);
+    const second = group("webcam", ["cam-2"]);
+    expect(getRowGroup(scene("s", [first, second]), 0, ["webcam"])).toBe(first);
+  });
+
+  it("falls back to positional lookup without row names", () => {
+    const list = [a(), b()];
+    expect(getRowGroup(scene("s", list), 1, [])).toBe(list[1]);
+    expect(getRowGroup(scene("s", list), 1, [null])).toBe(list[1]);
+    expect(getRowGroup(scene("s", list), 1, undefined)).toBe(list[1]);
+  });
+
+  it("treats a blank name in rowNames as positional", () => {
+    const list = [a(), b()];
+    expect(getRowGroup(scene("s", list), 1, ["", "  "])).toBe(list[1]);
+  });
 });
 
 describe("getRowCount", () => {
@@ -127,6 +208,15 @@ describe("getRowCount", () => {
     expect(getRowCount([], liveGroups)).toBe(2);
   });
 
+  it("ignores outgoing ghost groups while a row fades", () => {
+    const liveGroups = [
+      group("A", ["a"], { sceneRow: 0 }),
+      group("A ghost", ["old"], { sceneRow: 0, transitionGhost: true }),
+      group("B", ["b"], { sceneRow: 1 }),
+    ];
+    expect(getRowCount([], liveGroups)).toBe(2);
+  });
+
   it("combines scene and live group counts", () => {
     expect(
       getRowCount(
@@ -139,6 +229,45 @@ describe("getRowCount", () => {
   it("never returns a negative count", () => {
     expect(getRowCount([], [])).toBe(0);
     expect(getRowCount([scene("one", [])])).toBe(0);
+  });
+
+  it("grows to accommodate named rows", () => {
+    expect(getRowCount([], [], ["webcam", null])).toBe(2);
+    expect(getRowCount([scene("one", [a()])], [], ["webcam", "fx", null])).toBe(
+      3,
+    );
+  });
+
+  it("keeps the longer of named rows and positional counts", () => {
+    expect(getRowCount([scene("one", [a(), b(), c()])], [], ["x"])).toBe(3);
+    expect(getRowCount([scene("one", [a()])], [], ["x", "y", "z"])).toBe(3);
+  });
+
+  it("ignores non-array row names", () => {
+    expect(getRowCount([scene("one", [a()])], [], "nope")).toBe(1);
+  });
+});
+
+describe("normalizeRowNames", () => {
+  it("trims names and keeps positions", () => {
+    expect(normalizeRowNames([" webcam ", "  ", "fx"])).toEqual([
+      "webcam",
+      "",
+      "fx",
+    ]);
+  });
+
+  it("keeps duplicates so row indexes stay aligned", () => {
+    expect(normalizeRowNames(["Webcam", "webcam", "FX"])).toEqual([
+      "Webcam",
+      "webcam",
+      "FX",
+    ]);
+  });
+
+  it("returns an empty array for non-inputs", () => {
+    expect(normalizeRowNames(undefined)).toEqual([]);
+    expect(normalizeRowNames("nope")).toEqual([]);
   });
 });
 
@@ -153,29 +282,59 @@ describe("getRowLabel", () => {
     expect(getRowLabel(scenes, 1)).toBe("Blur");
   });
 
-  it("lets the first occurrence win a tie", () => {
+  it("falls back to a numbered row when a name only covers a minority of scenes", () => {
+    // Three legacy WEBCAM scenes with a fourth "Effects" group must not make
+    // an unnamed positional row look like it is called "Effects".
+    const plain = () =>
+      scene("main", [group("Background"), group("Foreground")]);
+    const legacy = () =>
+      scene("legacy", [
+        group("WEBCAM"),
+        group("Background"),
+        group("Foreground"),
+        group("Effects"),
+      ]);
+
     const scenes = [
-      scene("one", [group("First")]),
-      scene("two", [group("Second")]),
+      plain(),
+      plain(),
+      plain(),
+      plain(),
+      plain(),
+      legacy(),
+      legacy(),
+      legacy(),
     ];
-    expect(getRowLabel(scenes, 0)).toBe("First");
+    // Row 3 (the fourth one): only the three legacy Scenes have a group there.
+    expect(getRowLabel(scenes, 3)).toBe("Row 4");
+    // ...and the shared Foreground row (index 1) still gets its label.
+    expect(getRowLabel(scenes, 1)).toBe("Foreground");
   });
 
-  it("lets the first occurrence win a tie even when the later name reaches the count first", () => {
+  it("falls back to a numbered row on a tie, first majority-winner otherwise", () => {
     const scenes = [
       scene("one", [group("First")]),
       scene("two", [group("Second")]),
       scene("three", [group("Second")]),
       scene("four", [group("First")]),
     ];
-    expect(getRowLabel(scenes, 0)).toBe("First");
+    expect(getRowLabel(scenes, 0)).toBe("Row 1");
+  });
+
+  it("lets a strict majority win", () => {
+    const scenes = [
+      scene("one", [group("First")]),
+      scene("two", [group("Second")]),
+      scene("three", [group("Second")]),
+    ];
+    expect(getRowLabel(scenes, 0)).toBe("Second");
   });
 
   it("ignores empty names", () => {
     const scenes = [
       scene("one", [group("")]),
       scene("two", [group("Named")]),
-      scene("three", [group("")]),
+      scene("three", [group("Named")]),
     ];
     expect(getRowLabel(scenes, 0)).toBe("Named");
   });
@@ -186,6 +345,12 @@ describe("getRowLabel", () => {
     expect(getRowLabel([scene("one", [group("")]), scene("two", [])], 0)).toBe(
       "Row 1",
     );
+  });
+
+  it("uses the explicit row name when given", () => {
+    const scenes = [scene("one", [group("Effects"), group("Blur")])];
+    expect(getRowLabel(scenes, 0, ["webcam"])).toBe("webcam");
+    expect(getRowLabel(scenes, 1, ["", "Fog layer"])).toBe("Fog layer");
   });
 });
 
@@ -276,6 +441,26 @@ describe("pickNextRowScene", () => {
         currentSceneId: "a",
       }),
     ).toBe(staggered[1]);
+  });
+
+  it("honours named rows when choosing a candidate", () => {
+    const namedA = group("A", ["m-a"]);
+    const namedB = group("B", ["m-b"]);
+    const namedC = group("C", ["m-c"]);
+    const named = [
+      scene("a", [namedA]),
+      scene("b", [namedB]),
+      scene("c", [namedC]),
+    ];
+    // On a "B" named row only scene "b" has a matching, non-empty group.
+    expect(
+      pickNextRowScene({
+        scenes: named,
+        rowIndex: 0,
+        currentSceneId: "a",
+        rowNames: ["B"],
+      }),
+    ).toBe(named[1]);
   });
 
   it("picks randomly and excludes the current scene when there is more than one candidate", () => {

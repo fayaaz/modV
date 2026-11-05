@@ -155,7 +155,10 @@ async function getGridState() {
   return modVApp.evaluateWorker(
     async ({ galleryGroupName }) => {
       const groups = self.store.state.groups.groups
-        .filter((group) => group.name !== galleryGroupName)
+        .filter(
+          (group) =>
+            group.name !== galleryGroupName && group.transitionGhost !== true,
+        )
         .map((group) => ({
           id: group.id,
           name: group.name,
@@ -356,6 +359,100 @@ test("a row Scene apply fades in and finishes", async () => {
   await ensureUserGroup();
 });
 
+test("a row fade keeps the outgoing visuals animating", async () => {
+  const prefix = uniqueName("E2E Row Fade Motion");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const a0 = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(a0, "Counter");
+  const sceneA = await saveScene(`${prefix} A`);
+
+  await removeUserGroups();
+
+  const b0 = await createGroup(`${prefix} B0`);
+  await addModuleToGroup(b0, "Bar");
+  const sceneB = await saveScene(`${prefix} B`);
+
+  await applyScene(sceneA.id);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/updatePerformance", {
+      enabled: false,
+      transitionSeconds: 2,
+    });
+  });
+
+  const during = await modVApp.evaluateWorker(
+    async ({ sceneId }) => {
+      const nextFrame = () =>
+        new Promise((resolve) => requestAnimationFrame(resolve));
+
+      await self.store.dispatch("scenes/applySceneRow", {
+        sceneId,
+        rowIndex: 0,
+      });
+
+      const findGhost = () =>
+        self.store.state.groups.groups.find(
+          (group) => group.transitionGhost === true && group.sceneRow === 0,
+        );
+      const sample = (group) => {
+        if (!group) {
+          return null;
+        }
+
+        const module = self.store.state.modules.active[group.modules[0]];
+
+        return {
+          alpha: group.alpha,
+          counter: module && module.data && module.data.counter,
+          moduleName: module && module.$moduleName,
+        };
+      };
+
+      const before = sample(findGhost());
+
+      for (let i = 0; i < 10; i++) {
+        await nextFrame();
+      }
+
+      return { before, after: sample(findGhost()) };
+    },
+    { sceneId: sceneB.id },
+  );
+
+  expect(during.before).toBeTruthy();
+  expect(during.after).toBeTruthy();
+  expect(during.before.moduleName).toBe("Counter");
+  expect(during.after.counter).toBeGreaterThan(during.before.counter);
+  expect(during.after.alpha).toBeLessThan(during.before.alpha);
+
+  await modVApp.evaluateWorker(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Finish the fade deterministically in case the render loop is throttled.
+    for (let i = 0; i < 30; i++) {
+      await self.store.dispatch("scenes/tick", { delta: 100 });
+    }
+  });
+
+  const remaining = await modVApp.evaluateWorker(
+    () =>
+      self.store.state.groups.groups.filter(
+        (group) => group.transitionGhost === true,
+      ).length,
+  );
+
+  expect(remaining).toBe(0);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
 test("the Scenes grid marks the applied row cell as active", async () => {
   const prefix = uniqueName("E2E Grid DOM");
 
@@ -379,6 +476,189 @@ test("the Scenes grid marks the applied row cell as active", async () => {
   await expect(cell).toHaveClass(/scenes__gridCell--active/);
 
   await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("naming a row matches groups by name and reorders the layer stack", async () => {
+  const prefix = uniqueName("E2E Row Names");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const a0 = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(a0, "Ball");
+  const webcam = await createGroup("webcam");
+  await addModuleToGroup(webcam, "Bands");
+  const sceneA = await saveScene(`${prefix} A`);
+
+  await removeUserGroups();
+
+  const b0 = await createGroup(`${prefix} B0`);
+  await addModuleToGroup(b0, "Ball");
+  const bWebcam = await createGroup("WEBCAM");
+  await addModuleToGroup(bWebcam, "Bands");
+  const sceneB = await saveScene(`${prefix} B`);
+
+  await applyScene(sceneA.id);
+
+  await modVApp.evaluateWorker(
+    async ({ rowNames }) => {
+      await self.store.dispatch("scenes/setRowNames", { rowNames });
+    },
+    { rowNames: ["webcam"] },
+  );
+
+  const named = await getGridState();
+
+  // The webcam Group snaps to the named row above the other layers.
+  expect(named.groups[0].name).toBe("webcam");
+  expect(named.groups[0].sceneRow).toBe(0);
+  expect(named.groups[1].name).toBe(`${prefix} A0`);
+  expect(named.groups[1].sceneRow).toBe(1);
+
+  // Row 0 is now the webcam row; applying it across both Scenes swaps in the
+  // Scene's first webcam-named group, and scenes without one stay empty.
+  await applySceneRow(sceneB.id, 0);
+
+  const afterB = await getGridState();
+
+  expect(afterB.groups[0].name).toBe("WEBCAM");
+  expect(afterB.groups[1].name).toBe(`${prefix} A0`);
+  expect(afterB.activeRows[0].sceneId).toBe(sceneB.id);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/setRowNames", { rowNames: [] });
+  });
+});
+
+test("Ctrl+drag copies a cell's group into an empty cell of another scene", async () => {
+  // The drag goes through the UI, which shares the GPU with the rest of the
+  // suite, so give it more than the default budget.
+  test.setTimeout(60000);
+
+  const prefix = uniqueName("E2E Cell Copy");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const a0 = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(a0, "Ball");
+  const a1 = await createGroup(`${prefix} A1`);
+  await addModuleToGroup(a1, "Bands");
+  const a2 = await createGroup(`${prefix} A2`);
+  await addModuleToGroup(a2, "Ball");
+  const sceneA = await saveScene(`${prefix} A`);
+
+  await removeUserGroups();
+
+  const b0 = await createGroup(`${prefix} B0`);
+  await addModuleToGroup(b0, "Bands");
+  const sceneB = await saveScene(`${prefix} B`);
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const fromCell = `.scenes__gridCell[data-scene-id="${sceneA.id}"][data-row-index="2"]`;
+  const toCell = `.scenes__gridCell[data-scene-id="${sceneB.id}"][data-row-index="2"]`;
+
+  // The source cell holds a Group, the target cell is empty.
+  await expect(page.locator(fromCell)).not.toHaveClass(
+    /scenes__gridCell--empty/,
+  );
+  await expect(page.locator(toCell)).toHaveClass(/scenes__gridCell--empty/);
+
+  const drag = await page.evaluate(
+    ({ fromCell, toCell }) => {
+      const from = document.querySelector(fromCell);
+      const to = document.querySelector(toCell);
+      const dataTransfer = new DataTransfer();
+      const dispatch = (element, type) =>
+        element.dispatchEvent(
+          new DragEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            ctrlKey: true,
+            dataTransfer,
+          }),
+        );
+
+      dispatch(from, "dragstart");
+
+      const overEvent = new DragEvent("dragover", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: true,
+        dataTransfer,
+      });
+      to.dispatchEvent(overEvent);
+
+      dispatch(to, "drop");
+
+      return { dropAllowed: overEvent.defaultPrevented };
+    },
+    { fromCell, toCell },
+  );
+
+  // The browser only fires `drop` when dragover calls preventDefault.
+  expect(drag.dropAllowed).toBe(true);
+
+  // The drop handler dispatches to the worker asynchronously.
+  await modVApp.evaluateWorker(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+
+  const { from, to } = await modVApp.evaluateWorker(
+    async ({ fromSceneId, toSceneId }) => {
+      const scenes = self.store.state.scenes.scenes;
+
+      return {
+        from: JSON.parse(
+          JSON.stringify(scenes.find((scene) => scene.id === fromSceneId)),
+        ),
+        to: JSON.parse(
+          JSON.stringify(scenes.find((scene) => scene.id === toSceneId)),
+        ),
+      };
+    },
+    { fromSceneId: sceneA.id, toSceneId: sceneB.id },
+  );
+
+  const sourceGroup = from.groups[2];
+
+  expect(sourceGroup).toBeTruthy();
+  expect(sourceGroup.name).toBe(`${prefix} A2`);
+
+  // The empty row 2 receives the source Group verbatim; the rows above it
+  // keep their place and row 1 is left as a hole.
+  expect(to.groups).toHaveLength(3);
+  expect(to.groups[1]).toBeNull();
+  expect(to.groups[2]).toEqual(sourceGroup);
+  expect(to.groups[2].modules).toEqual(sourceGroup.modules);
+  // The copied module rides along (snapshot shape with saved props).
+  expect(to.modules[sourceGroup.modules[0]]).toEqual(
+    from.modules[sourceGroup.modules[0]],
+  );
+
+  await applyScene(sceneB.id);
+
+  const after = await getGridState();
+
+  // The hole keeps the rows aligned: the copy stays on row 2.
+  const copied = after.groups.find((group) => group.name === `${prefix} A2`);
+
+  expect(copied).toBeTruthy();
+  expect(copied.sceneRow).toBe(2);
+  expect(copied.moduleNames).toEqual(["Ball"]);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
   await removeUserGroups();
   await ensureUserGroup();
 });

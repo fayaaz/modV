@@ -110,12 +110,6 @@ export const PARTICLE_FIELD_PROPS = {
   opacity: float("Opacity", 0.8, 0, 1),
 };
 
-export const RING_OF_FIRE_PROPS = {
-  spinSpeed: float("Spin Speed", 1, 0, 4),
-  pulse: float("Pulse", 1, 0, 3),
-  glow: float("Glow", 1, 0, 3),
-};
-
 export const SPECTRUM_BARS_PROPS = {
   height: float("Bar Height", 8, 0, 20, 0.1),
   glow: float("Glow", 1, 0, 3),
@@ -308,11 +302,6 @@ export const SCENE_PROP_CONFIGS = {
     scene.particleSize = v.particleSize;
     scene.speedScale = v.speed;
     scene.opacity = v.opacity;
-  }),
-  "Point10 Ring Of Fire": defineScene(RING_OF_FIRE_PROPS, (scene, v) => {
-    scene.spinScale = v.spinSpeed;
-    scene.pulseScale = v.pulse;
-    scene.glowScale = v.glow;
   }),
   "Point10 Rolling Fire": defineScene(ROLLING_FIRE_PROPS, bindSmoke),
   "Point10 Smoke Room": defineScene(SMOKE_ROOM_PROPS, bindSmoke),
