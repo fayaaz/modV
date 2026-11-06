@@ -28,11 +28,6 @@ export default function windowHandler() {
   function configureWindow({ win, canvas, backgroundColor }) {
     win.document.body.appendChild(canvas);
     win.document.body.style.backgroundColor = backgroundColor;
-    win.addEventListener("beforeunload", (ev) => {
-      // Setting any value other than undefined here will prevent the window
-      // from closing or reloading
-      ev.returnValue = true;
-    });
 
     setSize.call(that, win);
   }

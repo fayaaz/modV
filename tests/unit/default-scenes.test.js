@@ -43,6 +43,10 @@ const filterBatch = DEFAULT_SCENES.filter(
   (scene) => scene.introducedVersion === 5,
 );
 
+const digitalBatch = DEFAULT_SCENES.filter(
+  (scene) => scene.introducedVersion === 6,
+);
+
 const FILTER_MODULES = [
   "ASCII Art",
   "CMYK Halftone",
@@ -70,8 +74,8 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 5", () => {
-    expect(DEFAULTS_VERSION).toBe(5);
+  it("bumps the defaults version to 6", () => {
+    expect(DEFAULTS_VERSION).toBe(6);
   });
 
   it("ships at least 55 default scenes with unique names", () => {
@@ -175,6 +179,123 @@ describe("default scenes", () => {
     expect(usedFilters.has("ASCII Art")).toBe(true);
   });
 
+  it("adds a version 6 Digital Crystal Tunnel scene", () => {
+    const scene = digitalBatch.find((candidate) =>
+      getModulesInGroup(candidate, "Background").includes(
+        "digital-crystal-tunnel",
+      ),
+    );
+
+    expect(scene).toBeTruthy();
+    expect(scene.name).toBe("Digital Crystal Tunnel");
+    expect(Number(scene.minSeconds)).toBeLessThan(Number(scene.maxSeconds));
+
+    for (const name of GROUP_NAMES) {
+      expect(getGroup(scene, name), name).toBeTruthy();
+    }
+  });
+
+  it("adds a version 6 MBOX Light Tunnel scene with audio reactive layers", () => {
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "MBOX Light Tunnel",
+    );
+
+    expect(scene).toBeTruthy();
+    expect(scene.introducedVersion).toBe(6);
+    expect(digitalBatch).toContain(scene);
+    expect(Number(scene.minSeconds)).toBeLessThan(Number(scene.maxSeconds));
+    expect(getModulesInGroup(scene, "Background")).toContain("MBOX3");
+    expect(getModulesInGroup(scene, "Foreground")).toContain(
+      "Point10 Light Tunnel",
+    );
+
+    const alphaLink = (scene.inputLinks || []).find(
+      (link) =>
+        link.group === "Foreground" &&
+        link.module === "Point10 Light Tunnel" &&
+        link.control === "alpha" &&
+        typeof link.feature === "string" &&
+        link.feature.length > 0,
+    );
+
+    expect(alphaLink).toBeTruthy();
+    expect(alphaLink.min).toBeLessThan(alphaLink.max);
+  });
+
+  it("drives the MBOX hue with a beat tween, scale with bass and a near-zero threshold", () => {
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "MBOX Light Tunnel",
+    );
+
+    expect(scene).toBeTruthy();
+
+    const background = getGroup(scene, "Background");
+    const mbox = (background?.modules || []).find(
+      (module) => module.name === "MBOX3",
+    );
+
+    expect(mbox).toBeTruthy();
+    expect(Number(mbox.props.dthresh)).toBeLessThanOrEqual(0.1);
+    expect(Number(mbox.props.speed)).toBeLessThanOrEqual(30);
+
+    const mboxLinks = (scene.inputLinks || []).filter(
+      (link) => link.group === "Background" && link.module === "MBOX3",
+    );
+
+    const scaleLink = mboxLinks.find((link) => link.control === "SCALE");
+
+    expect(scaleLink).toBeTruthy();
+    expect(scaleLink.source).not.toBe("tween");
+    expect(scaleLink.feature).toBe("bass");
+    expect(scaleLink.min).toBeLessThan(scaleLink.max);
+
+    const hueLink = mboxLinks.find((link) => link.control === "dhue");
+
+    expect(hueLink).toBeTruthy();
+    expect(hueLink.source).toBe("tween");
+    expect(hueLink.min).toBeLessThan(hueLink.max);
+
+    const speedLink = mboxLinks.find((link) => link.control === "speed");
+
+    expect(
+      speedLink,
+      "MBOX speed should stay constant rather than follow audio",
+    ).toBeUndefined();
+
+    const trebleHueLink = mboxLinks.find(
+      (link) => link.control === "dhue" && link.feature === "treble",
+    );
+
+    expect(trebleHueLink).toBeUndefined();
+  });
+
+  it("does not use the Kaleidoscope or Kaleidoscope Tile modules in any default scene", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).some((name) => KALEIDOSCOPE_MODULES.includes(name)),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("uses circular screen, posterize and ASCII Art filters in Effects groups", () => {
+    const effectsModules = DEFAULT_SCENES.map((scene) =>
+      getModulesInGroup(scene, "Effects"),
+    );
+
+    expect(
+      effectsModules.some((names) => names.includes("Circular Screen")),
+    ).toBe(true);
+    expect(
+      effectsModules.some(
+        (names) =>
+          names.includes("Posterize") || names.includes("Color Posterize"),
+      ),
+    ).toBe(true);
+    expect(effectsModules.some((names) => names.includes("ASCII Art"))).toBe(
+      true,
+    );
+  });
+
   it("does not use the Webcam module in any default scene", () => {
     const offenders = DEFAULT_SCENES.filter((scene) =>
       getModuleNames(scene).includes("Webcam"),
@@ -216,27 +337,6 @@ describe("default scenes", () => {
         true,
       );
     }
-  });
-
-  it("uses a kaleidoscope filter in the new batch", () => {
-    const kaleidoscopeScenes = newBatch.filter((scene) =>
-      getModuleNames(scene).some((name) => KALEIDOSCOPE_MODULES.includes(name)),
-    );
-
-    expect(kaleidoscopeScenes.length).toBeGreaterThanOrEqual(3);
-  });
-
-  it("varies the kaleidoscope sides between scenes", () => {
-    const sides = newBatch.flatMap((scene) =>
-      scene.groups
-        .flatMap((group) => group.modules || [])
-        .filter((module) => KALEIDOSCOPE_MODULES.includes(module.name))
-        .map((module) => module.props?.sides)
-        .filter((value) => typeof value === "number"),
-    );
-
-    expect(sides.length).toBeGreaterThanOrEqual(3);
-    expect(new Set(sides).size).toBeGreaterThanOrEqual(3);
   });
 
   it("uses a twirled geometric filter in the new batch", () => {
@@ -315,6 +415,21 @@ describe("default scenes", () => {
     });
     const newerBatch = DEFAULT_SCENES.filter(
       (scene) => scene.introducedVersion > 3,
+    );
+
+    expect(selected.map((scene) => scene.name)).toEqual(
+      newerBatch.map((scene) => scene.name),
+    );
+  });
+
+  it("seeds the version 6 batch for installs on version 5", () => {
+    const selected = getScenesToSeed({
+      defaultsVersion: 5,
+      seededNames: getDefaultSceneNamesUpTo(5),
+      existingNames: [],
+    });
+    const newerBatch = DEFAULT_SCENES.filter(
+      (scene) => scene.introducedVersion > 5,
     );
 
     expect(selected.map((scene) => scene.name)).toEqual(

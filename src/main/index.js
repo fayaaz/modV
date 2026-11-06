@@ -10,8 +10,10 @@ import {
 import { APP_SCHEME } from "./background-constants";
 import { createLogger, getLogDirectory } from "./logger";
 import { openFile } from "./open-file";
-import { registerSystemAudioIpc } from "./system-audio";
-import { createWindow } from "./windows";
+import { getExistingMediaManager } from "./media-manager";
+import { markQuitting, registerShutdownHandlers, runCleanup } from "./shutdown";
+import { registerSystemAudioIpc, stopActive } from "./system-audio";
+import { createWindow, windows } from "./windows";
 
 require("@electron/remote/main").initialize();
 
@@ -27,6 +29,35 @@ logger.info("modV starting", {
   platform: process.platform,
   logDirectory: getLogDirectory(),
 });
+
+// Relaunching during shutdown used to stack complete process trees, each
+// writing to the same userData directory. Only the first instance may run.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const mainWindow = windows.mainWindow;
+
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  registerShutdownHandlers({
+    getWindows: () => windows,
+    stopMediaWatcher: () => getExistingMediaManager()?.stop(),
+    stopSystemAudio: stopActive,
+  });
+}
 
 // modV's shader, gallery-shader, ISF, gallery-ISF and three renderers already
 // hold five long-lived WebGL contexts. The old cap of 6 left no room for the
@@ -59,7 +90,7 @@ app.commandLine.appendSwitch("enable-unsafe-webgpu");
 // devices, which is how the system audio is captured on Linux.
 app.commandLine.appendSwitch("allow-monitor-inputs", "true");
 
-const isDevelopment = process.env.NODE_ENV !== "production";
+const isDevelopment = !app.isPackaged;
 
 // Scheme must be registered before the app is ready
 protocol.registerSchemesAsPrivileged([
@@ -118,6 +149,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", async () => {
+  if (!hasSingleInstanceLock) {
+    return;
+  }
+
   // On macOS it's common to re-create a window in the app when the
   // dock icon is clicked and there are no other windows open.
   createWindow({ windowName: "mainWindow" });
@@ -147,6 +182,10 @@ function setupColorPickerUIMessageChannels(mainWindow, colorPickerWindow) {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.on("ready", async () => {
+  if (!hasSingleInstanceLock) {
+    return;
+  }
+
   registerSystemAudioIpc();
 
   protocol.handle(APP_SCHEME, (request) => {
@@ -272,17 +311,32 @@ app.on("ready", async () => {
   });
 });
 
-// Exit cleanly on request from parent process in development mode.
-if (isDevelopment) {
-  if (process.platform === "win32") {
-    process.on("message", (data) => {
-      if (data === "graceful-exit") {
-        app.quit();
+function handleShutdownSignal(signal) {
+  logger.info("shutdown signal received", { signal });
+  markQuitting();
+
+  void runCleanup()
+    .catch(() => {})
+    .finally(() => {
+      app.quit();
+
+      // If a stuck renderer or window prevents app.quit from completing, make
+      // sure the process still goes away.
+      const timer = setTimeout(() => process.exit(0), 1000);
+
+      if (typeof timer.unref === "function") {
+        timer.unref();
       }
     });
-  } else {
-    process.on("SIGTERM", () => {
-      app.quit();
-    });
-  }
 }
+
+if (isDevelopment && process.platform === "win32") {
+  process.on("message", (data) => {
+    if (data === "graceful-exit") {
+      handleShutdownSignal("graceful-exit");
+    }
+  });
+}
+
+process.on("SIGTERM", () => handleShutdownSignal("SIGTERM"));
+process.on("SIGINT", () => handleShutdownSignal("SIGINT"));

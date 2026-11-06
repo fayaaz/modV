@@ -1,7 +1,9 @@
+import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import {
   BLOOM,
   CAMERA,
+  CLEAR_ALPHA,
   CUBE_SIZE,
   INSTANCE_COUNT,
   PERMRAND,
@@ -10,6 +12,7 @@ import {
   buildBoxyFragmentShader,
   buildBoxyVertexShader,
   makePerm,
+  preserveBloomAlpha,
 } from "../../src/renderer/src/application/point10/scenes/Boxy.js";
 
 // Boxy renders 1000 instanced cubes with a custom shader, so the draw needs
@@ -63,6 +66,38 @@ describe("Boxy perm drive", () => {
   it("keeps permrand a stable value in [0, 1)", () => {
     expect(PERMRAND).toBeGreaterThanOrEqual(0);
     expect(PERMRAND).toBeLessThan(1);
+  });
+});
+
+describe("Boxy transparency", () => {
+  it("clears to a fully transparent background", () => {
+    expect(CLEAR_ALPHA).toBe(0);
+  });
+
+  it("adds bloom RGB while preserving the destination alpha", () => {
+    const blendMaterial = {
+      blending: THREE.NormalBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+      needsUpdate: false,
+    };
+    const bloomPass = { blendMaterial };
+
+    const result = preserveBloomAlpha(bloomPass);
+
+    expect(result).toBe(bloomPass);
+    expect(blendMaterial.blending).toBe(THREE.CustomBlending);
+    expect(blendMaterial.blendEquation).toBe(THREE.AddEquation);
+    expect(blendMaterial.blendSrc).toBe(THREE.OneFactor);
+    expect(blendMaterial.blendDst).toBe(THREE.OneFactor);
+    expect(blendMaterial.blendEquationAlpha).toBe(THREE.AddEquation);
+    expect(blendMaterial.blendSrcAlpha).toBe(THREE.ZeroFactor);
+    expect(blendMaterial.blendDstAlpha).toBe(THREE.OneFactor);
+    expect(blendMaterial.needsUpdate).toBe(true);
   });
 });
 

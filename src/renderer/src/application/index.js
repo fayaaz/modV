@@ -100,6 +100,7 @@ class ModV {
     this._imageCaptures = {};
     this._captureState = {};
     this._videoReconnectTimers = {};
+    this._shutdownStarted = false;
     this.$worker = new ModVWorker();
     this.$asyncWorker = new PromiseWorker(this.$worker);
 
@@ -219,8 +220,6 @@ class ModV {
         );
       },
     };
-
-    window.addEventListener("beforeunload", () => true);
   }
 
   async setup(canvas = document.createElement("canvas")) {
@@ -398,9 +397,7 @@ class ModV {
     ipcRenderer.on("modv-destroy", () => {
       console.log("webcontents got modv-destroy, sending onto worker");
 
-      this.$worker.postMessage({
-        type: "modv-destroy",
-      });
+      this.shutdown();
     });
 
     function messageHandler({ data: messageData }) {
@@ -423,20 +420,161 @@ class ModV {
     ipcRenderer.send("get-media-manager-state");
 
     window.addEventListener("beforeunload", () => {
-      this.$worker.postMessage({
-        type: "modv-destroy",
-      });
-      ipcRenderer.send("modv-destroy");
+      this.shutdown();
+    });
+
+    window.addEventListener("unload", () => {
+      this.shutdown({ terminateWorker: true });
     });
 
     // HMR only exists in the dev server; `import.meta.hot` is undefined in a
     // production build, so guard it instead of throwing out of setup().
     if (import.meta.hot) {
       import.meta.hot.on("vite:beforeFullReload", () => {
-        this.$worker.postMessage({
-          type: "modv-destroy",
-        });
+        this.shutdown();
       });
+    }
+  }
+
+  stopMediaCapture() {
+    const reconnectTimers = this._videoReconnectTimers || {};
+
+    for (const deviceId of Object.keys(reconnectTimers)) {
+      clearTimeout(reconnectTimers[deviceId]);
+    }
+
+    this._videoReconnectTimers = {};
+
+    for (const deviceId of Object.keys(this._captureState || {})) {
+      this._captureState[deviceId].running = false;
+    }
+
+    for (const deviceId of Object.keys(this._imageCaptures || {})) {
+      try {
+        this._imageCaptures[deviceId]?.track?.stop?.();
+      } catch (e) {
+        // The capture may already be stopped.
+      }
+
+      delete this._imageCaptures[deviceId];
+    }
+
+    for (const deviceId of Object.keys(this.videoStreams || {})) {
+      const video = this.videoStreams[deviceId];
+
+      try {
+        video?.pause?.();
+      } catch (e) {
+        // The video element may already be detached.
+      }
+
+      try {
+        if (video) {
+          video.srcObject = null;
+        }
+      } catch (e) {
+        // The video element may already be detached.
+      }
+
+      delete this.videoStreams[deviceId];
+    }
+
+    for (const deviceId of Object.keys(this.videos || {})) {
+      const { video, stream } = this.videos[deviceId] || {};
+
+      try {
+        if (video) {
+          video.src = "";
+        }
+      } catch (e) {
+        // The video element may already be detached.
+      }
+
+      for (const track of stream?.getTracks?.() || []) {
+        try {
+          track.stop();
+        } catch (e) {
+          // The track may already be stopped.
+        }
+      }
+
+      delete this.videos[deviceId];
+    }
+
+    const streams = [
+      this._audioMediaStream,
+      this._videoMediaStream,
+      this._systemAudioStream,
+    ];
+
+    for (const stream of streams) {
+      for (const track of stream?.getTracks?.() || []) {
+        try {
+          track.stop();
+        } catch (e) {
+          // The track may already be stopped.
+        }
+      }
+    }
+
+    this._audioMediaStream = null;
+    this._videoMediaStream = null;
+    this._systemAudioStream = null;
+
+    try {
+      this.meyda?.stop?.();
+    } catch (e) {
+      // The analyzer may already be stopped.
+    }
+
+    try {
+      this.systemAudioCapture?.stop?.();
+    } catch (e) {
+      // The capture may already be stopped.
+    }
+
+    try {
+      this.audioContext?.close?.();
+    } catch (e) {
+      // The context may already be closed.
+    }
+
+    this.audioContext = null;
+
+    try {
+      if (navigator.mediaDevices) {
+        navigator.mediaDevices.ondevicechange = null;
+      }
+    } catch (e) {
+      // Media devices may already be unavailable.
+    }
+  }
+
+  shutdown({ terminateWorker = false } = {}) {
+    if (!this._shutdownStarted) {
+      this._shutdownStarted = true;
+
+      try {
+        this.$worker?.postMessage({ type: "modv-destroy" });
+      } catch (e) {
+        // The worker may already be gone.
+      }
+
+      try {
+        ipcRenderer.send("modv-destroy");
+      } catch (e) {
+        // The main process may already be gone.
+      }
+
+      this.stopMediaCapture();
+    }
+
+    if (terminateWorker) {
+      try {
+        this.$worker?.terminate?.();
+      } catch (e) {
+        // The worker may already be terminated.
+      }
     }
   }
 

@@ -20,9 +20,11 @@ import DEFAULT_SCENES, {
   getScenesToSeed,
 } from "../default-scenes";
 import {
+  clampCellDwell,
   normalizePerformanceTiming,
   normalizeSceneTiming,
   normalizeTransitionDuration,
+  pickCellDwell,
   resolveSceneTiming,
 } from "../../scene-timing";
 import {
@@ -1053,7 +1055,8 @@ let legacyPhrase = createPhraseState();
 
 function getLiveRowGroups() {
   return store.state.groups.groups.filter(
-    (group) => !isGalleryGroup(group) && group.transitionGhost !== true,
+    (group) =>
+      !!group && !isGalleryGroup(group) && group.transitionGhost !== true,
   );
 }
 
@@ -1186,42 +1189,55 @@ function hasAnyRowCandidates(scenes, rowCount, rowNames) {
   return false;
 }
 
-function resetRowRuntime(rowIndex, dwell = 0) {
+function getRowTiming(rowIndex) {
+  const row = Number(rowIndex);
+  const scenesState = store.state.scenes;
+  const active = activeRows[row];
+  let scene = active
+    ? scenesState.scenes.find((item) => item.id === active.sceneId)
+    : null;
+
+  if (!scene) {
+    const group = findLiveRowGroup(row);
+
+    if (group && group.sceneId) {
+      scene =
+        scenesState.scenes.find((item) => item.id === group.sceneId) || null;
+    }
+  }
+
+  return resolveSceneTiming(scene, scenesState.performance);
+}
+
+function resetRowRuntime(rowIndex, dwell = 0, timing = null) {
+  const resolvedTiming = timing || getRowTiming(rowIndex);
+
   rowRuntime.set(Number(rowIndex), {
     dwell,
     phrase: createPhraseState(),
+    targetSeconds: pickCellDwell(resolvedTiming),
   });
 }
 
-function resetAllRowRuntime(rowCount = 0, minSeconds = 0) {
+function resetAllRowRuntime(rowCount = 0) {
   rowRuntime.clear();
 
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-    const initialDwell = rowCount > 0 ? (rowIndex / rowCount) * minSeconds : 0;
-
-    resetRowRuntime(rowIndex, initialDwell);
+    resetRowRuntime(rowIndex);
   }
 }
 
-function getRowRuntime(rowIndex, minSeconds = 0) {
+function getRowRuntime(rowIndex) {
   const row = Number(rowIndex);
   let runtime = rowRuntime.get(row);
 
   if (!runtime) {
-    const rowCount = Math.max(
-      1,
-      getRowCount(
-        store.state.scenes,
-        store.state.groups.groups,
-        store.state.scenes.performance &&
-          store.state.scenes.performance.rowNames,
-      ),
-    );
-    const initialDwell = minSeconds > 0 ? (row / rowCount) * minSeconds : 0;
+    const timing = getRowTiming(row);
 
     runtime = {
-      dwell: initialDwell,
+      dwell: 0,
       phrase: createPhraseState(),
+      targetSeconds: pickCellDwell(timing),
     };
     rowRuntime.set(row, runtime);
   }
@@ -1248,7 +1264,7 @@ function orderRowGroups() {
   const groups = store.state.groups.groups;
   const galleryGroup = groups.find(isGalleryGroup) || null;
   const ordered = groups
-    .filter((group) => !isGalleryGroup(group))
+    .filter((group) => !!group && !isGalleryGroup(group))
     .map((group, index) => ({
       group,
       index,
@@ -2402,7 +2418,11 @@ const actions = {
       clearRowTransition(row);
     }
 
-    resetRowRuntime(row, 0);
+    resetRowRuntime(
+      row,
+      0,
+      resolveSceneTiming(normalizedScene, state.performance),
+    );
 
     return { sceneId: scene.id, groupId: group.id };
   },
@@ -2425,7 +2445,7 @@ const actions = {
     await completeAllRowTransitions();
 
     const oldGroups = store.state.groups.groups.filter(
-      (group) => !isGalleryGroup(group),
+      (group) => !!group && !isGalleryGroup(group),
     );
     const oldGroupModuleIds = new Set(
       oldGroups.flatMap((group) => group.modules),
@@ -2585,16 +2605,12 @@ const actions = {
 
     commit("SET_ACTIVE_ROWS", nextActiveRows);
 
-    const performanceMinSeconds = normalizePerformanceTiming(
-      state.performance,
-    ).minSeconds;
     resetAllRowRuntime(
       getRowCount(
         state.scenes,
         store.state.groups.groups,
         state.performance.rowNames,
       ),
-      performanceMinSeconds,
     );
 
     commit("UPDATE_PERFORMANCE", { currentSceneId: scene.id });
@@ -2883,7 +2899,6 @@ const actions = {
         store.state.groups.groups,
         state.performance.rowNames,
       ),
-      normalizePerformanceTiming(state.performance).minSeconds,
     );
 
     commit("UPDATE_PERFORMANCE", { enabled });
@@ -2969,10 +2984,7 @@ const actions = {
       }
     }
 
-    resetAllRowRuntime(
-      rowCount,
-      normalizePerformanceTiming(state.performance).minSeconds,
-    );
+    resetAllRowRuntime(rowCount);
   },
 
   async stopPerformance({ commit }) {
@@ -3061,7 +3073,6 @@ const actions = {
 
     resetAllRowRuntime(
       getRowCount(state.scenes, store.state.groups.groups, normalized),
-      normalizePerformanceTiming(state.performance).minSeconds,
     );
 
     await dispatch("persistScenes");
@@ -3537,12 +3548,23 @@ const actions = {
         performance,
       );
 
+      if (!Number.isFinite(runtime.targetSeconds)) {
+        runtime.targetSeconds = pickCellDwell({ minSeconds, maxSeconds });
+      }
+
+      runtime.targetSeconds = clampCellDwell(
+        runtime.targetSeconds,
+        minSeconds,
+        maxSeconds,
+      );
+
       runtime.dwell += dt;
 
       const { advance } = shouldAdvanceRow({
         dwell: runtime.dwell,
         minSeconds,
         maxSeconds,
+        targetSeconds: runtime.targetSeconds,
         phraseFlipped: phraseUpdate.flipped,
       });
 

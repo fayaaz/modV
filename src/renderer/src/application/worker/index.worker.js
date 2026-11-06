@@ -503,11 +503,58 @@ async function start() {
     if (type === "modv-destroy") {
       console.log("worker got modv-destroy, sending onto ndi worker");
 
-      ndiWorker.addEventListener("message", () => {
-        console.log("worker got destroyed, sending onto webcontents");
-        self.postMessage({ type: "destroyed" });
-      });
-      ndiWorker.postMessage({ type: "destroy" });
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = null;
+      }
+
+      clearTimeout(scenesPersistTimer);
+      scenesPersistTimer = null;
+
+      const oscServers = (store.state.osc && store.state.osc.servers) || {};
+
+      for (const id of Object.keys(oscServers)) {
+        try {
+          oscServers[id].server?.close?.();
+        } catch (error) {
+          console.error("Could not close the OSC server", error);
+        }
+      }
+
+      let replied = false;
+      let fallbackTimer = null;
+
+      const replyDestroyed = () => {
+        if (replied) {
+          return;
+        }
+
+        replied = true;
+        clearTimeout(fallbackTimer);
+        ndiWorker.removeEventListener("message", replyDestroyed);
+
+        try {
+          self.postMessage({ type: "destroyed" });
+        } catch (error) {
+          console.error("Could not report worker destruction", error);
+        }
+      };
+
+      fallbackTimer = setTimeout(replyDestroyed, 1000);
+
+      if (typeof fallbackTimer.unref === "function") {
+        fallbackTimer.unref();
+      }
+
+      ndiWorker.addEventListener("message", replyDestroyed);
+
+      try {
+        ndiWorker.postMessage({ type: "destroy" });
+      } catch (error) {
+        console.error("Could not destroy the NDI worker", error);
+        replyDestroyed();
+      }
+
       return;
     }
 

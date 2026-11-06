@@ -273,6 +273,15 @@ describe("getRowCount", () => {
     expect(getRowCount([], liveGroups)).toBe(2);
   });
 
+  it("skips holes in a partial live Group list", () => {
+    const liveGroups = [
+      group("A", ["a"], { sceneRow: 0 }),
+      undefined,
+      group("B", ["b"], { sceneRow: 2 }),
+    ];
+    expect(getRowCount([], liveGroups)).toBe(3);
+  });
+
   it("combines scene and live group counts", () => {
     expect(
       getRowCount(
@@ -655,6 +664,93 @@ describe("shouldAdvanceRow", () => {
         maxSeconds: 10,
         phraseFlipped: true,
         random: () => 1,
+      }),
+    ).toEqual({ advance: true, musical: false, forced: true });
+  });
+
+  it("forces at the per-cell target before the maximum", () => {
+    expect(
+      shouldAdvanceRow({
+        dwell: 6,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: 6,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: true, musical: false, forced: true });
+  });
+
+  it("does not force before the per-cell target", () => {
+    expect(
+      shouldAdvanceRow({
+        dwell: 5.9,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: 6,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: false, musical: false, forced: false });
+  });
+
+  it("clamps a per-cell target above the maximum", () => {
+    expect(
+      shouldAdvanceRow({
+        dwell: 9.5,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: 20,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: false, musical: false, forced: false });
+    expect(
+      shouldAdvanceRow({
+        dwell: 10,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: 20,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: true, musical: false, forced: true });
+  });
+
+  it("clamps a per-cell target below the minimum", () => {
+    expect(
+      shouldAdvanceRow({
+        dwell: 4.9,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: 1,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: false, musical: false, forced: false });
+    expect(
+      shouldAdvanceRow({
+        dwell: 5,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: 1,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: true, musical: false, forced: true });
+  });
+
+  it("treats a missing per-cell target as the maximum", () => {
+    expect(
+      shouldAdvanceRow({
+        dwell: 9,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: undefined,
+        phraseFlipped: false,
+      }),
+    ).toEqual({ advance: false, musical: false, forced: false });
+    expect(
+      shouldAdvanceRow({
+        dwell: 10,
+        minSeconds: 5,
+        maxSeconds: 10,
+        targetSeconds: undefined,
+        phraseFlipped: false,
       }),
     ).toEqual({ advance: true, musical: false, forced: true });
   });

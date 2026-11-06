@@ -102,6 +102,22 @@ export default class MediaManager {
     await this.createWatcher();
   }
 
+  async stop() {
+    if (!this.watcher) {
+      return;
+    }
+
+    const watcher = this.watcher;
+
+    this.watcher = null;
+
+    try {
+      await watcher.close();
+    } catch (e) {
+      // The watcher may already be closing during shutdown.
+    }
+  }
+
   async reset() {
     await store.dispatch("resetAll");
     await store.dispatch("media/setMediaDirectoryPath", {

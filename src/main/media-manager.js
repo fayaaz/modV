@@ -4,6 +4,10 @@ import { setProjectNames } from "./projects";
 
 let mediaManager;
 
+export function getExistingMediaManager() {
+  return mediaManager;
+}
+
 export function getMediaManager() {
   if (!mediaManager) {
     mediaManager = new MediaManager({

@@ -25,6 +25,52 @@ function roundTenth(value) {
   return Math.round(value * 10) / 10;
 }
 
+function normalizeCellBounds(minSeconds, maxSeconds) {
+  const minValue = toFiniteNumber(minSeconds);
+  const maxValue = toFiniteNumber(maxSeconds);
+  const min =
+    minValue === null ? DEFAULT_PERFORMANCE_TIMING.minSeconds : minValue;
+  const max =
+    maxValue === null ? DEFAULT_PERFORMANCE_TIMING.maxSeconds : maxValue;
+
+  return {
+    min,
+    max: Math.max(min, max),
+  };
+}
+
+/**
+ * Picks the dwell target for a single performance cell. The target is the
+ * cell's own maximum time: it is chosen once when the cell becomes active and
+ * stays fixed until that cell changes, so rows advance independently.
+ */
+export function pickCellDwell({
+  minSeconds,
+  maxSeconds,
+  random = Math.random,
+} = {}) {
+  const { min, max } = normalizeCellBounds(minSeconds, maxSeconds);
+  const roll = Number(typeof random === "function" ? random() : Number.NaN);
+  const clampedRoll = Number.isFinite(roll)
+    ? Math.min(1, Math.max(0, roll))
+    : 0;
+
+  return clampCellDwell(min + clampedRoll * (max - min), min, max);
+}
+
+export function clampCellDwell(value, minSeconds, maxSeconds) {
+  const { min, max } = normalizeCellBounds(minSeconds, maxSeconds);
+  const numericValue = toFiniteNumber(value);
+
+  // A missing/invalid target means "no earlier deadline than the maximum",
+  // which keeps the legacy maxSeconds behaviour.
+  if (numericValue === null) {
+    return max;
+  }
+
+  return Math.min(max, Math.max(min, numericValue));
+}
+
 export function normalizeTransitionDuration(value) {
   const transition = toFiniteNumber(value);
 

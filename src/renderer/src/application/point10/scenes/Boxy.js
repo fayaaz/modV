@@ -61,6 +61,30 @@ export const CAMERA = { fov: 70, near: 0.01, far: 100 };
 // Intensity 1. UnrealBloomPass normalises radius to 0..1, hence ~0.85.
 export const BLOOM = { strength: 1, radius: 0.85, threshold: 0 };
 
+// Clear1 is (0, 0, 0, 0): Boxy composites transparently over whatever is behind
+// it, rather than over an opaque black backdrop.
+export const CLEAR_ALPHA = 0;
+
+// UnrealBloomPass blends its bloom with AdditiveBlending and premultiplied
+// alpha, which also adds the bloom RGB into the destination alpha. Boxy's
+// bloom threshold is 0, so every pixel receives bloom and the transparent
+// clear becomes an opaque veil that breaks the module's layer alpha. Add the
+// bloom RGB while preserving the destination alpha instead.
+export function preserveBloomAlpha(bloomPass) {
+  const material = bloomPass.blendMaterial;
+
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.needsUpdate = true;
+
+  return bloomPass;
+}
+
 // Expression1's per-scene `permrand`, fixed so the tunnel offset is stable
 // across reloads instead of jumping with Math.random().
 export const PERMRAND = seededRand(23, 8);
@@ -317,9 +341,10 @@ export class Boxy extends BaseScene {
     this._loadEnvironment();
 
     // Clear1 is (0, 0, 0, 0): transparent, like the preset. Boxy is a
-    // full-screen standalone scene, so modV composites it over black.
+    // full-screen standalone scene, so modV composites it transparently over
+    // the layers behind it.
     if (this.renderer) {
-      this.renderer.setClearColor(0x000000, 0);
+      this.renderer.setClearColor(0x000000, CLEAR_ALPHA);
       // Shader2 only applies _tolinear (no filmic/ACES curve), so leave the
       // renderer's tone mapping at NoToneMapping and let OutputPass do the
       // linear -> sRGB presentation step.
@@ -328,12 +353,16 @@ export class Boxy extends BaseScene {
       const size = this.renderer.getSize(new THREE.Vector2());
       this.composer = new EffectComposer(this.renderer);
       this.composer.setPixelRatio(this.renderer.getPixelRatio());
-      this.composer.addPass(new RenderPass(this.group, this.camera));
-      this._bloomPass = new UnrealBloomPass(
-        size,
-        BLOOM.strength,
-        BLOOM.radius,
-        BLOOM.threshold,
+      this.composer.addPass(
+        new RenderPass(this.group, this.camera, null, null, CLEAR_ALPHA),
+      );
+      this._bloomPass = preserveBloomAlpha(
+        new UnrealBloomPass(
+          size,
+          BLOOM.strength,
+          BLOOM.radius,
+          BLOOM.threshold,
+        ),
       );
       this.composer.addPass(this._bloomPass);
       this.composer.addPass(new OutputPass());

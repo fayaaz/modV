@@ -1,4 +1,4 @@
-import { app, ipcMain } from "electron";
+import { ipcMain } from "electron";
 import { createLogger } from "./logger";
 import {
   resolveDefaultSink,
@@ -11,7 +11,7 @@ const START_TIMEOUT_MS = 3000;
 let registered = false;
 let active = null;
 
-function stopActive() {
+export function stopActive() {
   if (!active) {
     return;
   }
@@ -51,9 +51,6 @@ export function registerSystemAudioIpc() {
   }
 
   registered = true;
-
-  app.on("before-quit", stopActive);
-  app.on("will-quit", stopActive);
 
   ipcMain.handle("system-audio:start", async (event) => {
     if (process.platform !== "linux") {

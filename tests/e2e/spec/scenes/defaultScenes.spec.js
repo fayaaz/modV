@@ -13,7 +13,6 @@ const REQUIRED_ISF_FILTERS = [
   "VVMotionBlur 3.0",
   "Vignette",
   "Hue-Saturation",
-  "Kaleidoscope",
   "Mirror",
   "Slit Scan",
 ];
@@ -144,13 +143,13 @@ test("uses a spread of registered ISF filters in Effects groups", async () => {
   ).toBe(true);
 });
 
-test("ships a version 3 batch of glitch, kaleidoscope and twirl scenes", async () => {
+test("ships a version 3 batch of glitch and twirl scenes", async () => {
   const registered = await modVApp.evaluateWorkerState("modules.registered");
   const newBatch = DEFAULT_SCENES.filter(
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(5);
+  expect(DEFAULTS_VERSION).toBe(6);
   expect(newBatch.length).toBeGreaterThanOrEqual(10);
 
   for (const scene of newBatch) {
@@ -173,14 +172,10 @@ test("ships a version 3 batch of glitch, kaleidoscope and twirl scenes", async (
 
   expect(audioReactive.length).toBe(AUDIO_GLITCH_MODULES.length);
 
-  const kaleidoscopeScenes = newBatch.filter((scene) =>
-    getModuleNames(scene).some((name) => KALEIDOSCOPE_MODULES.includes(name)),
-  );
   const twirlScenes = newBatch.filter((scene) =>
     getModuleNames(scene).some((name) => TWIRL_MODULES.includes(name)),
   );
 
-  expect(kaleidoscopeScenes.length).toBeGreaterThanOrEqual(3);
   expect(twirlScenes.length).toBeGreaterThanOrEqual(3);
 
   const foregroundOnly = newBatch.filter((scene) => {
@@ -324,6 +319,115 @@ test("version 5 scenes use a varied filter batch with ASCII Art", () => {
 
   expect(usedFilters.size).toBeGreaterThanOrEqual(8);
   expect(usedFilters.has("ASCII Art")).toBe(true);
+});
+
+test("version 6 ships the Digital Crystal Tunnel scene", () => {
+  const digitalBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 6,
+  );
+  const scene = digitalBatch.find(
+    (candidate) => candidate.name === "Digital Crystal Tunnel",
+  );
+
+  expect(scene).toBeTruthy();
+  expect(getGroupModules(scene, "Background")).toContain(
+    "digital-crystal-tunnel",
+  );
+  expect(scene.groups.map((group) => group.name)).toEqual(
+    expect.arrayContaining(GROUP_NAMES),
+  );
+});
+
+test("version 6 ships the MBOX Light Tunnel scene with audio reactive layers", async () => {
+  const registered = await modVApp.evaluateWorkerState("modules.registered");
+  const digitalBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 6,
+  );
+  const scene = digitalBatch.find(
+    (candidate) => candidate.name === "MBOX Light Tunnel",
+  );
+
+  expect(scene).toBeTruthy();
+  expect(registered.MBOX3).toBeDefined();
+  expect(registered["Point10 Light Tunnel"]).toBeDefined();
+  expect(getGroupModules(scene, "Background")).toContain("MBOX3");
+  expect(getGroupModules(scene, "Foreground")).toContain(
+    "Point10 Light Tunnel",
+  );
+
+  const alphaLink = (scene.inputLinks || []).find(
+    (link) =>
+      link.group === "Foreground" &&
+      link.module === "Point10 Light Tunnel" &&
+      link.control === "alpha" &&
+      typeof link.feature === "string",
+  );
+  const backgroundLink = (scene.inputLinks || []).find(
+    (link) =>
+      link.group === "Background" &&
+      link.module === "MBOX3" &&
+      typeof link.feature === "string",
+  );
+
+  expect(alphaLink, "foreground alpha should follow music").toBeTruthy();
+  expect(backgroundLink, "MBOX background should follow music").toBeTruthy();
+});
+
+test("MBOX Light Tunnel seeds a BPM hue tween, bass scale and constant speed", async () => {
+  const scenes = await modVApp.evaluateWorkerState("scenes.scenes");
+  const scene = scenes.find(
+    (candidate) => candidate.name === "MBOX Light Tunnel",
+  );
+
+  expect(scene).toBeTruthy();
+
+  const modules = Object.values(scene.modules || {});
+  const mbox = modules.find(
+    (module) => (module.$moduleName || module.meta?.name) === "MBOX3",
+  );
+
+  expect(mbox).toBeTruthy();
+
+  const links = Object.values((scene.inputs && scene.inputs.inputLinks) || {});
+  const tweens = Object.values(scene.tweens || {});
+  const dhueId = mbox.$props.dhue.id;
+  const scaleId = mbox.$props.SCALE.id;
+  const speedId = mbox.$props.speed.id;
+
+  const hueLink = links.find((link) => link.id === dhueId);
+
+  expect(hueLink?.source).toBe("tween");
+  expect(
+    tweens.find((tween) => tween.id === dhueId)?.useBpm,
+    "hue should be driven by a BPM tween",
+  ).toBe(true);
+
+  const scaleLink = links.find((link) => link.id === scaleId);
+
+  expect(scaleLink?.source).toBe("meyda");
+  expect(scaleLink.args[0]).toBe("bass");
+
+  expect(
+    links.find((link) => link.id === speedId),
+    "speed should stay constant rather than follow audio",
+  ).toBeUndefined();
+  expect(Number(mbox.props.dthresh)).toBeLessThanOrEqual(0.1);
+});
+
+test("no default scene uses the Kaleidoscope or Kaleidoscope Tile module", () => {
+  const offenders = DEFAULT_SCENES.filter((scene) =>
+    getModuleNames(scene).some((name) => KALEIDOSCOPE_MODULES.includes(name)),
+  );
+
+  expect(offenders.map((scene) => scene.name)).toEqual([]);
+});
+
+test("uses Circular Screen in an Effects group", () => {
+  const scenesWithCircularScreen = DEFAULT_SCENES.filter((scene) =>
+    getEffectsModuleNames(scene).includes("Circular Screen"),
+  );
+
+  expect(scenesWithCircularScreen.length).toBeGreaterThanOrEqual(1);
 });
 
 test("no default scene uses the Webcam module", () => {

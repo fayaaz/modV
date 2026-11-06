@@ -11,10 +11,78 @@ import { setProjectNames, setCurrentProject } from "./projects";
 import { closeWindow, createWindow, windows } from "./windows";
 import { updateMenu } from "./menu-bar";
 import { getMediaManager } from "./media-manager";
+import { isQuitting, markQuitting, runCleanup, withTimeout } from "./shutdown";
 
-const isDevelopment = process.env.NODE_ENV === "development";
+const isDevelopment = !app.isPackaged;
 const isTest = process.env.CI === "e2e";
 let modVReady = false;
+let destroyedListener = null;
+let mainWindowClosing = false;
+
+function waitForRendererDestroyed(timeoutMs = 1500) {
+  if (destroyedListener) {
+    ipcMain.removeListener("destroyed", destroyedListener);
+    destroyedListener = null;
+  }
+
+  let resolveDestroyed;
+  const destroyed = new Promise((resolve) => {
+    resolveDestroyed = resolve;
+  });
+
+  const listener = () => resolveDestroyed();
+
+  destroyedListener = listener;
+  ipcMain.on("destroyed", listener);
+
+  return withTimeout(destroyed, timeoutMs).finally(() => {
+    ipcMain.removeListener("destroyed", listener);
+
+    if (destroyedListener === listener) {
+      destroyedListener = null;
+    }
+  });
+}
+
+async function closeMainWindow(window) {
+  // 0 because this is the position of the buttons in the dialog's buttons array
+  let shouldQuit = 0;
+
+  if (!isDevelopment && !isTest) {
+    const { response } = await dialog.showMessageBox(window, {
+      type: "question",
+      buttons: ["Yes", "No"],
+      message: "modV",
+      detail: "Are you sure you want to quit?",
+    });
+
+    shouldQuit = response;
+  }
+
+  if (shouldQuit !== 0) {
+    mainWindowClosing = false;
+    return;
+  }
+
+  markQuitting();
+
+  console.log("main sending webcontents modv-destroy");
+
+  try {
+    if (!window.isDestroyed()) {
+      window.webContents.send("modv-destroy");
+    }
+  } catch (e) {
+    // The renderer may already be gone.
+  }
+
+  await waitForRendererDestroyed(1500);
+  await runCleanup();
+
+  // Let before-quit/will-quit run so the shutdown coordinator and the audio
+  // cleanup can finish. The coordinator's watchdog force-exits if they hang.
+  app.quit();
+}
 
 const windowPrefs = {
   colorPicker: {
@@ -36,6 +104,10 @@ const windowPrefs = {
     unique: true,
     create(window) {
       window.on("close", (e) => {
+        if (isQuitting()) {
+          return;
+        }
+
         e.preventDefault();
 
         window.hide();
@@ -103,7 +175,6 @@ const windowPrefs = {
             event.newGuest = new BrowserWindow({
               ...options,
               autoHideMenuBar: true,
-              closable: false,
               enableLargerThanScreen: true,
               title: "",
             });
@@ -274,40 +345,22 @@ const windowPrefs = {
         }
       });
 
-      window.on("close", async (e) => {
-        // 0 because this is the position of the buttons
-        // in the dialog's buttons array
-        let shouldQuit = 0;
-
-        if (!isDevelopment && !isTest) {
-          const { response } = await dialog.showMessageBox(window, {
-            type: "question",
-            buttons: ["Yes", "No"],
-            message: "modV",
-            detail: "Are you sure you want to quit?",
-          });
-
-          shouldQuit = response;
+      window.on("close", (e) => {
+        if (isQuitting()) {
+          return;
         }
 
-        if (shouldQuit === 0) {
-          console.log("main sending webcontents modv-destroy");
-          const workerDestruction = new Promise((resolve) => {
-            ipcMain.on("destroyed", resolve);
-          });
+        // Block the close synchronously, before any await. The async path
+        // either leaves the window open (No) or quits the app explicitly.
+        e.preventDefault();
 
-          window.webContents.send("modv-destroy");
-
-          await workerDestruction;
-
-          if (!isDevelopment && !isTest) {
-            e.preventDefault();
-            // Use .exit instead of .quit to prevent close event firing again.
-            // Usually .quit would be preferable, but since we only have one
-            //   instance of the main window we can just exit.
-            app.exit();
-          }
+        if (mainWindowClosing) {
+          return;
         }
+
+        mainWindowClosing = true;
+
+        void closeMainWindow(window);
       });
 
       // Check for updates

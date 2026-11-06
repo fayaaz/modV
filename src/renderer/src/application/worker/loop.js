@@ -478,11 +478,14 @@ async function loop(delta, features, fftOutput) {
       main.canvas.height,
     );
   } else {
-    // minus one here to skip over the gallery group
-    for (let i = 0; i < groupsLength - 1; ++i) {
+    // Skip the Gallery Group by identity rather than assuming it is always the
+    // last entry: a layout without the Gallery panel has no Gallery Group, and
+    // blindly dropping the last render-order entry would silently skip the
+    // final performance row (usually Effects).
+    for (let i = 0; i < groupsLength; ++i) {
       const group = groups[groupIndexRenderOrder[i]];
 
-      if (!group) {
+      if (!group || group.name === constants.GALLERY_GROUP_NAME) {
         continue;
       }
 

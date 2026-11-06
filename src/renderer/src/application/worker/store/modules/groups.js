@@ -245,9 +245,9 @@ const actions = {
   },
 
   orderByIds({ commit }, { ids }) {
-    const newGroups = ids.map((id) => {
-      return state.groups.find((group) => group.id === id);
-    });
+    const newGroups = ids
+      .map((id) => state.groups.find((group) => group.id === id))
+      .filter(Boolean);
 
     commit("REPLACE_GROUPS", { groups: newGroups });
   },
@@ -413,9 +413,16 @@ const mutations = {
     }
 
     if (!hasWrittenGalleryId) {
-      writeTo.groups.push(
-        oldGroups.find((group) => group.name === constants.GALLERY_GROUP_NAME),
+      const galleryGroup = oldGroups.find(
+        (group) => group.name === constants.GALLERY_GROUP_NAME,
       );
+
+      // The Gallery panel can be absent (e.g. a saved layout without it), in
+      // which case there is no Gallery Group to preserve. Never push
+      // `undefined` into the live Group list.
+      if (galleryGroup) {
+        writeTo.groups.push(galleryGroup);
+      }
     }
   },
 

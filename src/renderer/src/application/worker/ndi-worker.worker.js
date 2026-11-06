@@ -71,8 +71,12 @@ const fourCC = {
 // appending the date. Also better for memory as somewhere a reference is kept
 // to the old sender.
 self.onclose = function () {
-  if (sender) {
-    sender.destroy();
+  try {
+    if (sender) {
+      sender.destroy();
+    }
+  } catch (e) {
+    console.error("NDI cleanup failed", e);
   }
 };
 
@@ -82,14 +86,32 @@ self.onmessage = async function ({ data: { type, payload } }) {
       "ndi worker got modv-destroy, doing that and replying destroyed",
     );
 
-    if (senderPromise) {
-      await senderPromise;
+    try {
+      if (senderPromise) {
+        await senderPromise.catch(() => {});
+      }
+
+      if (sender && typeof sender.destroy === "function") {
+        await sender.destroy();
+      }
+    } catch (e) {
+      console.error("NDI destroy failed", e);
+    } finally {
+      sender = null;
+
+      try {
+        self.postMessage("destroyed");
+      } catch (e) {
+        // The worker may already be closing.
+      }
+
+      try {
+        self.close();
+      } catch (e) {
+        // The worker may already be closing.
+      }
     }
 
-    await sender.destroy();
-    self.postMessage("destroyed");
-    sender = null;
-    self.close();
     return;
   }
 

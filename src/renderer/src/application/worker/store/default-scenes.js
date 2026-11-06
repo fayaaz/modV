@@ -15,11 +15,11 @@
 //
 // `introducedVersion` lets existing installs receive only the Scenes added
 // since their last seeding pass. Version 1 is the original six Scenes,
-// version 2 the second batch, version 3 the glitch/Kaleidoscope batch,
-// version 4 the varied Point10 scene batch and version 5 the ASCII/filter
-// variety batch.
+// version 2 the second batch, version 3 the glitch/twirl batch,
+// version 4 the varied Point10 scene batch, version 5 the ASCII/filter
+// variety batch and version 6 the new digital scene batch.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 5;
+export const DEFAULTS_VERSION = 6;
 
 const sceneKey = (name) =>
   String(name || "")
@@ -571,9 +571,10 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope",
+            name: "Mirror",
             props: {
-              sides: 6,
+              horizontal: true,
+              vertical: false,
             },
           },
           {
@@ -1478,9 +1479,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope",
+            name: "Twirl",
             props: {
-              sides: 8,
+              radius: 0.8,
+              amount: 2.6,
+              center: [0.5, 0.5],
             },
           },
           {
@@ -1541,12 +1544,9 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope Tile",
+            name: "Color Posterize",
             props: {
-              size: 0.6,
-              sides: 12,
-              rotation: 0.125,
-              angle: 0.05,
+              levels: 10,
             },
           },
           {
@@ -1607,9 +1607,10 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope",
+            name: "Mirror",
             props: {
-              sides: 5,
+              horizontal: true,
+              vertical: true,
             },
           },
           {
@@ -1927,12 +1928,13 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope Tile",
+            name: "Circular Screen",
             props: {
-              size: 0.45,
-              sides: 8,
-              rotation: 0.2,
-              angle: 0.1,
+              sharpness: 4,
+              offset: 0.15,
+              scale: 1.25,
+              colorize: 0.55,
+              center: [0.5, 0.5],
             },
           },
           {
@@ -2068,9 +2070,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope",
+            name: "Radial Replicate",
             props: {
-              sides: 10,
+              numberOfDivisions: 6,
+              postRotateAngle: 15,
+              preRotateAngle: -10,
             },
           },
           {
@@ -2128,12 +2132,9 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope Tile",
+            name: "ASCII Art",
             props: {
-              size: 0.7,
-              sides: 5,
-              rotation: 0.05,
-              angle: 0.15,
+              amount: 0.02,
             },
           },
           {
@@ -2350,9 +2351,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope",
+            name: "Twirl",
             props: {
-              sides: 7,
+              radius: 0.75,
+              amount: -2.4,
+              center: [0.5, 0.5],
             },
           },
           {
@@ -3166,12 +3169,10 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope Tile",
+            name: "Posterize",
             props: {
-              size: 0.55,
-              sides: 10,
-              rotation: 0.15,
-              angle: 0.08,
+              gamma: 1.2,
+              numColors: 7,
             },
           },
           {
@@ -3412,9 +3413,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Kaleidoscope",
+            name: "Twirl",
             props: {
-              sides: 12,
+              radius: 1,
+              amount: 3.2,
+              center: [0.5, 0.5],
             },
           },
           {
@@ -4214,6 +4217,194 @@ const DEFAULT_SCENES = [
         feature: "bass",
         min: 0.2,
         max: 0.85,
+      },
+    ],
+  },
+
+  {
+    name: "Digital Crystal Tunnel",
+    introducedVersion: 6,
+    minSeconds: 9,
+    maxSeconds: 24,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "digital-crystal-tunnel",
+            props: {
+              modifier: 1.25,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Geometric Tunnel",
+            props: {
+              gain: 1.2,
+              bassGain: 1.4,
+              midGain: 1.1,
+              smoothing: 0.08,
+            },
+            meta: { alpha: 0.55, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Chromatic Abberation",
+            props: {
+              rOffset: 1,
+              gOffset: 1.01,
+              bOffset: 1.02,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 5,
+              intensity: 0.45,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Point10 Geometric Tunnel",
+        control: "alpha",
+        feature: "treble",
+        min: 0.2,
+        max: 0.8,
+      },
+    ],
+  },
+
+  {
+    name: "MBOX Light Tunnel",
+    introducedVersion: 6,
+    minSeconds: 10,
+    maxSeconds: 28,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "MBOX3",
+            props: {
+              SCALE: -1.8,
+              // Near zero keeps the fractal threshold sensitive to the shape
+              // changes instead of only the loudest bass hits.
+              dthresh: 0.05,
+              fixedRad2: 2,
+              foldingLimit: 1.1,
+              minRad2: 0.6,
+              dhue: 0.25,
+              // A constant, calmer speed: linking this to bass made the
+              // fractal race through its detail and look twitchy.
+              speed: 24,
+              rotation: 0,
+              e0: 3.2,
+              x: 1,
+              y: 0,
+              z: 0,
+              type: 0,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Light Tunnel",
+            props: {
+              scrollSpeed: 0.9,
+              glow: 1.2,
+              bloom: 1,
+              gain: 1,
+              bassGain: 1.05,
+              trebleGain: 0.6,
+              smoothing: 0.35,
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 6,
+              intensity: 0.5,
+            },
+          },
+          {
+            name: "Vignette",
+            props: {
+              intensity: 18,
+              extension: 0.3,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Point10 Light Tunnel",
+        control: "alpha",
+        feature: "bass",
+        min: 0.35,
+        max: 0.75,
+      },
+      {
+        group: "Background",
+        module: "MBOX3",
+        control: "SCALE",
+        feature: "bass",
+        min: -2.6,
+        max: -1,
+      },
+      {
+        group: "Background",
+        module: "MBOX3",
+        control: "dhue",
+        source: "tween",
+        min: 0.1,
+        max: 0.9,
       },
     ],
   },

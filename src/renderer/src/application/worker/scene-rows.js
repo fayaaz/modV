@@ -1,5 +1,6 @@
 import constants from "../constants";
 import { switchChance } from "./phrase-detector.js";
+import { clampCellDwell } from "./scene-timing.js";
 
 const isGalleryGroup = (group) =>
   !!group && group.name === constants.GALLERY_GROUP_NAME;
@@ -257,7 +258,8 @@ export const getRowCount = (scenes, liveGroups = [], rowNames) => {
   for (let i = 0, len = liveList.length; i < len; i++) {
     const group = liveList[i];
 
-    if (isGalleryGroup(group) || group.transitionGhost === true) {
+    // A corrupted/partial Group list must not take the render loop down.
+    if (!group || isGalleryGroup(group) || group.transitionGhost === true) {
       continue;
     }
 
@@ -368,10 +370,18 @@ export const shouldAdvanceRow = ({
   dwell,
   minSeconds,
   maxSeconds,
+  targetSeconds,
   phraseFlipped,
   random = Math.random,
 }) => {
-  const forced = dwell >= maxSeconds;
+  const deadline = clampCellDwell(
+    targetSeconds === undefined || targetSeconds === null
+      ? maxSeconds
+      : targetSeconds,
+    minSeconds,
+    maxSeconds,
+  );
+  const forced = dwell >= deadline;
   const musical =
     !!phraseFlipped && random() < switchChance(dwell, minSeconds, maxSeconds);
 

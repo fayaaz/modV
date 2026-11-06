@@ -52,7 +52,7 @@
 
       <c span="1..">
         <grid columns="6">
-          <c span="2">Default min scene time</c>
+          <c span="2">Default min cell time</c>
           <c span="4">
             <Number
               v-model="minSeconds"
@@ -66,7 +66,7 @@
 
       <c span="1..">
         <grid columns="6">
-          <c span="2">Default max scene time</c>
+          <c span="2">Default max cell time</c>
           <c span="4">
             <Number
               v-model="maxSeconds"
@@ -319,7 +319,7 @@
               <Button
                 v-if="scene.timingOverride"
                 class="light scene__defaultsButton"
-                title="Use the default scene times"
+                title="Use the default cell times"
                 @click="resetSceneTiming(scene)"
               >
                 Defaults
@@ -386,7 +386,7 @@ export default {
     return {
       iVTitle: "Scenes",
       iVBody:
-        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. The grid shows Scenes as columns and Group layers as rows: click a column header to apply a whole Scene, or a cell to swap just that row's layer. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. Ctrl-drag a grid cell onto another Scene to copy its Group exactly. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
+        "Scenes are full snapshots of the app: every Group, Module, Input Link, Expression, Tween and MIDI device is saved using the same JSON format as a preset. The grid shows Scenes as columns and Group layers as rows: click a column header to apply a whole Scene, or a cell to swap just that row's layer. Performance mode runs through the enabled Scenes, in order or randomly, switching on musical phrase changes detected from the bass audio band and crossfading the Groups between Scenes. Each cell independently waits a random time between the default min and max cell times before it advances, so rows change on their own schedule rather than all at once. Ctrl-drag a grid cell onto another Scene to copy its Group exactly. A Scene JSON can be opened like a preset, and all Scenes can be exported and imported as a playlist JSON.",
       newSceneName: "",
       editingSceneId: null,
       localSceneName: "",
