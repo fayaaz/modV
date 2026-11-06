@@ -1,3 +1,5 @@
+import { selectWebcamSource } from "../../../media-inputs";
+
 export default {
   meta: {
     type: "2d",
@@ -25,25 +27,32 @@ export default {
       type: "bool",
       default: true,
     },
+
+    camera: {
+      type: "int",
+      label: "Camera",
+      min: 1,
+      max: 8,
+      default: 1,
+    },
   },
 
-  draw({
-    canvas,
-    context,
-    video: { canvas: video } = { canvas: null },
-    props,
-  }) {
-    const { position, scale, imageSmoothing } = props;
-    if (!video) {
+  draw({ canvas, context, video, videos = [], props }) {
+    const { position, scale, imageSmoothing, camera } = props;
+    const source = selectWebcamSource(videos, camera, video);
+    const videoSource = source?.canvas || source;
+
+    if (!videoSource) {
       return;
     }
-    const { width: videoWidth, height: videoHeight } = video;
+
+    const { width: videoWidth, height: videoHeight } = videoSource;
     const { width, height } = canvas;
 
     context.imageSmoothingEnabled = imageSmoothing;
 
     context.drawImage(
-      video,
+      videoSource,
       width * position[0] - (videoWidth * scale) / 2,
       height * (1 - position[1]) - (videoHeight * scale) / 2,
       videoWidth * scale,

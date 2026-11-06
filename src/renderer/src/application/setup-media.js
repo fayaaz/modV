@@ -2,6 +2,7 @@ import Meyda from "meyda";
 import constants from "./constants";
 import { createLogger } from "./logger";
 import { isSystemAudioSource } from "./system-audio";
+import { shouldReconnectVideoCapture } from "./media-inputs";
 import { buildVideoOptions } from "./video-capabilities";
 
 const logger = createLogger("renderer:setup-media");
@@ -119,10 +120,42 @@ async function setupMedia({
   }
 
   // For video, do not stop existing streams when adding a new device
-  // If the requested video device already exists, short-circuit
+  // If the requested video device already exists and its track is live,
+  // short-circuit. A capture whose track has ended (camera unplugged) is
+  // torn down so a fresh getUserMedia stream can be acquired below.
   if (videoId && this._imageCaptures && this._imageCaptures[videoSourceId]) {
-    mediaDeviceManager.selectVideoDevice(videoSourceId);
-    return [undefined, undefined];
+    const existingCapture = this._imageCaptures[videoSourceId];
+
+    if (!shouldReconnectVideoCapture(existingCapture)) {
+      mediaDeviceManager.selectVideoDevice(videoSourceId);
+      return [undefined, undefined];
+    }
+
+    delete this._imageCaptures[videoSourceId];
+
+    try {
+      existingCapture.track?.stop?.();
+    } catch (e) {
+      // The track may already be stopped
+    }
+
+    const staleVideoStream = this.videoStreams?.[videoSourceId];
+
+    if (staleVideoStream) {
+      try {
+        staleVideoStream.pause();
+      } catch (e) {
+        // Ignore
+      }
+
+      try {
+        staleVideoStream.srcObject = null;
+      } catch (e) {
+        // Ignore
+      }
+
+      delete this.videoStreams[videoSourceId];
+    }
   }
 
   for (let i = 0, len = streams.length; i < len; i++) {
@@ -168,6 +201,18 @@ async function setupMedia({
       // Store ImageCapture per device
       if (!this._imageCaptures) this._imageCaptures = {};
       this._imageCaptures[videoSourceId] = new ImageCapture(track);
+
+      // Re-open the camera if it is unplugged and plugged back in.
+      try {
+        track.addEventListener("ended", () =>
+          this.scheduleVideoReconnect?.(videoSourceId),
+        );
+      } catch (e) {
+        logger.warn("could not watch the camera for disconnects", {
+          deviceId: videoSourceId,
+          message: e?.message,
+        });
+      }
 
       // Report back what the device actually gave us
       if (typeof track.getSettings === "function") {

@@ -36,10 +36,25 @@ async function loop(delta, features, fftOutput) {
     modules: { active, registered },
     groups: { groups },
     inputs: { inputs, inputLinks },
-    outputs: { main, debug, debugContext, auxillary, webcam: video },
+    outputs: {
+      main,
+      debug,
+      debugContext,
+      auxillary,
+      webcam: video,
+      webcams: webcamOutputs,
+    },
+    mediaStream,
     renderers,
     windows,
   } = store.state;
+
+  const selectedVideoSources =
+    (mediaStream && mediaStream.selectedVideoSources) || [];
+  const orderedWebcams = selectedVideoSources
+    .map((id) => webcamOutputs[id])
+    .filter(Boolean);
+  const webcams = orderedWebcams.length ? orderedWebcams : video ? [video] : [];
 
   const groupIndexRenderOrder = store.getters["groups/groupIndexRenderOrder"];
 
@@ -351,7 +366,8 @@ async function loop(delta, features, fftOutput) {
         moduleId: module.$id,
         features,
         meyda,
-        video,
+        video: webcams[0] || video,
+        videos: webcams,
         props,
         data: moduleData,
         pipeline,

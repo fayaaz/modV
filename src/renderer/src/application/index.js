@@ -14,7 +14,16 @@ import {
 import { AudioBands, isBandFeature } from "./audio-bands";
 import { createLogger } from "./logger";
 import MediaDeviceManager from "./media-device-manager";
-import { SystemAudioCapture } from "./system-audio";
+import {
+  SystemAudioCapture,
+  SYSTEM_AUDIO_SOURCE_ID,
+  isSystemAudioSource,
+} from "./system-audio";
+import {
+  restoreAudioSource,
+  restoreVideoSources,
+  shouldReconnectVideoCapture,
+} from "./media-inputs";
 import setupBeatDetektor from "./setup-beat-detektor";
 import setupMidi from "./setup-midi";
 import store from "./worker/store";
@@ -90,6 +99,7 @@ class ModV {
     // Initialize capture structures
     this._imageCaptures = {};
     this._captureState = {};
+    this._videoReconnectTimers = {};
     this.$worker = new ModVWorker();
     this.$asyncWorker = new PromiseWorker(this.$worker);
 
@@ -214,41 +224,116 @@ class ModV {
     this.enumerateFonts();
 
     try {
-      // The selected cameras are persisted per device; capture them before
-      // setupMedia enumerates devices so no default camera is opened instead.
+      // The selected cameras and audio input are persisted; capture them
+      // before setupMedia enumerates devices so no default camera is opened
+      // instead.
       const savedSelection = [
-        ...(this.store.state.mediaStream.selectedVideoSources || []),
+        ...(this._store.state.mediaStream.selectedVideoSources || []),
       ];
+      const savedAudio = this._store.state.mediaStream.currentAudioSource;
+
+      const enumerated = await this.mediaDeviceManager.enumerateDevices();
+
+      let restoredAudioId;
+      let restoredAudioStream;
+      let restoredSystemAudio = null;
+
+      if (savedAudio) {
+        const restoredAudio = restoreAudioSource(
+          savedAudio,
+          enumerated.audio,
+          SYSTEM_AUDIO_SOURCE_ID,
+        );
+
+        if (restoredAudio && isSystemAudioSource(restoredAudio)) {
+          // On Linux the system audio is a silent PulseAudio/PipeWire monitor,
+          // so it is safe to start again automatically. On macOS/Windows
+          // auto-starting would open the display picker at launch.
+          if (window.remote?.process?.platform === "linux") {
+            try {
+              const captured = await this.systemAudioCapture.capture();
+
+              restoredSystemAudio = captured;
+              restoredAudioId = restoredAudio;
+              restoredAudioStream = captured.stream;
+            } catch (e) {
+              logger.warn("could not restore the system audio input", {
+                error: e?.message || String(e),
+              });
+
+              this.setSystemAudioState({
+                supported: true,
+                active: false,
+                label: null,
+                error: e?.message || String(e),
+              });
+            }
+          } else {
+            logger.info(
+              "not restoring the system audio input on this platform",
+              { platform: window.remote?.process?.platform },
+            );
+
+            this.setSystemAudioState({
+              active: false,
+              label: null,
+              error: null,
+            });
+          }
+        } else if (restoredAudio) {
+          restoredAudioId = restoredAudio;
+        }
+      }
 
       await this.setupMedia({
+        audioId: restoredAudioId,
+        audioStream: restoredAudioStream,
         useDefaultDevices: true,
         useDefaultVideoDevice: false,
       });
 
-      const available = new Set(
-        (this.mediaDeviceManager.videoSources || []).map((d) => d.deviceId),
-      );
-      const selected = savedSelection.filter((deviceId) =>
-        available.has(deviceId),
-      );
+      if (restoredSystemAudio) {
+        this.setSystemAudioState({
+          supported: true,
+          active: true,
+          label: restoredSystemAudio.label,
+          error: null,
+        });
 
-      if (selected.length !== savedSelection.length) {
-        this._store.commit("mediaStream/SET_SELECTED_VIDEO_SOURCES", {
-          videoIds: selected,
+        logger.info("restored the system audio input", {
+          backend: restoredSystemAudio.backend,
+          label: restoredSystemAudio.label,
         });
       }
 
+      // Only the cameras that are currently present are opened, but the
+      // persisted selection keeps cameras that are temporarily missing so
+      // their index stays stable and they return after a replug.
+      const selected = restoreVideoSources(savedSelection, enumerated.video);
+      const videoPayload = { videoIds: savedSelection };
+
+      this.store.commit("mediaStream/SET_SELECTED_VIDEO_SOURCES", videoPayload);
+      this._store.commit(
+        "mediaStream/SET_SELECTED_VIDEO_SOURCES",
+        videoPayload,
+      );
+
       for (const deviceId of selected) {
         // setupMedia picks up the per-device resolution / frame rate itself
-        this.setupMedia({ videoId: deviceId }).catch(() => {});
+        this.setupMedia({ videoId: deviceId }).catch((e) => {
+          logger.warn("could not open the saved camera", {
+            deviceId,
+            error: e?.message || String(e),
+          });
+        });
       }
     } catch (e) {
       console.error(e);
     }
 
     // listen to mediastream device changes
-    navigator.mediaDevices.ondevicechange = () => {
-      this.mediaDeviceManager.enumerateDevices();
+    navigator.mediaDevices.ondevicechange = async () => {
+      await this.refreshVideoInputs();
     };
 
     try {
@@ -422,6 +507,12 @@ class ModV {
         capture.track.readyState !== "live" ||
         capture.track.muted
       ) {
+        // The capture may be gone because the camera was unplugged. Ask for a
+        // reconnect before trying again on the next animation frame.
+        if (shouldReconnectVideoCapture(capture)) {
+          this.scheduleVideoReconnect?.(deviceId);
+        }
+
         // Try again on the next animation frame while waiting for live track
         requestAnimationFrame(captureNext);
         return;
@@ -465,6 +556,59 @@ class ModV {
     const state = this._captureState[deviceId];
     if (!state) return;
     state.running = false;
+  }
+
+  setSystemAudioState(payload) {
+    this.store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
+    this._store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
+  }
+
+  scheduleVideoReconnect(deviceId) {
+    if (!deviceId || this._videoReconnectTimers[deviceId]) {
+      return;
+    }
+
+    this._videoReconnectTimers[deviceId] = setTimeout(async () => {
+      delete this._videoReconnectTimers[deviceId];
+
+      const selected = this._store.state.mediaStream.selectedVideoSources || [];
+
+      // The camera may have been disabled while the timer was pending.
+      if (!selected.includes(deviceId)) {
+        return;
+      }
+
+      if (!shouldReconnectVideoCapture(this._imageCaptures?.[deviceId])) {
+        return;
+      }
+
+      try {
+        await this.setupMedia({ videoId: deviceId });
+        logger.info("reconnected the video input", { deviceId });
+      } catch (e) {
+        logger.warn("could not reconnect the video input", {
+          deviceId,
+          error: e?.message || String(e),
+        });
+      }
+    }, 1500);
+  }
+
+  async refreshVideoInputs() {
+    const enumerated = await this.mediaDeviceManager.enumerateDevices();
+    const available = new Set(
+      (enumerated.video || []).map((device) => device.deviceId),
+    );
+    const selected = this._store.state.mediaStream.selectedVideoSources || [];
+
+    for (const deviceId of selected) {
+      if (
+        available.has(deviceId) &&
+        shouldReconnectVideoCapture(this._imageCaptures?.[deviceId])
+      ) {
+        this.scheduleVideoReconnect(deviceId);
+      }
+    }
   }
 
   async generatePreset() {
