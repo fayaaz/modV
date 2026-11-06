@@ -3,7 +3,6 @@ import { ChromaticLine } from "../../src/renderer/src/application/point10/scenes
 import { CubeFloor } from "../../src/renderer/src/application/point10/scenes/CubeFloor.js";
 import { Mycelium } from "../../src/renderer/src/application/point10/scenes/Mycelium.js";
 import { ParticleField } from "../../src/renderer/src/application/point10/scenes/ParticleField.js";
-import { SpectrumBars } from "../../src/renderer/src/application/point10/scenes/SpectrumBars.js";
 import { Waveform } from "../../src/renderer/src/application/point10/scenes/Waveform.js";
 
 const loud = () => new Uint8Array(1024).fill(255);
@@ -59,17 +58,6 @@ describe("Point10 scene inputs change the output", () => {
     expect(scene.positions).toEqual(before);
     expect(scene.material.size).toBe(0.4);
     expect(scene.material.opacity).toBe(0.3);
-  });
-
-  it("scales the Spectrum Bars height and rotation", () => {
-    const scene = new SpectrumBars(null, null);
-    const audio = loud();
-    scene.heightScale = 16;
-    scene.rotationSpeed = 1;
-    scene.update(0.5, audio);
-
-    expect(scene.bars[0].scale.y).toBeCloseTo(16);
-    expect(scene.group.rotation.y).toBeCloseTo(0.5);
   });
 
   it("applies the Chromatic Line amplitude and chroma", () => {

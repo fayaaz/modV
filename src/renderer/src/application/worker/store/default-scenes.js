@@ -92,7 +92,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
               gain: 1.2,
               bassGain: 1.2,
@@ -152,7 +152,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
               gain: 1.15,
               midGain: 1.3,
@@ -195,7 +195,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Ferrofluid",
+            name: "Point10 Mycelium",
             props: {
               gain: 1.3,
               bassGain: 1.6,
@@ -406,7 +406,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
               gain: 1.2,
               smoothing: 0.08,
@@ -834,7 +834,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
               gain: 1.1,
               midGain: 1.3,
@@ -1236,7 +1236,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
               gain: 1.1,
               midGain: 1.4,
@@ -1391,7 +1391,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
               gain: 1.2,
               trebleGain: 1.4,
@@ -1574,7 +1574,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Ferrofluid",
+            name: "Point10 Mycelium",
             props: {
               gain: 1.25,
               bassGain: 1.45,
@@ -1960,7 +1960,7 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Ferrofluid",
+            name: "Point10 Mycelium",
             props: {
               gain: 1.25,
               bassGain: 1.55,
@@ -2741,11 +2741,9 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Point10 Spectrum Bars",
+            name: "Point10 Waveform",
             props: {
-              height: 9,
-              glow: 1.2,
-              rotationSpeed: 0.1,
+              height: 2,
               gain: 1.2,
               bassGain: 1.2,
             },
@@ -2777,7 +2775,7 @@ const DEFAULT_SCENES = [
     inputLinks: [
       {
         group: "Foreground",
-        module: "Point10 Spectrum Bars",
+        module: "Point10 Waveform",
         control: "alpha",
         feature: "bass",
         min: 0.1,

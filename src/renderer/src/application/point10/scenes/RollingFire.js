@@ -185,8 +185,7 @@ export class RollingFire extends BaseSceneWebGPU {
     this.role = "foreground";
     // Transparent overlay: empty pixels carry alpha = max(rgb) so the base
     // layer beneath shows through (same trick as Smoke Room). Ball of Fire
-    // overrides this - it plays standalone and must stay opaque or the
-    // stale shared WebGL frame would show behind it.
+    // shares this - it has no background of its own either.
     this._transparentOverlay = true;
     // ponytail: three's capabilities/WebGPU.js addon uses top-level await
     // (rejected by vite's es2020 pre-bundle target) - same check, no import.
@@ -1233,7 +1232,7 @@ export class RollingFire extends BaseSceneWebGPU {
     bloomPass.strength.value = BLOOM_BASE;
 
     // Transparent overlay: alpha = max(rgb) keeps empty pixels clear so the
-    // base layer shows through; Ball of Fire forces alpha 1 (opaque).
+    // base layer shows through for every scene that uses this pipeline.
     const outColor = scenePassColor.add(bloomPass);
     renderPipeline.outputNode = this._transparentOverlay
       ? vec4(outColor.rgb, max(outColor.r, max(outColor.g, outColor.b)))
@@ -1477,8 +1476,8 @@ export class BallOfFire extends RollingFire {
     this.category = "Fire";
     this._freezeBall = true;
     // Not a layer: plays standalone (only Rolling Fire itself is
-    // foreground-pinned). Opaque canvas - nothing beneath it in that role.
-    this._transparentOverlay = false;
+    // foreground-pinned). The canvas has no background of its own either.
+    this._transparentOverlay = true;
     this.role = "standalone";
   }
 }

@@ -209,21 +209,4 @@ describe("Scene-specific bindings", () => {
       expect(scene.glowScale).toBe(1.5);
     }
   });
-
-  it("wires Ferrofluid's marbling and ink coverage", () => {
-    const config = scenePropsFor("Point10 Ferrofluid");
-    const scene = {};
-
-    config.apply(scene, {
-      warp: 2,
-      coverage: -0.1,
-      glow: 1.2,
-      flow: 0.5,
-    });
-
-    expect(scene.warpScale).toBe(2);
-    expect(scene.coverageOffset).toBe(-0.1);
-    expect(scene.glowScale).toBe(1.2);
-    expect(scene.flowScale).toBe(0.5);
-  });
 });

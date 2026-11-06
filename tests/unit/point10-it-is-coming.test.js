@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BLOOM,
-  CLEAR_COLOR,
+  CLEAR_ALPHA,
   INSTANCE_COUNT,
   PERMRAND,
   buildItIsComingFragmentShader,
@@ -76,8 +76,8 @@ describe("ItIsComing preset constants", () => {
     expect(BLOOM).toEqual({ strength: 1, radius: 0.85, threshold: 0.5 });
   });
 
-  it("uses the preset's dark red clear colour", () => {
-    expect(CLEAR_COLOR).toEqual({ r: 0.592, g: 0.075, b: 0.075 });
+  it("renders with a fully transparent background", () => {
+    expect(CLEAR_ALPHA).toBe(0);
   });
 });
 

@@ -6,19 +6,20 @@
 // a custom Shader1: every instance is a noise-driven cloud point rotated by an
 // axis-angle quaternion, coloured from HSV and lit by two lamps. The points
 // render into RenderToTexture1, Bloom1 blurs the capture, and Shader2 combines
-// the points (gTexture2), the bloom (gTexture1) and a dot background with
-// _blendScreen before saturating. Clear2's dark red is the screen background.
-// The Clear1 -> Shader3/Blur/Copy/Store chain is not connected to Screen1 in
-// the preset, so it is invisible and is deliberately not implemented.
+// the points (gTexture2) and the bloom (gTexture1) before saturating. The
+// background is fully transparent, so the points composite over whatever is
+// beneath instead of the preset's Clear2 colour. The Clear1 ->
+// Shader3/Blur/Copy/Store chain is not connected to Screen1 in the preset, so
+// it is invisible and is deliberately not implemented.
 //
 // gl_VertexID is replaced with a float attribute aInstance (0..29999) so the
 // shader stays GLSL1 and compiles under WebGL2 without a GLSL3 migration.
 //
 // The preset's chain maps onto three's composer:
-//   RenderPass (clear dark red) -> background dots quad -> 30000 points ->
+//   RenderPass (transparent clear) -> 30000 points ->
 //   UnrealBloomPass (strength 1, radius 0.85, threshold 0.5) -> OutputPass
 // with NoToneMapping. UnrealBloom composites its bloom additively whereas
-// Shader2 screen-blends it; with the preset's dark base the difference is
+// Shader2 screen-blends it; over a transparent background the difference is
 // small. OutputPass still sRGB-encodes the composer's linear buffer, while
 // Plane9 wrote its values straight to the frame (see the parity note below).
 //
@@ -28,8 +29,7 @@
 //   in1.y = min(band(-1, 0, 0, 0.1) * 5, 1) * 0.25
 //   in1.z = perm + permrand * 10
 //   in2   = (0.222, 0.087, 0)
-// permrand is a stable, seeded per-scene random. Shader2's Expression is
-// in1.x = random() every frame - the background sparkle seed (uSeed).
+// permrand is a stable, seeded per-scene random.
 
 import * as THREE from "three";
 import { BaseScene } from "../BaseScene.js";
@@ -48,8 +48,8 @@ export const INSTANCE_COUNT = 30000;
 // Intensity 1. UnrealBloomPass normalises radius to 0..1, hence ~0.85.
 export const BLOOM = { strength: 1, radius: 0.85, threshold: 0.5 };
 
-// Clear2: the screen background colour.
-export const CLEAR_COLOR = { r: 0.592, g: 0.075, b: 0.075 };
+// No background: the clear is fully transparent so the scene can be layered.
+export const CLEAR_ALPHA = 0;
 
 // Screen1: CamPos 0 0 -2.73, CamLookAt 0 0 1, fov 45, near 0.1, far 10.
 export const CAMERA = {
@@ -186,34 +186,6 @@ void main() {
 `;
 }
 
-const BACKGROUND_VERT = `
-varying vec2 vUv;
-void main() {
-  vUv = uv;
-  gl_Position = vec4(position.xy, 0.0, 1.0);
-}
-`;
-
-// Shader2's dot background, without the (unconnected) RenderRect2 chain:
-//   bg = vec3(0.15 + _rand(uv*100 + seed)*0.025), vignetted and squared,
-//   then screen-blended over the preset's dark red.
-export function buildBackgroundFragmentShader() {
-  return `
-precision highp float;
-uniform float uSeed;
-varying vec2 vUv;
-${COMMON_PREAMBLE}
-void main() {
-  vec2 p = vUv*vec2(2.0)-vec2(1.0);
-  vec3 bg = vec3(0.15 + _rand(vUv*100.0 + uSeed)*0.025);
-  bg *= smoothstep(1.5, 0.0, length(p));
-  bg = bg*bg;
-  vec3 c = _blendScreen(vec3(0.592, 0.075, 0.075), bg);
-  gl_FragColor = vec4(saturate(c), 1.0);
-}
-`;
-}
-
 export class ItIsComingForYou extends BaseScene {
   _init() {
     this.label = "It Is Coming For You";
@@ -251,24 +223,6 @@ export class ItIsComingForYou extends BaseScene {
     this.points.renderOrder = 1;
     this.group.add(this.points);
 
-    // Fullscreen clip-space quad: the dot background is screen content, not a
-    // world object, so it ignores the camera exactly like Shader2.
-    this.background = new THREE.Mesh(
-      new THREE.PlaneGeometry(2, 2),
-      new THREE.ShaderMaterial({
-        vertexShader: BACKGROUND_VERT,
-        fragmentShader: buildBackgroundFragmentShader(),
-        uniforms: {
-          uSeed: { value: 0 },
-        },
-        depthTest: false,
-        depthWrite: false,
-      }),
-    );
-    this.background.frustumCulled = false;
-    this.background.renderOrder = -1;
-    this.group.add(this.background);
-
     this.p9audio = new P9Audio(this.audio);
     this.perm = makePerm(1);
     this.speedScale = 1;
@@ -286,22 +240,13 @@ export class ItIsComingForYou extends BaseScene {
       // the preset's direct colour output (the saturate lives in the shaders).
       this.renderer.toneMapping = THREE.NoToneMapping;
       this.renderer.toneMappingExposure = 1;
-      this.renderer.setClearColor(
-        new THREE.Color(CLEAR_COLOR.r, CLEAR_COLOR.g, CLEAR_COLOR.b),
-        1,
-      );
+      this.renderer.setClearColor(0x000000, CLEAR_ALPHA);
 
       const size = this.renderer.getSize(new THREE.Vector2());
       this.composer = new EffectComposer(this.renderer);
       this.composer.setPixelRatio(this.renderer.getPixelRatio());
       this.composer.addPass(
-        new RenderPass(
-          this.group,
-          this.camera,
-          null,
-          new THREE.Color(CLEAR_COLOR.r, CLEAR_COLOR.g, CLEAR_COLOR.b),
-          1,
-        ),
+        new RenderPass(this.group, this.camera, null, null, CLEAR_ALPHA),
       );
       this._bloomPass = new UnrealBloomPass(
         size,
@@ -360,9 +305,6 @@ export class ItIsComingForYou extends BaseScene {
     );
     this.material.uniforms.gTime.value = this.time;
     this.material.uniforms.gTargetSize.value.set(this.size.w, this.size.h);
-
-    // Shader2's Expression: in1.x = random() every frame (sparkle seed).
-    this.background.material.uniforms.uSeed.value = Math.random();
 
     if (this._bloomPass) {
       this._bloomPass.strength = BLOOM.strength * this.bloomScale;

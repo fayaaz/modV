@@ -73,13 +73,6 @@ export const CUBE_FLOOR_PROPS = {
   glow: float("Glow", 1, 0, 3),
 };
 
-export const FERROFLUID_PROPS = {
-  warp: float("Marbling", 1, 0, 3),
-  coverage: float("Ink Coverage", 0, -0.2, 0.2),
-  glow: float("Glow", 1, 0, 3),
-  flow: float("Flow Speed", 1, 0, 4),
-};
-
 export const GEOMETRIC_TUNNEL_PROPS = {
   scrollSpeed: float("Scroll Speed", 1, 0, 4),
   brightness: float("Brightness", 1, 0, 3),
@@ -108,12 +101,6 @@ export const PARTICLE_FIELD_PROPS = {
   particleSize: float("Particle Size", 0.15, 0.02, 1),
   speed: float("Speed", 1, 0, 4),
   opacity: float("Opacity", 0.8, 0, 1),
-};
-
-export const SPECTRUM_BARS_PROPS = {
-  height: float("Bar Height", 8, 0, 20, 0.1),
-  glow: float("Glow", 1, 0, 3),
-  rotationSpeed: float("Rotation Speed", 0, 0, 2),
 };
 
 export const SPIRAL_PARTICLES_PROPS = {
@@ -266,12 +253,6 @@ export const SCENE_PROP_CONFIGS = {
     scene.glowScale = v.glow;
   }),
   "Point10 DVD Room": defineScene(DVD_ROOM_PROPS, bindSmoke),
-  "Point10 Ferrofluid": defineScene(FERROFLUID_PROPS, (scene, v) => {
-    scene.warpScale = v.warp;
-    scene.coverageOffset = v.coverage;
-    scene.glowScale = v.glow;
-    scene.flowScale = v.flow;
-  }),
   "Point10 Geometric Tunnel": defineScene(
     GEOMETRIC_TUNNEL_PROPS,
     (scene, v) => {
@@ -305,11 +286,6 @@ export const SCENE_PROP_CONFIGS = {
   }),
   "Point10 Rolling Fire": defineScene(ROLLING_FIRE_PROPS, bindSmoke),
   "Point10 Smoke Room": defineScene(SMOKE_ROOM_PROPS, bindSmoke),
-  "Point10 Spectrum Bars": defineScene(SPECTRUM_BARS_PROPS, (scene, v) => {
-    scene.heightScale = v.height;
-    scene.glowScale = v.glow;
-    scene.rotationSpeed = v.rotationSpeed;
-  }),
   "Point10 Spiral Particles": defineScene(
     SPIRAL_PARTICLES_PROPS,
     (scene, v) => {
