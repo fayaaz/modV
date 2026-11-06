@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import constants from "../../src/renderer/src/application/constants.js";
 import {
+  assignSceneRowIndexes,
   getRowCount,
   getRowGroup,
   getRowLabel,
@@ -165,6 +166,61 @@ describe("getRowGroup", () => {
   it("treats a blank name in rowNames as positional", () => {
     const list = [a(), b()];
     expect(getRowGroup(scene("s", list), 1, ["", "  "])).toBe(list[1]);
+  });
+});
+
+describe("assignSceneRowIndexes", () => {
+  it("keeps positional indexes without row names", () => {
+    expect(assignSceneRowIndexes([a(), b(), c()], [])).toEqual([0, 1, 2]);
+    expect(assignSceneRowIndexes([a(), b()], undefined)).toEqual([0, 1]);
+    expect(assignSceneRowIndexes([null, b()], ["", "  "])).toEqual([0, 1]);
+  });
+
+  it("pins named groups to their rows regardless of group order", () => {
+    const cam = group("WEBCAM");
+    const fg = group("Foreground");
+    const fx = group("Effects");
+    const rowNames = [
+      "webcam",
+      "Background",
+      "Foreground",
+      "Effects",
+      "effects2",
+    ];
+
+    expect(assignSceneRowIndexes([cam, fg, fx], rowNames)).toEqual([0, 2, 3]);
+    expect(assignSceneRowIndexes([fx, fg, cam], rowNames)).toEqual([3, 2, 0]);
+  });
+
+  it("slots groups without a matching named row below the named rows", () => {
+    const cam = group("WEBCAM");
+    const bg = group("Background");
+    const fx = group("Effects");
+
+    expect(assignSceneRowIndexes([cam, bg, fx], ["webcam", "Effects"])).toEqual(
+      [0, 2, 1],
+    );
+  });
+
+  it("matches case-insensitively and by word prefix", () => {
+    const cam2 = group("Webcam 2");
+    expect(assignSceneRowIndexes([cam2], ["webcam"])).toEqual([0]);
+    expect(assignSceneRowIndexes([cam2], ["Webcam 2"])).toEqual([0]);
+    expect(assignSceneRowIndexes([cam2], ["cam"])).toEqual([1]);
+  });
+
+  it("does not let a suffixed row claim a group owned by its base row", () => {
+    const fx = group("Effects");
+
+    expect(assignSceneRowIndexes([fx], ["Effects", "effects2"])).toEqual([0]);
+    expect(assignSceneRowIndexes([fx], ["effects2"])).toEqual([0]);
+  });
+
+  it("leaves holes null when named rows are in use", () => {
+    expect(assignSceneRowIndexes([null, group("Effects")], [])).toEqual([0, 1]);
+    expect(
+      assignSceneRowIndexes([null, group("Effects")], ["Effects"]),
+    ).toEqual([null, 0]);
   });
 });
 

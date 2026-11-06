@@ -116,6 +116,15 @@ async function useNoTransition() {
   });
 }
 
+async function setRowNames(rowNames) {
+  await modVApp.evaluateWorker(
+    async ({ rowNames: names }) => {
+      await self.store.dispatch("scenes/setRowNames", { rowNames: names });
+    },
+    { rowNames },
+  );
+}
+
 async function applyScene(sceneId) {
   await modVApp.evaluateWorker(
     async ({ sceneId }) => {
@@ -535,6 +544,100 @@ test("naming a row matches groups by name and reorders the layer stack", async (
   await modVApp.evaluateWorker(async () => {
     await self.store.dispatch("scenes/setRowNames", { rowNames: [] });
   });
+});
+
+test("applying a Scene honours named rows instead of group positions", async () => {
+  const prefix = uniqueName("E2E Named Apply");
+
+  await removeUserGroups();
+  await useNoTransition();
+  await setRowNames([]);
+
+  const cam = await createGroup("WEBCAM");
+  await addModuleToGroup(cam, "Ball");
+  const fg = await createGroup("Foreground");
+  await addModuleToGroup(fg, "Bands");
+  const fx = await createGroup("Effects");
+  await addModuleToGroup(fx, "Bands");
+  const scene = await saveScene(`${prefix} Scene`);
+
+  await removeUserGroups();
+  await setRowNames([
+    "webcam",
+    "Background",
+    "Foreground",
+    "Effects",
+    "effects2",
+  ]);
+  await applyScene(scene.id);
+
+  const state = await getGridState();
+  const rowsByName = Object.fromEntries(
+    state.groups.map((group) => [group.name, group.sceneRow]),
+  );
+
+  // The Scene's three Groups are pinned to the rows that display them, not
+  // to their document positions (which would put Effects on row 2).
+  expect(rowsByName).toMatchObject({
+    WEBCAM: 0,
+    Foreground: 2,
+    Effects: 3,
+  });
+  expect(Object.keys(state.activeRows).sort()).toEqual(["0", "2", "3"]);
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await setRowNames([]);
+});
+
+test("an Input Link with no audio data leaves the prop value alone", async () => {
+  await removeUserGroups();
+
+  const groupId = await createGroup(uniqueName("E2E Missing Audio"));
+  const moduleId = await addModuleToGroup(groupId, "Ball");
+
+  const inputId = await modVApp.evaluateWorker(
+    async ({ moduleId: id }) => {
+      const module = self.store.state.modules.active[id];
+      const inputId = module.$props.speed.id;
+
+      await self.store.dispatch("inputs/createInputLink", {
+        inputId,
+        location: "meyda/getFeature",
+        type: "getter",
+        args: ["bass"],
+        min: 1,
+        max: 5,
+        source: "meyda",
+      });
+
+      return inputId;
+    },
+    { moduleId },
+  );
+
+  // Let the render loop evaluate the link a few times. Meyda has no frame to
+  // hand over without an audio input, so the link must keep the saved value
+  // instead of writing NaN into it.
+  await modVApp.page.waitForTimeout(300);
+
+  const speed = await modVApp.evaluateWorker(
+    async ({ moduleId: id, inputId: linkInputId }) => {
+      const module = self.store.state.modules.active[id];
+
+      return {
+        value: module.props.speed,
+        hasLink: !!self.store.state.inputs.inputLinks[linkInputId],
+      };
+    },
+    { moduleId, inputId },
+  );
+
+  expect(speed.hasLink).toBe(true);
+  expect(Number.isFinite(speed.value)).toBe(true);
+  expect(speed.value).toBeGreaterThan(0);
+
+  await removeUserGroups();
 });
 
 test("Ctrl+drag copies a cell's group into an empty cell of another scene", async () => {

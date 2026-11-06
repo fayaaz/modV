@@ -1,12 +1,12 @@
 /* eslint-env worker */
 import get from "lodash.get";
 import store from "./store";
-import map from "../utils/map";
 import constants, { GROUP_DISABLED, GROUP_ENABLED } from "../constants";
 import NdiWorker from "./ndi-worker.worker.js?worker";
 import { applyWindow } from "meyda/dist/esm/utilities";
 import { renderSceneTransition } from "./scene-transition";
 import { renderScenePreview } from "./scene-preview";
+import { resolveInputLinkValue } from "./input-link-value";
 
 const meyda = { windowing: applyWindow };
 
@@ -130,17 +130,22 @@ async function loop(delta, features, fftOutput) {
       continue;
     }
 
-    let value;
+    let rawValue;
 
     if (linkType === "getter" && linkArguments) {
-      value = store.getters[linkLocation](...linkArguments);
+      rawValue = store.getters[linkLocation](...linkArguments);
     } else if (linkType === "state") {
-      value = get(store.state, linkLocation);
+      rawValue = get(store.state, linkLocation);
     }
 
-    // Coersion with != to also check for undefined
-    if (min != null || max != null) {
-      value = map(value, 0, 1, min, max);
+    // Audio features are undefined until the bridge delivers a frame (and
+    // stay undefined with no input selected). Mapping that to a number would
+    // produce NaN and permanently overwrite the linked prop, so leave the
+    // input's saved value alone until a real value arrives.
+    const value = resolveInputLinkValue(rawValue, min, max);
+
+    if (value === undefined) {
+      continue;
     }
 
     if (type === "action") {

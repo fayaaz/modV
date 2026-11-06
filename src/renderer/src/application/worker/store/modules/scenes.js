@@ -31,6 +31,7 @@ import {
 } from "../../preset-serializer";
 import { createSerialTask } from "../../serial-task";
 import {
+  assignSceneRowIndexes,
   getRowCount,
   getRowGroup,
   getRowLabel,
@@ -2422,6 +2423,14 @@ const actions = {
     const createdGroups = [];
     const groupIdMap = {};
     const inputIdMap = {};
+    // Named rows own their Groups by name, not by the Group's position in the
+    // Scene document, so work out the row each Group belongs on before the
+    // Groups are created. Otherwise the grid lights up the wrong cells and a
+    // later cell apply would replace the wrong live Group.
+    const rowIndexes = assignSceneRowIndexes(
+      groupSnapshots,
+      state.performance.rowNames,
+    );
 
     for (let i = 0, len = groupSnapshots.length; i < len; i++) {
       const snapshot = groupSnapshots[i];
@@ -2431,6 +2440,7 @@ const actions = {
         continue;
       }
 
+      const sceneRow = rowIndexes[i] ?? i;
       const oldGroupId = snapshot.id;
       const moduleIds = snapshot.modules || [];
 
@@ -2455,7 +2465,7 @@ const actions = {
         ...groupData,
         alpha: 0,
         sceneId: scene.id,
-        sceneRow: i,
+        sceneRow,
       });
 
       if (oldGroupId) {
@@ -2464,7 +2474,7 @@ const actions = {
 
       mapGroupInputIds(snapshot, group, inputIdMap);
 
-      createdGroups.push({ groupId: group.id, alpha: targetAlpha });
+      createdGroups.push({ groupId: group.id, alpha: targetAlpha, sceneRow });
 
       for (
         let j = 0, moduleIdsLength = moduleIds.length;
@@ -2495,6 +2505,12 @@ const actions = {
           groupId: group.id,
         });
       }
+    }
+
+    if (normalizeRowNames(state.performance.rowNames).some((name) => !!name)) {
+      await store.dispatch("groups/orderByIds", {
+        ids: orderRowGroups().map((item) => item.id),
+      });
     }
 
     for (let i = 0, len = oldOrphanModuleIds.length; i < len; i++) {
@@ -2540,14 +2556,10 @@ const actions = {
     const nextActiveRows = {};
 
     for (let i = 0, len = createdGroups.length; i < len; i++) {
-      activeRows[i] = {
-        sceneId: scene.id,
-        groupId: createdGroups[i].groupId,
-      };
-      nextActiveRows[i] = {
-        sceneId: scene.id,
-        groupId: createdGroups[i].groupId,
-      };
+      const { groupId, sceneRow } = createdGroups[i];
+
+      activeRows[sceneRow] = { sceneId: scene.id, groupId };
+      nextActiveRows[sceneRow] = { sceneId: scene.id, groupId };
     }
 
     commit("SET_ACTIVE_ROWS", nextActiveRows);

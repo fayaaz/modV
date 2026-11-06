@@ -165,6 +165,79 @@ export const normalizeRowNames = (value) => {
   return value.map((name) => (typeof name === "string" ? name.trim() : ""));
 };
 
+/**
+ * Assigns each Scene Group snapshot the grid row it should live on. Named
+ * rows win over the Group's position in the document, exactly like
+ * `getRowGroup` does for the grid, so applying a Scene places its Groups on
+ * the cells that show them. Groups with no matching named row are slotted
+ * below the named rows, keeping their document order.
+ *
+ * Returns one row index per Group (holes stay `null`). Without any named rows
+ * the historical positional mapping is returned unchanged.
+ */
+export const assignSceneRowIndexes = (groups, rowNames) => {
+  const list = Array.isArray(groups) ? groups : [];
+  const names = normalizeRowNames(rowNames);
+
+  if (!names.some((name) => !!name)) {
+    return list.map((_, index) => index);
+  }
+
+  const indexes = new Array(list.length).fill(null);
+  const takenGroups = new Set();
+  const takenRows = new Set();
+
+  for (let rowIndex = 0; rowIndex < names.length; rowIndex++) {
+    const name = names[rowIndex];
+
+    if (!name) {
+      continue;
+    }
+
+    let groupIndex = -1;
+
+    for (let i = 0; i < list.length; i++) {
+      if (!takenGroups.has(i) && strictMatchesRowName(list[i], name)) {
+        groupIndex = i;
+        break;
+      }
+    }
+
+    if (groupIndex === -1 && !rowFamilyIsShared(rowIndex, names)) {
+      for (let i = 0; i < list.length; i++) {
+        if (!takenGroups.has(i) && matchesRowName(list[i], name)) {
+          groupIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (groupIndex !== -1) {
+      indexes[groupIndex] = rowIndex;
+      takenGroups.add(groupIndex);
+      takenRows.add(rowIndex);
+    }
+  }
+
+  let nextRow = names.length;
+
+  for (let i = 0; i < list.length; i++) {
+    if (!list[i] || takenGroups.has(i)) {
+      continue;
+    }
+
+    while (takenRows.has(nextRow)) {
+      nextRow++;
+    }
+
+    indexes[i] = nextRow;
+    takenRows.add(nextRow);
+    nextRow++;
+  }
+
+  return indexes;
+};
+
 export const getRowCount = (scenes, liveGroups = [], rowNames) => {
   let rowCount = normalizeRowNames(rowNames).length;
 

@@ -29,6 +29,15 @@
 - [x] Import Around and Around Plus form Point10 (done)
 - [x] Import Light Tunnel from Point10 (done)
 - [x] Import Square Tunnel from Point10 (done)
-
-Hints:
-- Point10 is available in the browser at localhost:5199 accessible by browser harness
+- With multiple webcams allow the webcam 2d surface to pick an index (1,2,3) so it can pick different webcams. 
+- When webcams are disconnected and reconnect the webcam video feed should be recoverable
+- Enabled webcams and audio inputs should be remembered after restarts. Webcam order should be ideally preserved.
+- Remove point10 spectrum bars
+- Remove Point10 ferrofluid
+- Update any presets that use the removed ones
+- Point10's it is coming for you should have no background (solid or otherwise)
+- Point10's rollingfire / ball of fire should have no background
+- Kaleidoscipe tile in the presets is too twitchy and not musical at all
+- Twirl is also very twitchy when used in responding to music
+- Make presets that make use of filters like ascii art, 
+- Make many more varied presets - most are the same at the moment. (Don't use webcam in the groups)
