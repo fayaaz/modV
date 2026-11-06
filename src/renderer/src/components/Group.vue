@@ -546,7 +546,15 @@ export default {
     },
 
     endNameEditable(e) {
-      if (e instanceof MouseEvent && e.target === this.$refs.nameInput.$el) {
+      const nameInput = this.$refs.nameInput;
+
+      // The Group can be removed while its name input is still mounted.
+      if (!nameInput) {
+        window.removeEventListener("mousedown", this.endNameEditable);
+        return;
+      }
+
+      if (e instanceof MouseEvent && e.target === nameInput.$el) {
         return;
       }
 

@@ -151,16 +151,21 @@ class ModV {
 
       if (type === "worker-setup-complete") {
         // Make the default group
-        this.store.dispatch("groups/createGroup", { enabled: GROUP_ENABLED });
+        await this.store.dispatch("groups/createGroup", {
+          enabled: GROUP_ENABLED,
+        });
 
-        this.store
-          .dispatch("scenes/hydrateScenes")
-          .then(() => this.store.dispatch("scenes/ensureDefaultScenes"))
-          .catch((e) => {
-            console.error("Could not restore Scenes", e);
-          });
+        // Restore/seed Scenes before declaring the app ready. Seeding builds
+        // temporary Groups and Modules, so tests (and the UI) must not race it
+        // or they see a changing Group/Module list.
+        try {
+          await this.store.dispatch("scenes/hydrateScenes");
+          await this.store.dispatch("scenes/ensureDefaultScenes");
+        } catch (e) {
+          console.error("Could not restore Scenes", e);
+        }
 
-        this.store.dispatch("osc/createServer", {
+        await this.store.dispatch("osc/createServer", {
           host: "0.0.0.0",
           port: 3333,
         });
@@ -424,11 +429,15 @@ class ModV {
       ipcRenderer.send("modv-destroy");
     });
 
-    import.meta.hot.on("vite:beforeFullReload", () => {
-      this.$worker.postMessage({
-        type: "modv-destroy",
+    // HMR only exists in the dev server; `import.meta.hot` is undefined in a
+    // production build, so guard it instead of throwing out of setup().
+    if (import.meta.hot) {
+      import.meta.hot.on("vite:beforeFullReload", () => {
+        this.$worker.postMessage({
+          type: "modv-destroy",
+        });
       });
-    });
+    }
   }
 
   loop(delta) {

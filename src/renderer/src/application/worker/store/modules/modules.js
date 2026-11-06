@@ -719,7 +719,9 @@ const actions = {
     const module = writeTo.active[moduleId];
 
     if (!module) {
-      throw new Error(`No module with id "${moduleId}" found`);
+      // Group cleanup can race a Scene build/teardown (or run twice); removing
+      // an already-gone Module is a no-op rather than a fatal worker error.
+      return;
     }
 
     const {
@@ -752,9 +754,13 @@ const actions = {
     for (let i = 0, len = moduleProperties.length; i < len; i++) {
       const { key, type: propType } = moduleProperties[i];
 
-      // destroy anything created by datatypes we don't need anymore
-      if (store.state.dataTypes[propType].destroy) {
-        store.state.dataTypes[propType].destroy(module.props[key]);
+      // destroy anything created by datatypes we don't need anymore. ISF
+      // exposes types such as "long" that have no dataTypes entry, so the
+      // lookup must be optional or cleanup aborts and orphans the Group.
+      const dataType = store.state.dataTypes[propType];
+
+      if (dataType && dataType.destroy) {
+        dataType.destroy(module.props[key]);
       }
     }
 

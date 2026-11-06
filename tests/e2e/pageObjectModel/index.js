@@ -126,6 +126,16 @@ class ModVApp {
         page.on("crash", () => {
           this.lastCrash = new Date().toISOString();
           console.error(`[renderer crashed] ${page.url()}`);
+
+          // A crashed renderer leaves Electron's main process (and its GPU
+          // children) alive. Playwright waits for it before replacing the
+          // worker, which showed up as a ~30s idle gap. Kill the already-dead
+          // app so the next worker can start immediately.
+          try {
+            this.electronApp?.process()?.kill("SIGKILL");
+          } catch (e) {
+            // The process may already be gone.
+          }
         });
 
         page.on("close", () => {
@@ -156,30 +166,25 @@ class ModVApp {
     });
   }
 
-  async waitUntilModVReady(resolver) {
-    if (!resolver) {
-      let resolveReady;
+  async waitUntilModVReady(timeout = 60000) {
+    const deadline = Date.now() + timeout;
 
-      const promise = new Promise((resolve) => {
-        resolveReady = resolve;
-      });
+    while (Date.now() < deadline) {
+      if (this.page.isClosed()) {
+        break;
+      }
 
-      this.waitUntilModVReady(resolveReady);
+      if (await ipcRendererInvoke(this.page, "is-modv-ready")) {
+        return;
+      }
 
-      return promise;
+      await this.page.waitForTimeout(250);
     }
 
-    const isReady = await ipcRendererInvoke(this.page, "is-modv-ready");
-
-    if (!isReady) {
-      setTimeout(() => {
-        this.waitUntilModVReady(resolver);
-      }, 500);
-
-      return;
-    }
-
-    resolver();
+    throw new Error(
+      `modV did not become ready within ${Math.round(timeout / 1000)}s. ` +
+        "Check the Electron log for a main/renderer crash.",
+    );
   }
 
   async getWorker(timeout = 10000) {
@@ -187,7 +192,7 @@ class ModVApp {
     const deadline = Date.now() + timeout;
 
     while (Date.now() < deadline) {
-      if (page.isClosed()) {
+      if (page.isClosed() || this.lastCrash) {
         break;
       }
 
