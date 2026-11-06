@@ -27,6 +27,21 @@ const AUDIO_GLITCH_MODULES = [
 
 const KALEIDOSCOPE_MODULES = ["Kaleidoscope", "Kaleidoscope Tile"];
 
+const FILTER_MODULES = [
+  "ASCII Art",
+  "CMYK Halftone",
+  "Color Invert",
+  "Color Posterize",
+  "Dither-Bayer",
+  "Dot Screen",
+  "Edge Trace",
+  "Edges",
+  "Emboss",
+  "Pixellate",
+  "Radial Replicate",
+  "RGB Halftone",
+];
+
 const TWIRL_MODULES = [
   "Twirl",
   "Spiral",
@@ -135,7 +150,7 @@ test("ships a version 3 batch of glitch, kaleidoscope and twirl scenes", async (
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(4);
+  expect(DEFAULTS_VERSION).toBe(5);
   expect(newBatch.length).toBeGreaterThanOrEqual(10);
 
   for (const scene of newBatch) {
@@ -286,6 +301,37 @@ test("version 4 scenes pin foreground and background alpha to bass", async () =>
   }
 
   expect(pinned).toBeGreaterThanOrEqual(8);
+});
+
+test("version 5 scenes use a varied filter batch with ASCII Art", () => {
+  const filterBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 5,
+  );
+
+  expect(filterBatch.length).toBeGreaterThanOrEqual(8);
+
+  const asciiScenes = filterBatch.filter((scene) =>
+    getModuleNames(scene).includes("ASCII Art"),
+  );
+
+  expect(asciiScenes.length).toBeGreaterThanOrEqual(2);
+
+  const usedFilters = new Set(
+    filterBatch.flatMap((scene) =>
+      getModuleNames(scene).filter((name) => FILTER_MODULES.includes(name)),
+    ),
+  );
+
+  expect(usedFilters.size).toBeGreaterThanOrEqual(8);
+  expect(usedFilters.has("ASCII Art")).toBe(true);
+});
+
+test("no default scene uses the Webcam module", () => {
+  const offenders = DEFAULT_SCENES.filter((scene) =>
+    getModuleNames(scene).includes("Webcam"),
+  );
+
+  expect(offenders.map((scene) => scene.name)).toEqual([]);
 });
 
 test("default scenes chain controls to bass and a BPM tween", async () => {

@@ -45,6 +45,10 @@ import {
   strictMatchesRowName,
 } from "../../scene-rows";
 import { buildCapturedGroups } from "../../scene-capture";
+import {
+  DEFAULT_SCENE_BPM_TWEEN,
+  isAutoLinkExcluded,
+} from "../../scene-link-defaults";
 
 const fs = require("fs");
 const path = require("path");
@@ -643,10 +647,19 @@ function isNumericProp(prop) {
   return !!prop && (prop.type === "int" || prop.type === "float");
 }
 
-function pickLinkProp(module, preference, excludedInputIds) {
+function getModuleName(module) {
+  return (
+    (module && (module.$moduleName || (module.meta && module.meta.name))) || ""
+  );
+}
+
+function pickLinkProp(module, preference, excludedInputIds, mode) {
   const props = module.$props || {};
+  const moduleName = getModuleName(module);
   const isAvailable = (name) =>
-    isNumericProp(props[name]) && !excludedInputIds.has(props[name].id);
+    isNumericProp(props[name]) &&
+    !excludedInputIds.has(props[name].id) &&
+    !isAutoLinkExcluded(moduleName, name, mode);
 
   for (let i = 0, len = preference.length; i < len; i++) {
     if (isAvailable(preference[i])) {
@@ -691,6 +704,7 @@ function findModuleLinkTarget(
   priority,
   preference,
   excludedInputIds,
+  mode,
 ) {
   const orderedGroups = getGroupsInPriority(groups, priority);
 
@@ -704,7 +718,12 @@ function findModuleLinkTarget(
         continue;
       }
 
-      const propName = pickLinkProp(entry.module, preference, excludedInputIds);
+      const propName = pickLinkProp(
+        entry.module,
+        preference,
+        excludedInputIds,
+        mode,
+      );
 
       if (!propName) {
         continue;
@@ -763,10 +782,10 @@ async function createBpmTweenLink({
       data: [[0], [1]],
       duration: 1000,
       direction: "alternate",
-      easing: "linear",
+      easing: DEFAULT_SCENE_BPM_TWEEN.easing,
       loop: true,
       useBpm: true,
-      bpmDivision: 8,
+      bpmDivision: DEFAULT_SCENE_BPM_TWEEN.bpmDivision,
       durationAsTotalTime: false,
       steps: 0,
     },
@@ -942,6 +961,7 @@ async function applyDefaultSceneInputLinks(groups, moduleEntries, definition) {
     ["Effects", "Foreground", "Background"],
     BASS_PROP_PREFERENCE,
     excludedInputIds,
+    "bass",
   );
 
   if (!bassTarget) {
@@ -969,6 +989,7 @@ async function applyDefaultSceneInputLinks(groups, moduleEntries, definition) {
     ["Effects", "Foreground", "Background"],
     BPM_PROP_PREFERENCE,
     excludedInputIds,
+    "bpm",
   );
 
   if (!bpmTarget) {

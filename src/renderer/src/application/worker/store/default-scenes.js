@@ -15,10 +15,11 @@
 //
 // `introducedVersion` lets existing installs receive only the Scenes added
 // since their last seeding pass. Version 1 is the original six Scenes,
-// version 2 the second batch, version 3 the glitch/Kaleidoscope batch and
-// version 4 the varied Point10 scene batch.
+// version 2 the second batch, version 3 the glitch/Kaleidoscope batch,
+// version 4 the varied Point10 scene batch and version 5 the ASCII/filter
+// variety batch.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 4;
+export const DEFAULTS_VERSION = 5;
 
 const sceneKey = (name) =>
   String(name || "")
@@ -3440,6 +3441,779 @@ const DEFAULT_SCENES = [
         feature: "bass",
         min: 0.35,
         max: 1,
+      },
+    ],
+  },
+
+  {
+    name: "ASCII Sunbeam",
+    introducedVersion: 5,
+    minSeconds: 9,
+    maxSeconds: 24,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Mycelium",
+            props: {
+              growthSpeed: 1.1,
+              glow: 1.2,
+              gain: 1.2,
+              bassGain: 1.4,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Chromatic Line",
+            props: {
+              amplitude: 1.2,
+              glow: 1.2,
+              gain: 1.15,
+              bassGain: 1.35,
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "ASCII Art",
+            props: {
+              amount: 0.35,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 6,
+              intensity: 0.5,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Point10 Chromatic Line",
+        control: "alpha",
+        feature: "bass",
+        min: 0.15,
+        max: 0.75,
+      },
+    ],
+  },
+
+  {
+    name: "Terminal Bloom",
+    introducedVersion: 5,
+    minSeconds: 10,
+    maxSeconds: 26,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Ball Of Fire",
+            props: {
+              fireIntensity: 26,
+              simulationSpeed: 1,
+              gain: 1.2,
+              bassGain: 1.45,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Bar",
+            props: {
+              thickness: 2,
+              strobe: 0,
+            },
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "ASCII Art",
+            props: {
+              amount: 0.5,
+            },
+          },
+          {
+            name: "Hue-Saturation",
+            props: {
+              hue: 0.08,
+              saturation: 0.3,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Background",
+        control: "alpha",
+        feature: "bass",
+        min: 0.3,
+        max: 1,
+      },
+    ],
+  },
+
+  {
+    name: "Halftone Harbor",
+    introducedVersion: 5,
+    minSeconds: 8,
+    maxSeconds: 21,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Water Ripple",
+            props: {
+              speed: 0.8,
+              distortion: 0.06,
+              gain: 1.15,
+              midGain: 1.3,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Waveform",
+            props: {
+              strokeWeight: 2,
+              maxHeight: 60,
+              maxWidth: 0.85,
+              windowing: "hanning",
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "CMYK Halftone",
+            props: {
+              gridSize: 45,
+              smoothing: 0.15,
+            },
+          },
+          {
+            name: "Pixellate",
+            props: {
+              cell_size: 0.05,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Crosshatch Cipher",
+    introducedVersion: 5,
+    minSeconds: 9,
+    maxSeconds: 23,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Geometric Tunnel",
+            props: {
+              scrollSpeed: 1,
+              brightness: 1.1,
+              gain: 1.2,
+              bassGain: 1.4,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Concentrics",
+            props: {
+              rms: true,
+              intensity: 9,
+              spacing: 3,
+              objectDistance: 55,
+              strokeWeight: 2,
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Edges",
+            props: {
+              intensity: 40,
+              threshold: 0.1,
+              sobel: true,
+            },
+          },
+          {
+            name: "Vignette",
+            props: {
+              intensity: 18,
+              extension: 0.3,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Concentrics",
+        control: "alpha",
+        feature: "bass",
+        min: 0.15,
+        max: 0.8,
+      },
+    ],
+  },
+
+  {
+    name: "Dither District",
+    introducedVersion: 5,
+    minSeconds: 8,
+    maxSeconds: 22,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Cube Floor",
+            props: {
+              height: 4,
+              glow: 1.2,
+              gain: 1.2,
+              bassGain: 1.45,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Polygon",
+            props: {
+              intensity: 6,
+              shapeSize: 120,
+              strokeWeight: 3,
+              rotateToggle: true,
+              rotateSpeed: 2,
+            },
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Dither-Bayer",
+            props: {
+              colorize: 0,
+              matrixMode: 2,
+            },
+          },
+          {
+            name: "Dot Screen",
+            props: {
+              angle: 0.3,
+              scale: 4,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Polygon",
+        control: "alpha",
+        feature: "bass",
+        min: 0.1,
+        max: 0.7,
+      },
+    ],
+  },
+
+  {
+    name: "Mosaic Meridian",
+    introducedVersion: 5,
+    minSeconds: 11,
+    maxSeconds: 27,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Chromatic Wave",
+            props: {
+              distortion: 0.06,
+              amplitude: 1.2,
+              glow: 1.2,
+              gain: 1.2,
+              midGain: 1.35,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Bands",
+            props: {
+              u_ringWidth: 0.05,
+            },
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Color Posterize",
+            props: {
+              levels: 12,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 8,
+              intensity: 0.55,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Hexagon Halo",
+    introducedVersion: 5,
+    minSeconds: 10,
+    maxSeconds: 25,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Spiral Particles",
+            props: {
+              spinSpeed: 1.1,
+              particleSize: 1.1,
+              turbulence: 0.2,
+              gain: 1.15,
+              trebleGain: 1.35,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Particle Field",
+            props: {
+              particleSize: 0.16,
+              speed: 1.1,
+              opacity: 0.8,
+              gain: 1.1,
+              trebleGain: 1.3,
+            },
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Radial Replicate",
+            props: {
+              numberOfDivisions: 12,
+              postRotateAngle: 0,
+            },
+          },
+          {
+            name: "Vignette",
+            props: {
+              intensity: 20,
+              extension: 0.35,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Background",
+        module: "Point10 Spiral Particles",
+        control: "alpha",
+        feature: "bass",
+        min: 0.25,
+        max: 1,
+      },
+    ],
+  },
+
+  {
+    name: "Circuit Ritual",
+    introducedVersion: 5,
+    minSeconds: 9,
+    maxSeconds: 24,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Smoke Room",
+            props: {
+              smokeDensity: 24,
+              smokeLifespan: 4,
+              simulationSpeed: 1.2,
+              gain: 1.15,
+              bassGain: 1.4,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Waveform",
+            props: {
+              height: 1.5,
+              speed: 1,
+              opacity: 0.8,
+              gain: 1.2,
+              midGain: 1.25,
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "RGB Halftone",
+            props: {
+              gridSize: 50,
+              smoothing: 0.12,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 7,
+              intensity: 0.5,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Point10 Waveform",
+        control: "alpha",
+        feature: "bass",
+        min: 0.15,
+        max: 0.8,
+      },
+    ],
+  },
+
+  {
+    name: "Etched Aurora",
+    introducedVersion: 5,
+    minSeconds: 10,
+    maxSeconds: 26,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Rolling Fire",
+            props: {
+              fireIntensity: 24,
+              simulationSpeed: 0.9,
+              gain: 1.2,
+              bassGain: 1.4,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Chromatic Line",
+            props: {
+              amplitude: 1.1,
+              glow: 1.3,
+              gain: 1.2,
+              midGain: 1.3,
+            },
+            meta: { alpha: 0.7, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Emboss",
+            props: {
+              intensity: 2,
+              colorize: 0.5,
+              brightness: 0.5,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 6,
+              intensity: 0.5,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        module: "Point10 Chromatic Line",
+        control: "alpha",
+        feature: "bass",
+        min: 0.15,
+        max: 0.8,
+      },
+    ],
+  },
+
+  {
+    name: "Brickwork Beat",
+    introducedVersion: 5,
+    minSeconds: 8,
+    maxSeconds: 21,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Light Tunnel",
+            props: {
+              scrollSpeed: 1.1,
+              glow: 1.2,
+              bloom: 1.1,
+              gain: 1.2,
+              bassGain: 1.4,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Line",
+            props: {
+              linesToShow: 60,
+              spacing: 2,
+              lineWidth: 2,
+              speed: 1,
+            },
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Color Invert",
+            props: {},
+          },
+          {
+            name: "Edge Trace",
+            props: {
+              intensity: 3,
+              spread: 5,
+            },
+          },
+          {
+            name: "Vignette",
+            props: {
+              intensity: 16,
+              extension: 0.28,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Foreground",
+        control: "alpha",
+        feature: "bass",
+        min: 0.2,
+        max: 0.85,
       },
     ],
   },

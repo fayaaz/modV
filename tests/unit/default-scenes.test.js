@@ -39,6 +39,25 @@ const variedBatch = DEFAULT_SCENES.filter(
   (scene) => scene.introducedVersion === 4,
 );
 
+const filterBatch = DEFAULT_SCENES.filter(
+  (scene) => scene.introducedVersion === 5,
+);
+
+const FILTER_MODULES = [
+  "ASCII Art",
+  "CMYK Halftone",
+  "Color Invert",
+  "Color Posterize",
+  "Dither-Bayer",
+  "Dot Screen",
+  "Edge Trace",
+  "Edges",
+  "Emboss",
+  "Pixellate",
+  "Radial Replicate",
+  "RGB Halftone",
+];
+
 const getGroup = (scene, name) =>
   scene.groups.find((group) => group.name === name);
 
@@ -51,12 +70,12 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 4", () => {
-    expect(DEFAULTS_VERSION).toBe(4);
+  it("bumps the defaults version to 5", () => {
+    expect(DEFAULTS_VERSION).toBe(5);
   });
 
-  it("ships at least 47 default scenes with unique names", () => {
-    expect(DEFAULT_SCENES.length).toBeGreaterThanOrEqual(47);
+  it("ships at least 55 default scenes with unique names", () => {
+    expect(DEFAULT_SCENES.length).toBeGreaterThanOrEqual(55);
 
     const keys = DEFAULT_SCENES.map((scene) => sceneKey(scene.name));
 
@@ -135,6 +154,33 @@ describe("default scenes", () => {
         }
       }
     }
+  });
+
+  it("adds a varied version 5 filter batch with ASCII Art", () => {
+    expect(filterBatch.length).toBeGreaterThanOrEqual(8);
+
+    const asciiScenes = filterBatch.filter((scene) =>
+      getModuleNames(scene).includes("ASCII Art"),
+    );
+
+    expect(asciiScenes.length).toBeGreaterThanOrEqual(2);
+
+    const usedFilters = new Set(
+      filterBatch.flatMap((scene) =>
+        getModuleNames(scene).filter((name) => FILTER_MODULES.includes(name)),
+      ),
+    );
+
+    expect(usedFilters.size).toBeGreaterThanOrEqual(8);
+    expect(usedFilters.has("ASCII Art")).toBe(true);
+  });
+
+  it("does not use the Webcam module in any default scene", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Webcam"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
   });
 
   it("gives every scene the three required groups with the right inherit flags", () => {
@@ -246,7 +292,7 @@ describe("default scenes", () => {
     expect(dimmed.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("seeds the version 3 and 4 batches for installs on version 2", () => {
+  it("seeds the version 3, 4 and 5 batches for installs on version 2", () => {
     const selected = getScenesToSeed({
       defaultsVersion: 2,
       seededNames: getDefaultSceneNamesUpTo(2),
@@ -261,15 +307,18 @@ describe("default scenes", () => {
     );
   });
 
-  it("only seeds the version 4 batch for installs on version 3", () => {
+  it("seeds the version 4 and 5 batches for installs on version 3", () => {
     const selected = getScenesToSeed({
       defaultsVersion: 3,
       seededNames: getDefaultSceneNamesUpTo(3),
       existingNames: [],
     });
+    const newerBatch = DEFAULT_SCENES.filter(
+      (scene) => scene.introducedVersion > 3,
+    );
 
     expect(selected.map((scene) => scene.name)).toEqual(
-      variedBatch.map((scene) => scene.name),
+      newerBatch.map((scene) => scene.name),
     );
   });
 
