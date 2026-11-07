@@ -366,6 +366,44 @@ export const pickNextRowScene = ({
   return candidates[(currentIndex + 1) % candidates.length];
 };
 
+/**
+ * The Scene a row should move to. When a Scene was prewarmed for this move it
+ * is used (only if it is still a valid candidate), so the warmed GPU instance
+ * is the one that actually loads. Otherwise a fresh pick is made.
+ */
+export const resolveRowAdvanceScene = ({
+  scenes,
+  rowIndex,
+  currentSceneId,
+  pendingSceneId,
+  order,
+  rowNames,
+  random,
+}) => {
+  if (pendingSceneId) {
+    const pending = (Array.isArray(scenes) ? scenes : []).find(
+      (scene) => scene.id === pendingSceneId,
+    );
+
+    if (
+      pending &&
+      isSceneEnabled(pending) &&
+      !isRowCellEmpty(pending, rowIndex, rowNames)
+    ) {
+      return pending;
+    }
+  }
+
+  return pickNextRowScene({
+    scenes,
+    rowIndex,
+    currentSceneId,
+    order,
+    rowNames,
+    random,
+  });
+};
+
 export const shouldAdvanceRow = ({
   dwell,
   minSeconds,

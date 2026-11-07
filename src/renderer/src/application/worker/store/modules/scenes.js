@@ -44,10 +44,13 @@ import {
   matchesRowName,
   normalizeRowNames,
   pickNextRowScene,
+  resolveRowAdvanceScene,
   rowFamilyIsShared,
   shouldAdvanceRow,
   strictMatchesRowName,
 } from "../../scene-rows";
+import { prewarmSceneModules } from "../../point10-prewarm";
+import { clearWarmInstances } from "../../../point10/warm-cache.js";
 import { buildCapturedGroups } from "../../scene-capture";
 import {
   DEFAULT_SCENE_BPM_TWEEN,
@@ -1052,6 +1055,9 @@ const scheduleApplyScene = createSerialTask();
 const activeRows = reactive({});
 const rowTransitions = reactive({});
 const rowRuntime = new Map();
+// How long a row plays before its next Scene is warmed in the background.
+// Warming during the dwell keeps the expensive init off the crossfade path.
+const ROW_PREWARM_AFTER_SECONDS = 0.5;
 let lastRowProgressCommit = 0;
 let legacyDwell = 0;
 let legacyPhrase = createPhraseState();
@@ -1219,6 +1225,8 @@ function resetRowRuntime(rowIndex, dwell = 0, timing = null) {
     dwell,
     phrase: createPhraseState(),
     targetSeconds: pickCellDwell(resolvedTiming),
+    nextSceneId: null,
+    prewarmRequested: false,
   });
 }
 
@@ -1241,6 +1249,8 @@ function getRowRuntime(rowIndex) {
       dwell: 0,
       phrase: createPhraseState(),
       targetSeconds: pickCellDwell(timing),
+      nextSceneId: null,
+      prewarmRequested: false,
     };
     rowRuntime.set(row, runtime);
   }
@@ -2998,6 +3008,10 @@ const actions = {
       ),
     );
 
+    if (!enabled) {
+      clearWarmInstances();
+    }
+
     commit("UPDATE_PERFORMANCE", { enabled });
   },
 
@@ -3088,6 +3102,7 @@ const actions = {
     resetLegacyRuntime();
     await completeTransition(commit);
     await completeAllRowTransitions();
+    clearWarmInstances();
     commit("UPDATE_PERFORMANCE", { enabled: false });
   },
 
@@ -3126,6 +3141,30 @@ const actions = {
     }
 
     await dispatch("applySceneRow", { sceneId: scene.id, rowIndex: row });
+  },
+
+  /**
+   * Warms the Point10 scenes a row is about to move to. Performance mode calls
+   * this during the dwell, so the expensive shader compilation and texture
+   * allocation happen while the current Scene is still playing instead of
+   * stalling the crossfade.
+   */
+  async prewarmRowScene({ state }, { sceneId } = {}) {
+    const scene = state.scenes.find((item) => item.id === sceneId);
+
+    if (!scene) {
+      return;
+    }
+
+    const main = store.state.outputs.main;
+    const canvas = main && main.canvas;
+
+    await prewarmSceneModules({
+      scene,
+      registered: store.state.modules.registered,
+      width: canvas && canvas.width,
+      height: canvas && canvas.height,
+    });
   },
 
   setSceneEnabled({ commit, state }, { sceneId, enabled }) {
@@ -3657,6 +3696,36 @@ const actions = {
 
       runtime.dwell += dt;
 
+      // Choose the next Scene once, then warm it while the current Scene is
+      // still playing. Applying that same Scene later adopts the warm
+      // instance, so a heavy Point10 Scene no longer stalls the crossfade.
+      if (
+        !runtime.prewarmRequested &&
+        runtime.dwell >= ROW_PREWARM_AFTER_SECONDS
+      ) {
+        const ahead = pickNextRowScene({
+          scenes: state.scenes,
+          rowIndex,
+          currentSceneId: currentScene.id,
+          order: performance.order,
+          rowNames: performance.rowNames,
+        });
+
+        runtime.prewarmRequested = true;
+        runtime.nextSceneId = ahead ? ahead.id : null;
+
+        if (ahead) {
+          // Deliberately not awaited: the current Scene keeps rendering while
+          // the next one builds its GPU resources.
+          dispatch("prewarmRowScene", {
+            sceneId: ahead.id,
+            rowIndex,
+          }).catch((error) => {
+            console.warn("Could not prewarm the next row Scene", error);
+          });
+        }
+      }
+
       const { advance } = shouldAdvanceRow({
         dwell: runtime.dwell,
         minSeconds,
@@ -3672,13 +3741,16 @@ const actions = {
       runtime.dwell = 0;
       runtime.phrase = { ...runtime.phrase, t: 0 };
 
-      const nextScene = pickNextRowScene({
+      const nextScene = resolveRowAdvanceScene({
         scenes: state.scenes,
         rowIndex,
         currentSceneId: currentScene.id,
+        pendingSceneId: runtime.nextSceneId,
         order: performance.order,
         rowNames: performance.rowNames,
       });
+
+      runtime.nextSceneId = null;
 
       if (nextScene) {
         await dispatch("applySceneRow", {
@@ -3778,6 +3850,7 @@ const mutations = {
     }
 
     rowRuntime.clear();
+    clearWarmInstances();
   },
 };
 

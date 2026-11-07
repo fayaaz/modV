@@ -18,6 +18,7 @@ import { Point10AudioBridge } from "./audioBridge.js";
 import { RESPONSIVENESS_PROPS, readLevers } from "./props.js";
 import { scenePropsFor } from "./sceneProps.js";
 import { createFrameClock } from "./timing.js";
+import { createWarmCache, registerWarmCache } from "./warm-cache.js";
 
 const instances = new Map();
 
@@ -27,6 +28,30 @@ const instances = new Map();
 // adapter keeps only the most recently drawn scenes and disposes the rest.
 const MAX_LIVE_INSTANCES = 4;
 const INSTANCE_IDLE_MS = 3000;
+
+// Warming a heavy Scene before it is applied keeps its shader compilation and
+// texture allocation off the Scene-change path. A warmed instance still owns
+// its GPU resources, so keep only a couple around.
+const MAX_WARM_INSTANCES = 2;
+
+// Bumped whenever the warm cache is dropped (performance mode off, app reset)
+// so a warmup that finishes afterwards does not re-populate it.
+let warmEpoch = 0;
+
+const warmInstances = createWarmCache({
+  limit: MAX_WARM_INSTANCES,
+  onEvict: disposeInstance,
+  onClear: () => {
+    warmEpoch += 1;
+  },
+});
+
+registerWarmCache(warmInstances);
+
+// Warmups that are still compiling, keyed by Scene name. Two rows can pick the
+// same Scene, and a Scene can become due before its template finishes; both
+// should share one expensive init instead of building a second instance.
+const warmInFlight = new Map();
 
 function normalizeDimension(value) {
   const number = Math.round(Number(value));
@@ -60,6 +85,9 @@ function disposeInstance(instance) {
   instance.canvas.height = 0;
 }
 
+// Live instances are released as soon as the Module goes away (during a
+// crossfade that keeps the context budget in check). Only templates warmed
+// ahead of time live in `warmInstances`.
 function releaseInstance(instance) {
   instances.delete(instance.id);
   disposeInstance(instance);
@@ -108,7 +136,7 @@ function evictInstances(now) {
   for (let i = 0; i < ids.length; i++) {
     const instance = instances.get(ids[i]);
 
-    if (instance.presenting || instance.reading) {
+    if (instance.presenting || instance.reading || instance.warming) {
       continue;
     }
 
@@ -391,12 +419,15 @@ function createTrackedInstance({
   width,
   height,
   isGallery,
+  warmKey = null,
 }) {
   const instance = webgpu
     ? createWebGPUInstance(SceneClass, width, height)
     : createWebGLInstance(SceneClass, width, height);
 
   instance.id = moduleId;
+  instance.SceneClass = SceneClass;
+  instance.warmKey = warmKey || null;
   instance.gallery = !!isGallery;
   // Eagerly created instances must not look like they have been idle since
   // time zero: eviction would reap a prewarmed Scene before its first draw.
@@ -453,9 +484,22 @@ async function prewarmSceneInstance({
   props,
   applyProps,
   isGallery = false,
+  warmKey = null,
+  warmOnly = false,
 }) {
   if (!moduleId) {
     return null;
+  }
+
+  // Join an in-flight warmup for the same Scene rather than starting another.
+  if (warmKey && warmInFlight.has(warmKey)) {
+    const pending = warmInFlight.get(warmKey);
+
+    if (warmOnly) {
+      return pending;
+    }
+
+    await pending;
   }
 
   let instance = instances.get(moduleId);
@@ -463,6 +507,23 @@ async function prewarmSceneInstance({
   if (instance && instance.disposed) {
     instances.delete(moduleId);
     instance = null;
+  }
+
+  // Adopt a template warmed ahead of time for this Scene. It is only valid for
+  // the same Scene class; a stale entry under the same name is discarded.
+  if (!instance && warmKey) {
+    const warm = warmInstances.take(warmKey);
+
+    if (warm && !warm.disposed && warm.SceneClass === SceneClass) {
+      instance = warm;
+      instance.id = moduleId;
+      instance.gallery = !!isGallery;
+      instance.parked = false;
+      instance.lastUsed = performance.now();
+      instances.set(moduleId, instance);
+    } else if (warm) {
+      disposeInstance(warm);
+    }
   }
 
   if (!instance) {
@@ -474,16 +535,60 @@ async function prewarmSceneInstance({
         width,
         height,
         isGallery,
+        warmKey,
       });
     } catch (error) {
       console.error(`Point10 scene "${moduleId}" failed to prewarm:`, error);
       return null;
     }
-  } else if (instance.width !== width || instance.height !== height) {
-    resizeInstance(instance, width, height);
   }
 
-  return warmupInstance(instance, props, applyProps);
+  const epoch = warmEpoch;
+
+  const run = async () => {
+    // Do not let idle eviction reap a Scene while it is still compiling.
+    instance.warming = true;
+
+    try {
+      if (instance.width !== width || instance.height !== height) {
+        resizeInstance(instance, width, height);
+      }
+
+      const warmed = await warmupInstance(instance, props, applyProps);
+
+      // A template warmed for a future Module is not drawn yet, so park it
+      // until a live Module adopts it. If the cache was dropped while it was
+      // compiling, release it instead of leaving a stale warmed Scene behind.
+      if (warmOnly && warmKey && warmed && !warmed.disposed) {
+        instances.delete(warmed.id);
+
+        if (epoch !== warmEpoch) {
+          disposeInstance(warmed);
+        } else {
+          warmed.id = warmKey;
+          warmed.parked = true;
+          warmInstances.set(warmKey, warmed);
+        }
+      }
+
+      return warmed;
+    } finally {
+      instance.warming = false;
+    }
+  };
+
+  if (warmOnly && warmKey) {
+    const pending = run();
+    warmInFlight.set(warmKey, pending);
+
+    try {
+      return await pending;
+    } finally {
+      warmInFlight.delete(warmKey);
+    }
+  }
+
+  return run();
 }
 
 function drawScene({
@@ -496,6 +601,7 @@ function drawScene({
   props,
   applyProps,
   isGallery,
+  warmKey = null,
 }) {
   let instance = instances.get(moduleId);
 
@@ -518,6 +624,7 @@ function drawScene({
         width: canvas.width,
         height: canvas.height,
         isGallery,
+        warmKey,
       });
     } catch (error) {
       console.error(`Point10 scene "${moduleId}" failed to initialise:`, error);
@@ -604,6 +711,12 @@ function createPoint10Module({
       ...meta,
     },
 
+    // Not serialised (unlike `meta`): the worker uses this to choose which
+    // scenes are worth warming ahead of time. WebGPU scenes are the heavy ones
+    // (large simulation textures and pipeline compilation); WebGL scenes stay
+    // lazy so they do not consume the shared WebGL context budget.
+    webgpu,
+
     props: {
       ...RESPONSIVENESS_PROPS,
       ...sceneProps,
@@ -615,7 +728,7 @@ function createPoint10Module({
     // Called by the 2d renderer when the Module becomes active, before a
     // Scene crossfade can start. Creating (and initialising) the instance
     // here is what stops Point10 Scenes from popping in mid-fade.
-    prewarm({ module, width, height } = {}) {
+    prewarm({ module, width, height, warmOnly = false } = {}) {
       return prewarmSceneInstance({
         moduleId: (module && module.$id) || key,
         SceneClass,
@@ -625,6 +738,8 @@ function createPoint10Module({
         props: module && module.props,
         applyProps: applySceneProps,
         isGallery: !!(module && module.meta && module.meta.isGallery),
+        warmKey: key,
+        warmOnly,
       });
     },
 
@@ -639,6 +754,7 @@ function createPoint10Module({
         props,
         applyProps: applySceneProps,
         isGallery,
+        warmKey: key,
       });
     },
   };

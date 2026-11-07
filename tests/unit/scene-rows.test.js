@@ -10,6 +10,7 @@ import {
   isSceneEnabled,
   normalizeRowNames,
   pickNextRowScene,
+  resolveRowAdvanceScene,
   shouldAdvanceRow,
 } from "../../src/renderer/src/application/worker/scene-rows.js";
 
@@ -753,5 +754,77 @@ describe("shouldAdvanceRow", () => {
         phraseFlipped: false,
       }),
     ).toEqual({ advance: true, musical: false, forced: true });
+  });
+});
+
+describe("resolveRowAdvanceScene", () => {
+  const scenes = [scene("a", [a()]), scene("b", [b()]), scene("c", [c()])];
+
+  it("uses the pre-chosen pending Scene when it is still valid", () => {
+    // In-order play would pick "b"; the prewarmed choice must win so the
+    // warmed Scene is the one that actually loads.
+    expect(
+      resolveRowAdvanceScene({
+        scenes,
+        rowIndex: 0,
+        currentSceneId: "a",
+        pendingSceneId: "c",
+      }),
+    ).toBe(scenes[2]);
+  });
+
+  it("falls back to a fresh pick when the pending Scene is gone", () => {
+    expect(
+      resolveRowAdvanceScene({
+        scenes,
+        rowIndex: 0,
+        currentSceneId: "a",
+        pendingSceneId: "missing",
+      }),
+    ).toBe(scenes[1]);
+  });
+
+  it("falls back when the pending Scene was disabled", () => {
+    const withDisabled = [
+      scene("a", [a()]),
+      scene("b", [b()], { enabled: false }),
+      scene("c", [c()]),
+    ];
+
+    expect(
+      resolveRowAdvanceScene({
+        scenes: withDisabled,
+        rowIndex: 0,
+        currentSceneId: "a",
+        pendingSceneId: "b",
+      }),
+    ).toBe(withDisabled[2]);
+  });
+
+  it("falls back when the pending Scene's row is now empty", () => {
+    const staggered = [
+      scene("a", [a(), a()]),
+      scene("b", [b(), empty()]),
+      scene("c", [c(), c()]),
+    ];
+
+    expect(
+      resolveRowAdvanceScene({
+        scenes: staggered,
+        rowIndex: 1,
+        currentSceneId: "a",
+        pendingSceneId: "b",
+      }),
+    ).toBe(staggered[2]);
+  });
+
+  it("picks normally when nothing has been prewarmed", () => {
+    expect(
+      resolveRowAdvanceScene({
+        scenes,
+        rowIndex: 0,
+        currentSceneId: "b",
+      }),
+    ).toBe(scenes[2]);
   });
 });
