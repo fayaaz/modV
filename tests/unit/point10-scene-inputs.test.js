@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { ChromaticLine } from "../../src/renderer/src/application/point10/scenes/ChromaticLine.js";
-import { CubeFloor } from "../../src/renderer/src/application/point10/scenes/CubeFloor.js";
 import { Mycelium } from "../../src/renderer/src/application/point10/scenes/Mycelium.js";
 import { ParticleField } from "../../src/renderer/src/application/point10/scenes/ParticleField.js";
 import { Waveform } from "../../src/renderer/src/application/point10/scenes/Waveform.js";
@@ -9,20 +8,6 @@ const loud = () => new Uint8Array(1024).fill(255);
 const half = () => new Uint8Array(1024).fill(128);
 
 describe("Point10 scene inputs change the output", () => {
-  it("scales the Cube Floor height and glow", () => {
-    const scene = new CubeFloor(null, null);
-    const audio = half();
-    scene.heightScale = 4;
-    scene.update(0.016, audio);
-    const base = scene.cubes[0].mesh.scale.y;
-
-    scene.heightScale = 8;
-    scene.glowScale = 2;
-    scene.update(0.016, audio);
-
-    expect(scene.cubes[0].mesh.scale.y).toBeCloseTo(base * 2, 5);
-  });
-
   it("scales the Waveform height and opacity", () => {
     const scene = new Waveform(null, null);
     const audio = loud();

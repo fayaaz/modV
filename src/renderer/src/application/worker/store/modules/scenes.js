@@ -16,7 +16,9 @@ import {
 import DEFAULT_SCENES, {
   DEFAULTS_VERSION,
   LEGACY_DEFAULTS_VERSION,
+  REMOVED_DEFAULT_SCENE_MODULES,
   getDefaultSceneNamesUpTo,
+  getDefaultScenesToReplace,
   getScenesToSeed,
 } from "../default-scenes";
 import {
@@ -1707,6 +1709,10 @@ async function buildSceneSnapshot(definition) {
             enabled: true,
             ...(moduleDefinition.meta || {}),
           },
+          // Snapshots never render, so eagerly initialising (and then
+          // disposing) every Point10 scene while seeding the defaults would
+          // only burn GPU bring-up time.
+          prewarm: false,
         });
 
         if (!module) {
@@ -2803,28 +2809,121 @@ const actions = {
       seededNames: seededDefaultScenes,
       existingNames,
     });
+    const markSeeded = (name) => {
+      const key = getSceneNameKey(name);
+
+      if (!seededKeys.has(key)) {
+        seededKeys.add(key);
+        seededDefaultScenes.push(name);
+      }
+    };
     let failed = false;
 
-    for (let i = 0, len = scenesToSeed.length; i < len; i++) {
-      const definition = scenesToSeed[i];
+    // Rebuild default Scenes that still reference a removed Module before
+    // seeding, so upgrades do not keep broken Scenes around. The existing id
+    // and name are kept so user references (for example the active Scene)
+    // survive the migration.
+    const migration = getDefaultScenesToReplace({
+      defaultsVersion: currentVersion,
+      scenes: state.scenes,
+      removedModuleNames: REMOVED_DEFAULT_SCENE_MODULES,
+    });
+
+    for (let i = 0, len = migration.replacements.length; i < len; i++) {
+      const replacement = migration.replacements[i];
+
+      try {
+        const scene = await buildSceneSnapshot(replacement.definition);
+
+        if (scene) {
+          const existing = state.scenes.find(
+            (item) => item.id === replacement.id,
+          );
+
+          // Keep the user's Scene metadata (enabled, timing, ...) and only swap
+          // the snapshot payload for the rebuilt definition.
+          commit("ADD_SCENE", {
+            ...scene,
+            ...(existing || {}),
+            id: replacement.id,
+            name: replacement.name,
+            groups: scene.groups,
+            modules: scene.modules,
+            inputs: scene.inputs,
+            expressions: scene.expressions,
+            tweens: scene.tweens,
+          });
+          markSeeded(replacement.name);
+        }
+      } catch (e) {
+        failed = true;
+        console.error(
+          `Could not migrate default Scene "${replacement.name}"`,
+          e,
+        );
+      }
+    }
+
+    const additions = [...migration.additions, ...scenesToSeed];
+    const addedKeys = new Set();
+
+    for (let i = 0, len = additions.length; i < len; i++) {
+      const definition = additions[i];
+      const key = getSceneNameKey(definition.name);
+
+      if (existingKeys.has(key) || seededKeys.has(key)) {
+        markSeeded(definition.name);
+        addedKeys.add(key);
+        continue;
+      }
 
       try {
         const scene = await buildSceneSnapshot(definition);
 
         if (scene) {
           commit("ADD_SCENE", scene);
-
-          const key = getSceneNameKey(definition.name);
-
-          if (!seededKeys.has(key)) {
-            seededKeys.add(key);
-            seededDefaultScenes.push(definition.name);
-          }
+          markSeeded(definition.name);
+          addedKeys.add(key);
         }
       } catch (e) {
         failed = true;
         console.error(`Could not create default Scene "${definition.name}"`, e);
       }
+    }
+
+    // A renamed default (Cube Floor Drive -> Waveform Drive) is only removed
+    // once its replacement was added, so a failed build cannot lose the Scene.
+    const additionsComplete = migration.additions.every((definition) =>
+      addedKeys.has(getSceneNameKey(definition.name)),
+    );
+
+    if (additionsComplete) {
+      for (let i = 0, len = migration.removals.length; i < len; i++) {
+        const removal = migration.removals[i];
+        const key = getSceneNameKey(removal.name);
+
+        try {
+          await dispatch("removeScene", { sceneId: removal.id });
+
+          const seededIndex = seededDefaultScenes.findIndex(
+            (name) => getSceneNameKey(name) === key,
+          );
+
+          if (seededIndex > -1) {
+            seededDefaultScenes.splice(seededIndex, 1);
+          }
+
+          seededKeys.delete(key);
+        } catch (e) {
+          failed = true;
+          console.error(
+            `Could not remove migrated default Scene "${removal.name}"`,
+            e,
+          );
+        }
+      }
+    } else {
+      failed = true;
     }
 
     // A user Scene may already use a default's name. Treat it as seeded so

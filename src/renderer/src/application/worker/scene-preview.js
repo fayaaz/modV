@@ -169,7 +169,9 @@ export async function createScenePreview({
 
     try {
       if (renderer.addActiveModule) {
-        await renderer.addActiveModule(module, definition);
+        await renderer.addActiveModule(module, definition, {
+          canvas: runtime.canvas,
+        });
       }
 
       added = true;

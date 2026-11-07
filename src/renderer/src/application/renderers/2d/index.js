@@ -149,6 +149,43 @@ async function setupModule(moduleDefinition) {
 }
 
 /**
+ * Called when a Module becomes active. Point10 Modules use this hook to create
+ * and warm up their scene instance before a Scene crossfade starts, so the
+ * incoming Group is already drawable when its alpha begins to rise. Other 2d
+ * Modules do not expose `prewarm` and are left untouched.
+ */
+async function addActiveModule(module, moduleDefinition, options = {}) {
+  if (!moduleDefinition || typeof moduleDefinition.prewarm !== "function") {
+    return;
+  }
+
+  // Gallery items mount every registered Point10 Scene at once; warming them
+  // would exhaust the WebGL/WebGPU context budget. Gallery previews still
+  // create their instance lazily on first draw.
+  if (module && module.meta && module.meta.isGallery) {
+    return;
+  }
+
+  if (options.prewarm === false) {
+    return;
+  }
+
+  const canvas =
+    options.canvas ||
+    (store.state.outputs.main && store.state.outputs.main.canvas);
+  const width = canvas && canvas.width;
+  const height = canvas && canvas.height;
+
+  try {
+    await moduleDefinition.prewarm({ module, width, height });
+  } catch (error) {
+    console.error(
+      `Error prewarming Point10 Module "${module && module.meta && module.meta.name}".\n\n${error}`,
+    );
+  }
+}
+
+/**
  * Releases per-instance GPU resources. Only Point10 Modules own an instance;
  * for every other 2D Module this is a no-op.
  */
@@ -168,5 +205,6 @@ export default {
   updateModule,
   resizeModule,
   setupModule,
+  addActiveModule,
   removeActiveModule,
 };

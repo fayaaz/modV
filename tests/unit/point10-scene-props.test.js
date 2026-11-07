@@ -26,6 +26,7 @@ function fakeScene(fields = {}) {
     _smokeLifespan: 0,
     _fireLifespan: 0,
     _simSpeed: 0,
+    _boxScale: 0,
     ...fields,
   };
 }
@@ -78,6 +79,7 @@ describe("Point10 scene prop registry", () => {
         smokeLifespan: 0,
         fireLifespan: 99,
         simulationSpeed: 100,
+        boxScale: 100,
       },
       SMOKE_ROOM_PROPS,
     );
@@ -87,6 +89,7 @@ describe("Point10 scene prop registry", () => {
     expect(values.smokeLifespan).toBe(SMOKE_ROOM_PROPS.smokeLifespan.min);
     expect(values.fireLifespan).toBe(SMOKE_ROOM_PROPS.fireLifespan.max);
     expect(values.simulationSpeed).toBe(4);
+    expect(values.boxScale).toBe(SMOKE_ROOM_PROPS.boxScale.max);
   });
 
   it("ignores non-numeric values", () => {
@@ -94,11 +97,13 @@ describe("Point10 scene prop registry", () => {
       smokeDensity: "thick",
       fireIntensity: null,
       simulationSpeed: Number.NaN,
+      boxScale: "big",
     });
 
     expect(values.smokeDensity).toBe(28);
     expect(values.fireIntensity).toBe(40);
     expect(values.simulationSpeed).toBe(1.2);
+    expect(values.boxScale).toBe(SMOKE_ROOM_PROPS.boxScale.default);
   });
 });
 
@@ -110,14 +115,25 @@ describe("Smoke scenes", () => {
       "smokeLifespan",
       "fireLifespan",
       "simulationSpeed",
+      "boxScale",
     ]);
     expect(SMOKE_ROOM_PROPS.smokeDensity.label).toBe("Smoke Density");
+  });
+
+  it("scales the smoke box to fill the frame by default", () => {
+    expect(SMOKE_ROOM_PROPS.boxScale.label).toBe("Box Scale");
+    expect(SMOKE_ROOM_PROPS.boxScale.default).toBeGreaterThanOrEqual(2.7);
+    expect(SMOKE_ROOM_PROPS.boxScale.min).toBeGreaterThan(0);
+    expect(SMOKE_ROOM_PROPS.boxScale.max).toBeGreaterThan(
+      SMOKE_ROOM_PROPS.boxScale.default,
+    );
   });
 
   it("keeps the DVD Room's dimmer fire default", () => {
     expect(SMOKE_ROOM_PROPS.fireIntensity.default).toBe(40);
     expect(DVD_ROOM_PROPS.fireIntensity.default).toBe(22);
     expect(DVD_ROOM_PROPS.smokeDensity).toEqual(SMOKE_ROOM_PROPS.smokeDensity);
+    expect(DVD_ROOM_PROPS.boxScale).toEqual(SMOKE_ROOM_PROPS.boxScale);
   });
 
   it("uses the Rolling Fire's smaller grid defaults", () => {
@@ -135,6 +151,7 @@ describe("Smoke scenes", () => {
       smokeLifespan: 9,
       fireLifespan: 2,
       simulationSpeed: 2.5,
+      boxScale: 1.7,
     });
 
     expect(values.smokeDensity).toBe(12);
@@ -143,6 +160,8 @@ describe("Smoke scenes", () => {
     expect(scene._smokeLifespan).toBe(9);
     expect(scene._fireLifespan).toBe(2);
     expect(scene._simSpeed).toBe(2.5);
+    expect(values.boxScale).toBe(1.7);
+    expect(scene._boxScale).toBe(1.7);
   });
 
   it("survives the frame before the WebGPU volume exists", () => {

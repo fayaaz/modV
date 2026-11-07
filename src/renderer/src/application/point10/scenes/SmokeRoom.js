@@ -67,11 +67,6 @@ const VOLUME_WORLD_SIZE_Y = 12;
 const VOLUME_WORLD_SIZE_Z = 24;
 // ponytail: DVD Room reuses the grid footprint for its room bounds - one source.
 export { VOLUME_WORLD_SIZE_X, VOLUME_WORLD_SIZE_Y, VOLUME_WORLD_SIZE_Z };
-const VOLUME_WORLD_SIZE_DIAGONAL = Math.sqrt(
-  VOLUME_WORLD_SIZE_X ** 2 +
-    VOLUME_WORLD_SIZE_Y ** 2 +
-    VOLUME_WORLD_SIZE_Z ** 2,
-);
 const TEXEL_X = 1 / GRID_SIZE_X;
 const TEXEL_Y = 1 / GRID_SIZE_Y;
 const TEXEL_Z = 1 / GRID_SIZE_Z;
@@ -123,10 +118,22 @@ export class SmokeRoom extends BaseSceneWebGPU {
     this._snare = 0; // smoothed snare band energy (big fire/smoke pulses)
     this._pulse = { hue: 0, t: 0 };
     this._camPos = new THREE.Vector3();
+    this._boxScale = 1;
+    this._baseGridOrigin = new THREE.Vector3(0, -VOLUME_WORLD_SIZE_Y / 2, 0);
     if (!this._available) {
       console.warn("SmokeRoom: WebGPU not available, scene disabled.");
       return;
     }
+  }
+
+  // Half extents of the glass room at a given box scale. The top is stretched
+  // separately by glassFit so the camera stays inside the room.
+  static boxHalfExtents(scale = 1) {
+    return {
+      x: GLASS_HALF_X * scale,
+      y: GLASS_HALF_Y * scale,
+      z: GLASS_HALF_Z * scale,
+    };
   }
 
   // World-space Y that puts the room's highest edge exactly on the output's
@@ -135,7 +142,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
   // Solve that for p.y over the four top corners and take the highest - the
   // far corners are the ones that otherwise peek into frame. Aspect ratio does
   // not enter because three's fov is vertical.
-  static requiredGlassTop(camera) {
+  static requiredGlassTop(camera, scale = 1) {
     camera.updateMatrixWorld();
 
     const forward = camera.getWorldDirection(new THREE.Vector3());
@@ -146,11 +153,12 @@ export class SmokeRoom extends BaseSceneWebGPU {
     const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
     const denominator = up.y - tanHalfFov * forward.y;
     const { x: camX, y: camY, z: camZ } = camera.position;
+    const { x: halfX, z: halfZ } = this.boxHalfExtents(scale);
 
     let top = -Infinity;
 
-    for (const x of [-GLASS_HALF_X, GLASS_HALF_X]) {
-      for (const z of [-GLASS_HALF_Z, GLASS_HALF_Z]) {
+    for (const x of [-halfX, halfX]) {
+      for (const z of [-halfZ, halfZ]) {
         const ex = x - camX;
         const ez = z - camZ;
         const offset =
@@ -165,12 +173,13 @@ export class SmokeRoom extends BaseSceneWebGPU {
   }
 
   // Height and centre for a bottom-anchored room that reaches `top`.
-  static glassFit(top) {
-    const topY = Math.max(top, GLASS_HALF_Y);
+  static glassFit(top, scale = 1) {
+    const halfY = this.boxHalfExtents(scale).y;
+    const topY = Math.max(top, halfY);
 
     return {
-      height: topY + GLASS_HALF_Y,
-      centreY: (topY - GLASS_HALF_Y) / 2,
+      height: topY + halfY,
+      centreY: (topY - halfY) / 2,
     };
   }
 
@@ -264,17 +273,38 @@ export class SmokeRoom extends BaseSceneWebGPU {
     scene.add(glass);
   }
 
-  // Stretch the glass upwards so its top edge sits just past the output's top
-  // border. The bottom stays on the sim floor; only the height changes.
+  // Scale the glass with the room and stretch it upwards so its top edge sits
+  // just past the output's top border. The bottom stays on the (scaled) sim
+  // floor; only the height is stretched.
   _fitGlassToOutput() {
     const glass = this._glassMesh;
     if (!glass) return;
 
+    const scale = this._boxScale ?? 1;
     const { height, centreY } = this.constructor.glassFit(
-      this.constructor.requiredGlassTop(this.camera) + GLASS_TOP_MARGIN,
+      this.constructor.requiredGlassTop(this.camera, scale) +
+        GLASS_TOP_MARGIN * scale,
+      scale,
     );
-    glass.scale.y = height / (GLASS_HALF_Y * 2);
+    glass.scale.set(scale, height / (GLASS_HALF_Y * 2), scale);
     glass.position.y = centreY;
+  }
+
+  _applyBoxScale() {
+    const scale = this._boxScale ?? 1;
+    if (this._boxGroup) this._boxGroup.scale.setScalar(scale);
+    if (this._uBoxScale) this._uBoxScale.value = scale;
+    if (this._uVolumeWorldSize) {
+      this._uVolumeWorldSize.value.set(
+        VOLUME_WORLD_SIZE_X * scale,
+        VOLUME_WORLD_SIZE_Y * scale,
+        VOLUME_WORLD_SIZE_Z * scale,
+      );
+    }
+    if (this._uGridOrigin && this._baseGridOrigin) {
+      this._uGridOrigin.value.copy(this._baseGridOrigin).multiplyScalar(scale);
+    }
+    this._fitGlassToOutput();
   }
 
   // The emitter drives the sim uniforms each tick (base: fixed at the grid
@@ -282,13 +312,13 @@ export class SmokeRoom extends BaseSceneWebGPU {
   _updateEmitter() {
     this.emitter.updateMatrixWorld();
     this._uSphereMatrix.value.copy(this.emitter.matrixWorld);
-    this._uSpherePosition.value.copy(
-      this.emitter.getWorldPosition(this._camPos),
-    );
+    const worldPos = this.emitter.getWorldPosition(this._camPos);
+    this._uSpherePosition.value.copy(worldPos);
+    const scale = this._boxScale ?? 1;
     this._uGridOrigin.value.set(
-      this.emitter.position.x,
-      this.emitter.position.y - VOLUME_WORLD_SIZE_Y / 2,
-      this.emitter.position.z,
+      worldPos.x,
+      worldPos.y - (VOLUME_WORLD_SIZE_Y * scale) / 2,
+      worldPos.z,
     );
   }
 
@@ -380,6 +410,8 @@ export class SmokeRoom extends BaseSceneWebGPU {
     // modV group canvas composites over whatever is beneath it.
     scene.background = null;
     this.scene = scene;
+    this._boxGroup = new THREE.Group();
+    scene.add(this._boxGroup);
 
     // fixed camera: the whole sim grid is the room, so frame it.
     const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 100);
@@ -429,6 +461,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
         VOLUME_WORLD_SIZE_Z,
       ),
     );
+    const uBoxScale = uniform(1.0);
     const uDt = uniform(0.016);
     const uTime = uniform(0);
     const uBuoyancy = uniform(3.0);
@@ -570,7 +603,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
 
       const turbulence = thermalTurbulence
         .add(ambientTurbulence)
-        .mul(VOLUME_WORLD_SIZE_Y);
+        .mul(uVolumeWorldSize.y);
       newVel.addAssign(turbulence.mul(uDt));
 
       newVel.mulAssign(max(float(1).sub(uVelDamping.mul(uDt)), 0));
@@ -578,17 +611,17 @@ export class SmokeRoom extends BaseSceneWebGPU {
       const worldPos = uvw
         .sub(0.5)
         .mul(uVolumeWorldSize)
-        .add(vec3(0, VOLUME_WORLD_SIZE_Y / 2, 0))
+        .add(vec3(0, uVolumeWorldSize.y.mul(0.5), 0))
         .add(uGridOrigin);
       const dist = worldPos.distance(uSpherePosition);
-      const sphereRadius = float(SPHERE_RADIUS);
+      const sphereRadius = float(SPHERE_RADIUS).mul(uBoxScale);
 
       // Radial "buoyancy": push fire/smoke OUTWARD from the sphere centre in
       // all directions (instead of always rising with convection).
       const buoyancyForce = temperature
         .mul(uBuoyancy)
         .sub(density.mul(uWeight))
-        .mul(VOLUME_WORLD_SIZE_Y);
+        .mul(uVolumeWorldSize.y);
       If(dist.greaterThan(0.01), () => {
         const dir = worldPos.sub(uSpherePosition).div(dist);
         newVel.addAssign(dir.mul(buoyancyForce).mul(uDt));
@@ -720,7 +753,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
 
       const uvw = worldPos
         .sub(uGridOrigin)
-        .sub(vec3(0, VOLUME_WORLD_SIZE_Y / 2, 0))
+        .sub(vec3(0, uVolumeWorldSize.y.mul(0.5), 0))
         .div(uVolumeWorldSize)
         .add(0.5);
 
@@ -819,7 +852,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     const getVolumeSample = ({ positionRay }) => {
       const uvw = positionRay
         .sub(uGridOrigin)
-        .sub(vec3(0, VOLUME_WORLD_SIZE_Y / 2, 0))
+        .sub(vec3(0, uVolumeWorldSize.y.mul(0.5), 0))
         .div(uVolumeWorldSize)
         .add(0.5)
         .toVar();
@@ -854,7 +887,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
         const shadowPos = positionRay.add(lightDir.mul(stepDist));
         const shadowUVW = shadowPos
           .sub(uGridOrigin)
-          .sub(vec3(0, VOLUME_WORLD_SIZE_Y / 2, 0))
+          .sub(vec3(0, uVolumeWorldSize.y.mul(0.5), 0))
           .div(uVolumeWorldSize)
           .add(0.5);
         const shadowEdge = min(shadowUVW, vec3(1).sub(shadowUVW));
@@ -911,7 +944,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
       const steps = uniform("int").onRenderUpdate(
         ({ material }) => material.steps || volumetricMaterial.steps,
       );
-      const maxDistance = float(VOLUME_WORLD_SIZE_DIAGONAL);
+      const maxDistance = uVolumeWorldSize.length();
       const stepSize = maxDistance.div(steps).toVar();
       const rayDir = lightDir.toVar();
       const distTravelled = float(0.0).toVar();
@@ -941,7 +974,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     volumetricMesh.position.y = VOLUME_WORLD_SIZE_Y / 2 + 0.4;
     volumetricMesh.receiveShadow = true;
     this._volumetricMesh = volumetricMesh;
-    scene.add(volumetricMesh);
+    this._boxGroup.add(volumetricMesh);
 
     const shadowMaterial = new THREE.VolumeNodeMaterial();
     shadowMaterial.steps = volumetricMaterial.steps;
@@ -969,7 +1002,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     volumetricShadowMesh.position.y = VOLUME_WORLD_SIZE_Y / 2 + 0.4;
     volumetricShadowMesh.castShadow = true;
     this._volumetricShadowMesh = volumetricShadowMesh;
-    scene.add(volumetricShadowMesh);
+    this._boxGroup.add(volumetricShadowMesh);
 
     // ---- lava sphere (a subclass hook may supply the emitter material) ----
     const sphereMaterial = new THREE.MeshStandardMaterial({
@@ -1021,7 +1054,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     );
     emitter.receiveShadow = true;
     emitter.position.set(0, 0, 0);
-    scene.add(emitter);
+    this._boxGroup.add(emitter);
     this.emitter = emitter;
 
     // ---- fire point light (attached to emitter) ---------------------------
@@ -1236,6 +1269,8 @@ export class SmokeRoom extends BaseSceneWebGPU {
     this._uEmitGain = uEmitGain;
     this._uSway = uSway;
     this._uGridOrigin = uGridOrigin;
+    this._uVolumeWorldSize = uVolumeWorldSize;
+    this._uBoxScale = uBoxScale;
     this._uKeyLightPos = uKeyLightPos;
     this._uFlicker = uFlicker;
     this._uColorNoise = uColorNoise;
@@ -1276,6 +1311,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     this._fireLifespan = 1.3;
 
     this._afterInitVolume(scene);
+    this._applyBoxScale();
   }
 
   _updateTemporalUniforms(time) {
@@ -1299,6 +1335,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
 
   _animate() {
     if (!this._initialized) return;
+    this._applyBoxScale();
     // modV: the worker loop hands us the frame delta instead of a clock.
     const delta = Math.min(this._dt || 1 / 60, 1 / 30);
 
@@ -1348,11 +1385,11 @@ export class SmokeRoom extends BaseSceneWebGPU {
     }
 
     // the volume boxes sit at the grid origin (fixed at the sphere)
-    const gy = this._uGridOrigin.value.y;
+    const gy = this._baseGridOrigin.y;
     this._volumetricMesh.position.set(
-      this._uGridOrigin.value.x,
+      this._baseGridOrigin.x,
       gy + VOLUME_WORLD_SIZE_Y / 2,
-      this._uGridOrigin.value.z,
+      this._baseGridOrigin.z,
     );
     this._volumetricShadowMesh.position.copy(this._volumetricMesh.position);
 

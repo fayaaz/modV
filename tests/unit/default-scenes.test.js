@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import DEFAULT_SCENES, {
   DEFAULTS_VERSION,
   getDefaultSceneNamesUpTo,
+  getDefaultScenesToReplace,
   getScenesToSeed,
 } from "../../src/renderer/src/application/worker/store/default-scenes.js";
 
@@ -47,6 +48,12 @@ const digitalBatch = DEFAULT_SCENES.filter(
   (scene) => scene.introducedVersion === 6,
 );
 
+const version7Batch = DEFAULT_SCENES.filter(
+  (scene) => scene.introducedVersion === 7,
+);
+
+const REMOVED_CUBE_FLOOR_MODULE = "Point10 Cube Floor";
+
 const FILTER_MODULES = [
   "ASCII Art",
   "CMYK Halftone",
@@ -74,8 +81,8 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 6", () => {
-    expect(DEFAULTS_VERSION).toBe(6);
+  it("bumps the defaults version to 7", () => {
+    expect(DEFAULTS_VERSION).toBe(7);
   });
 
   it("ships at least 55 default scenes with unique names", () => {
@@ -269,6 +276,83 @@ describe("default scenes", () => {
     expect(trebleHueLink).toBeUndefined();
   });
 
+  it("does not use the removed Point10 Cube Floor module", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes(REMOVED_CUBE_FLOOR_MODULE),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("renames Cube Floor Drive to Waveform Drive", () => {
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Waveform Drive",
+    );
+
+    expect(scene).toBeTruthy();
+    expect(scene.introducedVersion).toBe(2);
+    expect(
+      DEFAULT_SCENES.some((candidate) => candidate.name === "Cube Floor Drive"),
+    ).toBe(false);
+    expect(getModulesInGroup(scene, "Background")).toContain(
+      "Point10 Waveform",
+    );
+  });
+
+  it("adds the version 7 Circular Mountain scene", () => {
+    expect(version7Batch.length).toBeGreaterThanOrEqual(1);
+
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Circular Mountain",
+    );
+
+    expect(scene).toBeTruthy();
+    expect(scene.introducedVersion).toBe(7);
+    expect(version7Batch).toContain(scene);
+    expect(Number(scene.minSeconds)).toBeLessThan(Number(scene.maxSeconds));
+
+    for (const name of GROUP_NAMES) {
+      expect(getGroup(scene, name), name).toBeTruthy();
+    }
+
+    expect(getModulesInGroup(scene, "Background")).toEqual([
+      "fractal-mountain-tunnel",
+    ]);
+    expect(getModulesInGroup(scene, "Foreground")).toEqual(
+      expect.arrayContaining(["Circular Screen", "Corner Color Tint", "badtv"]),
+    );
+    expect(getModulesInGroup(scene, "Effects")).toEqual(["Bloom"]);
+
+    const links = scene.inputLinks || [];
+    const findLink = (module, control) =>
+      links.find((link) => link.module === module && link.control === control);
+
+    expect(findLink("fractal-mountain-tunnel", "speed")).toMatchObject({
+      group: "Background",
+      feature: "bass",
+      min: 0,
+      max: 1,
+    });
+    expect(findLink("Corner Color Tint", "alpha")).toMatchObject({
+      group: "Foreground",
+      feature: "rms",
+      min: 0,
+      max: 2,
+    });
+    expect(findLink("Corner Color Tint", "rotationAngle")).toMatchObject({
+      group: "Foreground",
+      feature: "rms",
+      min: 0,
+      max: 1,
+    });
+    expect(findLink("badtv", "scanLineIntensity")).toMatchObject({
+      group: "Foreground",
+      feature: "treble",
+      min: 0,
+      max: 1,
+    });
+  });
+
   it("does not use the Kaleidoscope or Kaleidoscope Tile modules in any default scene", () => {
     const offenders = DEFAULT_SCENES.filter((scene) =>
       getModuleNames(scene).some((name) => KALEIDOSCOPE_MODULES.includes(name)),
@@ -445,5 +529,124 @@ describe("default scenes", () => {
     });
 
     expect(selected).toEqual([]);
+  });
+});
+
+describe("default scene migration", () => {
+  const cubeFloorScene = (name, id = name) => ({
+    id,
+    name,
+    modules: {
+      "module-id": {
+        $moduleName: REMOVED_CUBE_FLOOR_MODULE,
+      },
+    },
+  });
+
+  it("rebuilds existing defaults that still use a removed module", () => {
+    const scenes = [
+      cubeFloorScene("Neon Grid", "neon-id"),
+      cubeFloorScene("Roto Zoom Riot", "roto-id"),
+      cubeFloorScene("Dither District", "dither-id"),
+    ];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 6,
+      scenes,
+      removedModuleNames: [REMOVED_CUBE_FLOOR_MODULE],
+    });
+
+    expect(result.removals).toEqual([]);
+    expect(result.additions).toEqual([]);
+    expect(result.replacements.map((replacement) => replacement.name)).toEqual(
+      expect.arrayContaining([
+        "Neon Grid",
+        "Roto Zoom Riot",
+        "Dither District",
+      ]),
+    );
+
+    const neon = result.replacements.find(
+      (replacement) => replacement.name === "Neon Grid",
+    );
+
+    expect(neon.id).toBe("neon-id");
+    expect(neon.definition.name).toBe("Neon Grid");
+    expect(
+      neon.definition.groups.flatMap((group) =>
+        group.modules.map((module) => module.name),
+      ),
+    ).not.toContain(REMOVED_CUBE_FLOOR_MODULE);
+
+    for (const replacement of result.replacements) {
+      expect(
+        replacement.definition.groups.flatMap((group) =>
+          group.modules.map((module) => module.name),
+        ),
+      ).not.toContain(REMOVED_CUBE_FLOOR_MODULE);
+    }
+  });
+
+  it("preserves user edits when a scene no longer uses the removed module", () => {
+    const scenes = [
+      {
+        id: "neon-id",
+        name: "Neon Grid",
+        modules: {
+          "module-id": { $moduleName: "Point10 Light Tunnel" },
+        },
+      },
+    ];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 6,
+      scenes,
+      removedModuleNames: [REMOVED_CUBE_FLOOR_MODULE],
+    });
+
+    expect(result.replacements).toEqual([]);
+    expect(result.removals).toEqual([]);
+    expect(result.additions).toEqual([]);
+  });
+
+  it("removes the renamed Cube Floor Drive and seeds Waveform Drive", () => {
+    const scenes = [cubeFloorScene("Cube Floor Drive", "cube-drive-id")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 6,
+      scenes,
+      removedModuleNames: [REMOVED_CUBE_FLOOR_MODULE],
+    });
+
+    expect(result.replacements).toEqual([]);
+    expect(result.removals).toEqual([
+      { id: "cube-drive-id", name: "Cube Floor Drive" },
+    ]);
+    expect(result.additions.map((definition) => definition.name)).toEqual([
+      "Waveform Drive",
+    ]);
+  });
+
+  it("ignores user scenes that do not share a default name", () => {
+    const scenes = [cubeFloorScene("My Cube Floor Experiment")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 6,
+      scenes,
+      removedModuleNames: [REMOVED_CUBE_FLOOR_MODULE],
+    });
+
+    expect(result.replacements).toEqual([]);
+    expect(result.removals).toEqual([]);
+    expect(result.additions).toEqual([]);
+  });
+
+  it("does not migrate installs that are already on the new defaults version", () => {
+    const scenes = [cubeFloorScene("Neon Grid", "neon-id")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: DEFAULTS_VERSION,
+      scenes,
+      removedModuleNames: [REMOVED_CUBE_FLOOR_MODULE],
+    });
+
+    expect(result.replacements).toEqual([]);
+    expect(result.removals).toEqual([]);
+    expect(result.additions).toEqual([]);
   });
 });

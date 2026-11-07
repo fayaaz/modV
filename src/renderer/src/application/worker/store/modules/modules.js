@@ -230,6 +230,7 @@ const actions = {
       moduleMeta = {},
       existingModule,
       generateNewIds = false,
+      prewarm = true,
       writeToSwap,
     },
   ) {
@@ -393,9 +394,19 @@ const actions = {
       );
     }
 
+    const { canvas } = rootState.outputs.main || {
+      canvas: { width: 0, height: 0 },
+    };
+
     if (renderers[type].addActiveModule) {
       try {
-        await renderers[type].addActiveModule(module, moduleDefinition);
+        await renderers[type].addActiveModule(module, moduleDefinition, {
+          canvas,
+          // Modules loaded into the swap buffer only become active after the
+          // swap, so there is no crossfade to prepare for (and prewarming them
+          // would briefly double the live Scene contexts).
+          prewarm: prewarm && !writeToSwap,
+        });
       } catch (e) {
         console.error(
           `Error in ${type} renderer addActiveModule whilst registering "${module.meta.name}".\n\n${e}`,
@@ -415,10 +426,6 @@ const actions = {
         }
       }
     }
-
-    const { canvas } = rootState.outputs.main || {
-      canvas: { width: 0, height: 0 },
-    };
 
     if (moduleDefinition && "init" in moduleDefinition) {
       const { data } = writeTo.active[module.$id];

@@ -149,7 +149,7 @@ test("ships a version 3 batch of glitch and twirl scenes", async () => {
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(6);
+  expect(DEFAULTS_VERSION).toBe(7);
   expect(newBatch.length).toBeGreaterThanOrEqual(10);
 
   for (const scene of newBatch) {
@@ -371,6 +371,36 @@ test("version 6 ships the MBOX Light Tunnel scene with audio reactive layers", a
 
   expect(alphaLink, "foreground alpha should follow music").toBeTruthy();
   expect(backgroundLink, "MBOX background should follow music").toBeTruthy();
+});
+
+test("version 7 replaces Cube Floor and ships Circular Mountain", () => {
+  const version7 = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 7,
+  );
+  const circularMountain = version7.find(
+    (scene) => scene.name === "Circular Mountain",
+  );
+
+  expect(DEFAULTS_VERSION).toBe(7);
+  expect(circularMountain).toBeTruthy();
+  expect(getGroupModules(circularMountain, "Background")).toEqual([
+    "fractal-mountain-tunnel",
+  ]);
+  expect(getGroupModules(circularMountain, "Foreground")).toEqual(
+    expect.arrayContaining(["Circular Screen", "Corner Color Tint", "badtv"]),
+  );
+  expect(getGroupModules(circularMountain, "Effects")).toEqual(["Bloom"]);
+  expect(
+    DEFAULT_SCENES.some((scene) =>
+      getModuleNames(scene).includes("Point10 Cube Floor"),
+    ),
+  ).toBe(false);
+  expect(
+    DEFAULT_SCENES.some((scene) => scene.name === "Cube Floor Drive"),
+  ).toBe(false);
+  expect(DEFAULT_SCENES.some((scene) => scene.name === "Waveform Drive")).toBe(
+    true,
+  );
 });
 
 test("MBOX Light Tunnel seeds a BPM hue tween, bass scale and constant speed", async () => {

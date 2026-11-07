@@ -28,6 +28,12 @@ const instances = new Map();
 const MAX_LIVE_INSTANCES = 4;
 const INSTANCE_IDLE_MS = 3000;
 
+function normalizeDimension(value) {
+  const number = Math.round(Number(value));
+
+  return Number.isFinite(number) && number > 0 ? number : 300;
+}
+
 function disposeInstance(instance) {
   instance.disposed = true;
 
@@ -148,7 +154,7 @@ function evictGalleryInstances(keepId) {
   }
 }
 
-function createInstance(SceneClass, width, height) {
+function createWebGLInstance(SceneClass, width, height) {
   const canvas = new OffscreenCanvas(width, height);
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -225,6 +231,7 @@ function createWebGPUInstance(SceneClass, width, height) {
     frameClock: createFrameClock(),
     webgpu: true,
     ready: false,
+    readyPromise: null,
     bitmap: null,
     presenting: false,
     width,
@@ -232,20 +239,28 @@ function createWebGPUInstance(SceneClass, width, height) {
     lastUsed: 0,
   };
 
-  scene
-    .init()
+  // The backend and the scene's own passes come up asynchronously. Prewarming
+  // awaits this promise so a Scene change can hold the incoming Group's fade
+  // until the first frame is actually drawable.
+  instance.readyPromise = Promise.resolve()
+    .then(() => scene.init())
     .then((ok) => {
       instance.ready = ok !== false;
 
       if (instance.ready === false) {
         console.warn(`Point10 scene "${SceneClass.name}" is unavailable.`);
       }
+
+      return instance;
     })
     .catch((error) => {
       console.error(
         `Point10 scene "${SceneClass.name}" failed to init:`,
         error,
       );
+
+      instance.ready = false;
+      return instance;
     });
 
   return instance;
@@ -369,6 +384,108 @@ function readBackFrame(instance) {
     });
 }
 
+function createTrackedInstance({
+  moduleId,
+  SceneClass,
+  webgpu,
+  width,
+  height,
+  isGallery,
+}) {
+  const instance = webgpu
+    ? createWebGPUInstance(SceneClass, width, height)
+    : createWebGLInstance(SceneClass, width, height);
+
+  instance.id = moduleId;
+  instance.gallery = !!isGallery;
+  // Eagerly created instances must not look like they have been idle since
+  // time zero: eviction would reap a prewarmed Scene before its first draw.
+  instance.lastUsed = performance.now();
+  instances.set(moduleId, instance);
+
+  return instance;
+}
+
+function applyWarmupProps(instance, props, applyProps) {
+  if (typeof applyProps === "function") {
+    applyProps(instance.scene, props || {});
+  }
+}
+
+// Compiles the scene's shaders and presents one frame before it is faded in.
+// WebGPU scenes also wait for `init()` here, so the incoming Group is
+// drawable when the crossfade starts instead of popping in mid-fade.
+async function warmupInstance(instance, props, applyProps) {
+  if (instance.webgpu) {
+    await instance.readyPromise;
+
+    if (instance.ready === false) {
+      return instance;
+    }
+  }
+
+  try {
+    applyWarmupProps(instance, props, applyProps);
+    instance.scene.update(0, null);
+    await Promise.resolve(instance.scene.render());
+
+    if (instance.webgpu) {
+      try {
+        swapBitmap(instance, instance.canvas.transferToImageBitmap());
+      } catch (error) {
+        // drawScene retries and permanently switches to readback if transfer
+        // is not supported on this backend.
+      }
+    }
+  } catch (error) {
+    console.warn("Point10 scene prewarm failed:", error);
+  }
+
+  return instance;
+}
+
+async function prewarmSceneInstance({
+  moduleId,
+  SceneClass,
+  webgpu,
+  width = 300,
+  height = 300,
+  props,
+  applyProps,
+  isGallery = false,
+}) {
+  if (!moduleId) {
+    return null;
+  }
+
+  let instance = instances.get(moduleId);
+
+  if (instance && instance.disposed) {
+    instances.delete(moduleId);
+    instance = null;
+  }
+
+  if (!instance) {
+    try {
+      instance = createTrackedInstance({
+        moduleId,
+        SceneClass,
+        webgpu,
+        width,
+        height,
+        isGallery,
+      });
+    } catch (error) {
+      console.error(`Point10 scene "${moduleId}" failed to prewarm:`, error);
+      return null;
+    }
+  } else if (instance.width !== width || instance.height !== height) {
+    resizeInstance(instance, width, height);
+  }
+
+  return warmupInstance(instance, props, applyProps);
+}
+
 function drawScene({
   moduleId,
   SceneClass,
@@ -394,12 +511,14 @@ function drawScene({
 
   if (!instance) {
     try {
-      instance = webgpu
-        ? createWebGPUInstance(SceneClass, canvas.width, canvas.height)
-        : createInstance(SceneClass, canvas.width, canvas.height);
-      instance.id = moduleId;
-      instance.gallery = !!isGallery;
-      instances.set(moduleId, instance);
+      instance = createTrackedInstance({
+        moduleId,
+        SceneClass,
+        webgpu,
+        width: canvas.width,
+        height: canvas.height,
+        isGallery,
+      });
     } catch (error) {
       console.error(`Point10 scene "${moduleId}" failed to initialise:`, error);
       return;
@@ -493,6 +612,22 @@ function createPoint10Module({
     // must stay JSON-safe (see the note above)
     data: {},
 
+    // Called by the 2d renderer when the Module becomes active, before a
+    // Scene crossfade can start. Creating (and initialising) the instance
+    // here is what stops Point10 Scenes from popping in mid-fade.
+    prewarm({ module, width, height } = {}) {
+      return prewarmSceneInstance({
+        moduleId: (module && module.$id) || key,
+        SceneClass,
+        webgpu,
+        width: normalizeDimension(width),
+        height: normalizeDimension(height),
+        props: module && module.props,
+        applyProps: applySceneProps,
+        isGallery: !!(module && module.meta && module.meta.isGallery),
+      });
+    },
+
     draw({ canvas, context, features, props, moduleId, isGallery }) {
       drawScene({
         moduleId: moduleId || key,
@@ -509,4 +644,9 @@ function createPoint10Module({
   };
 }
 
-export { createPoint10Module, removeSceneInstance, RESPONSIVENESS_PROPS };
+export {
+  createPoint10Module,
+  prewarmSceneInstance,
+  removeSceneInstance,
+  RESPONSIVENESS_PROPS,
+};

@@ -25,7 +25,12 @@ const SMOKE_FIRE = {
   simulationSpeed: float("Simulation Speed", 1.2, 0.1, 4),
 };
 
-export const SMOKE_ROOM_PROPS = { ...SMOKE_FIRE };
+export const SMOKE_ROOM_PROPS = {
+  ...SMOKE_FIRE,
+  // Large enough that the camera sits inside the glass room, so the box
+  // fills the output instead of showing its rim.
+  boxScale: float("Box Scale", 2.8, 0.5, 5, 0.05),
+};
 
 export const DVD_ROOM_PROPS = {
   ...SMOKE_ROOM_PROPS,
@@ -65,11 +70,6 @@ export const BOXY_PROPS = {
 export const CHROMATIC_LINE_PROPS = {
   distortion: float("Chroma", 0.05, 0, 0.5, 0.001),
   amplitude: float("Wave Amplitude", 1, 0, 3),
-  glow: float("Glow", 1, 0, 3),
-};
-
-export const CUBE_FLOOR_PROPS = {
-  height: float("Height", 4, 0, 12, 0.1),
   glow: float("Glow", 1, 0, 3),
 };
 
@@ -141,6 +141,7 @@ const FIELD_BINDINGS = {
   smokeLifespan: "_smokeLifespan",
   fireLifespan: "_fireLifespan",
   simulationSpeed: "_simSpeed",
+  boxScale: "_boxScale",
 };
 
 const numeric = (value, fallback, min, max) => {
@@ -191,7 +192,7 @@ const bindSmoke = (scene, values) => {
   }
 
   for (const [key, field] of Object.entries(FIELD_BINDINGS)) {
-    scene[field] = values[key];
+    if (values[key] !== undefined) scene[field] = values[key];
   }
 };
 
@@ -246,10 +247,6 @@ export const SCENE_PROP_CONFIGS = {
   "Point10 Chromatic Wave": defineScene(CHROMATIC_LINE_PROPS, (scene, v) => {
     scene.distortion = v.distortion;
     scene.ampScale = v.amplitude;
-    scene.glowScale = v.glow;
-  }),
-  "Point10 Cube Floor": defineScene(CUBE_FLOOR_PROPS, (scene, v) => {
-    scene.heightScale = v.height;
     scene.glowScale = v.glow;
   }),
   "Point10 DVD Room": defineScene(DVD_ROOM_PROPS, bindSmoke),

@@ -17,9 +17,22 @@
 // since their last seeding pass. Version 1 is the original six Scenes,
 // version 2 the second batch, version 3 the glitch/twirl batch,
 // version 4 the varied Point10 scene batch, version 5 the ASCII/filter
-// variety batch and version 6 the new digital scene batch.
+// variety batch, version 6 the new digital scene batch and version 7 replaces
+// the removed Cube Floor visuals and adds Circular Mountain.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 6;
+export const DEFAULTS_VERSION = 7;
+
+// The Cube Floor module was removed in version 7. Existing installs may still
+// hold default Scenes that reference it, so the migration below rebuilds those
+// Scenes from their current definitions (or replaces the old name entirely).
+export const REMOVED_DEFAULT_SCENE_MODULES = ["Point10 Cube Floor"];
+
+const RENAMED_DEFAULT_SCENES = [
+  {
+    oldName: "Cube Floor Drive",
+    newName: "Waveform Drive",
+  },
+];
 
 const sceneKey = (name) =>
   String(name || "")
@@ -57,6 +70,118 @@ export function getScenesToSeed({
       !existing.has(key)
     );
   });
+}
+
+function sceneUsesRemovedModule(scene, removedModuleNames) {
+  const modules =
+    scene && scene.modules && typeof scene.modules === "object"
+      ? Object.values(scene.modules)
+      : [];
+
+  return modules.some((module) => {
+    if (!module || typeof module !== "object") {
+      return false;
+    }
+
+    const name =
+      module.$moduleName || (module.meta && module.meta.name) || null;
+
+    return !!name && removedModuleNames.has(name);
+  });
+}
+
+function getDefaultDefinition(name) {
+  const key = sceneKey(name);
+
+  return DEFAULT_SCENES.find((scene) => sceneKey(scene.name) === key) || null;
+}
+
+/**
+ * Finds default Scenes that must be rebuilt because they still reference a
+ * removed Module. Only Scenes that match a current default name are touched,
+ * and only while their serialized Modules still contain a removed name, so a
+ * user's edits to a migrated Scene are preserved.
+ *
+ * The returned `replacements` keep the existing Scene id/name while swapping
+ * in the current definition, `removals` are old defaults that no longer exist
+ * (a rename) and `additions` are the new definitions to seed in their place.
+ */
+export function getDefaultScenesToReplace({
+  defaultsVersion = 0,
+  scenes = [],
+  removedModuleNames = REMOVED_DEFAULT_SCENE_MODULES,
+} = {}) {
+  const version = Number.isFinite(Number(defaultsVersion))
+    ? Number(defaultsVersion)
+    : 0;
+  const result = { replacements: [], removals: [], additions: [] };
+
+  if (version >= DEFAULTS_VERSION) {
+    return result;
+  }
+
+  const removed = new Set((removedModuleNames || []).filter(Boolean));
+
+  if (!removed.size) {
+    return result;
+  }
+
+  const existingByKey = new Map();
+
+  for (const scene of scenes || []) {
+    if (!scene || !scene.name) {
+      continue;
+    }
+
+    const key = sceneKey(scene.name);
+
+    if (!existingByKey.has(key)) {
+      existingByKey.set(key, scene);
+    }
+  }
+
+  const consumedKeys = new Set();
+
+  for (const rename of RENAMED_DEFAULT_SCENES) {
+    const key = sceneKey(rename.oldName);
+    const existing = existingByKey.get(key);
+
+    if (!existing || !sceneUsesRemovedModule(existing, removed)) {
+      continue;
+    }
+
+    const definition = getDefaultDefinition(rename.newName);
+
+    if (!definition) {
+      continue;
+    }
+
+    result.removals.push({ id: existing.id, name: existing.name });
+    result.additions.push(definition);
+    consumedKeys.add(key);
+  }
+
+  for (const definition of DEFAULT_SCENES) {
+    const key = sceneKey(definition.name);
+
+    if (consumedKeys.has(key)) {
+      continue;
+    }
+
+    const existing = existingByKey.get(key);
+
+    if (!existing || !sceneUsesRemovedModule(existing, removed)) {
+      continue;
+    }
+
+    result.replacements.push({
+      id: existing.id,
+      name: existing.name,
+      definition,
+    });
+  }
+
+  return result;
 }
 
 const DEFAULT_SCENES = [
@@ -603,8 +728,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Cube Floor",
+            name: "Point10 Light Tunnel",
             props: {
+              scrollSpeed: 1.2,
+              glow: 1.2,
+              bloom: 1.1,
               gain: 1.25,
               bassGain: 1.5,
               midGain: 1.1,
@@ -1020,7 +1148,7 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Cube Floor Drive",
+    name: "Waveform Drive",
     introducedVersion: 2,
     minSeconds: 8,
     maxSeconds: 20,
@@ -1033,8 +1161,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Cube Floor",
+            name: "Point10 Waveform",
             props: {
+              height: 1.6,
+              speed: 0.9,
+              opacity: 0.85,
               gain: 1.3,
               bassGain: 1.6,
               smoothing: 0.05,
@@ -1835,8 +1966,11 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Cube Floor",
+            name: "Point10 Spiral Particles",
             props: {
+              spinSpeed: 1.2,
+              particleSize: 1.1,
+              turbulence: 0.25,
               gain: 1.3,
               bassGain: 1.55,
               smoothing: 0.05,
@@ -3764,9 +3898,10 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Point10 Cube Floor",
+            name: "Point10 Chromatic Wave",
             props: {
-              height: 4,
+              distortion: 0.06,
+              amplitude: 1.2,
               glow: 1.2,
               gain: 1.2,
               bassGain: 1.45,
@@ -4405,6 +4540,130 @@ const DEFAULT_SCENES = [
         source: "tween",
         min: 0.1,
         max: 0.9,
+      },
+    ],
+  },
+
+  {
+    name: "Circular Mountain",
+    introducedVersion: 7,
+    minSeconds: 8,
+    maxSeconds: 24,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "fractal-mountain-tunnel",
+            props: {
+              speed: 0.626,
+              rotationSpeed: 0.4,
+              hue: 0.1125,
+              saturation: 0.075,
+              brightness: 1,
+              transitionSpeed: 1,
+            },
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Circular Screen",
+            props: {
+              sharpness: 2.7,
+              offset: 0,
+              scale: 0.35,
+              colorize: 0,
+              center: [0.5, 0.5],
+            },
+            meta: { compositeOperation: "normal" },
+          },
+          {
+            name: "Corner Color Tint",
+            props: {
+              color1: [1, 0, 0, 1],
+              color2: [0, 1, 0, 1],
+              color3: [0, 0, 1, 1],
+              color4: [1, 1, 1, 1],
+              rotationAngle: 0.1257,
+            },
+            meta: { alpha: 0.2488, compositeOperation: "normal" },
+          },
+          {
+            name: "badtv",
+            props: {
+              noiseLevel: 0.4,
+              distortion1: 0.6,
+              distortion2: 5,
+              speed: 0.3,
+              scroll: 0,
+              scanLineThickness: 1,
+              scanLineIntensity: 0.0349,
+              scanLineOffset: 0,
+            },
+            meta: { compositeOperation: "normal" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 4,
+              intensity: 0.35,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Background",
+        module: "fractal-mountain-tunnel",
+        control: "speed",
+        feature: "bass",
+        min: 0,
+        max: 1,
+      },
+      {
+        group: "Foreground",
+        module: "Corner Color Tint",
+        control: "alpha",
+        feature: "rms",
+        min: 0,
+        max: 2,
+      },
+      {
+        group: "Foreground",
+        module: "Corner Color Tint",
+        control: "rotationAngle",
+        feature: "rms",
+        min: 0,
+        max: 1,
+      },
+      {
+        group: "Foreground",
+        module: "badtv",
+        control: "scanLineIntensity",
+        feature: "treble",
+        min: 0,
+        max: 1,
       },
     ],
   },
