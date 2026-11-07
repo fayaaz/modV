@@ -6,6 +6,7 @@ import NdiWorker from "./ndi-worker.worker.js?worker";
 import { applyWindow } from "meyda/dist/esm/utilities";
 import { renderSceneTransition } from "./scene-transition";
 import { renderScenePreview } from "./scene-preview";
+import { renderRowFade } from "./row-transition";
 import { resolveInputLinkValue } from "./input-link-value";
 
 const meyda = { windowing: applyWindow };
@@ -209,6 +210,7 @@ async function loop(delta, features, fftOutput) {
 
   let lastCanvas = main.canvas;
   const renderedCanvasByGroupId = {};
+  const rowTransitionCanvases = new Map();
 
   const groupsLength = groupIndexRenderOrder.length;
   for (let i = 0; i < groupsLength; ++i) {
@@ -219,9 +221,23 @@ async function loop(delta, features, fftOutput) {
     }
 
     const isGalleryGroup = group.name === constants.GALLERY_GROUP_NAME;
+    const rowTransition =
+      !isGalleryGroup && Number.isFinite(Number(group.sceneRow))
+        ? store.getters["scenes/rowTransition"](Number(group.sceneRow))
+        : null;
+    const isTransitionGroup =
+      !!rowTransition &&
+      (group.id === rowTransition.groupId ||
+        group.id === rowTransition.ghostGroupId);
 
     const groupModulesLength = group.modules.length;
-    if (group.enabled === GROUP_DISABLED || group.alpha < 0.001) {
+    if (
+      group.enabled === GROUP_DISABLED ||
+      groupModulesLength < 1 ||
+      // A fading Group can dip below the alpha cull at the start/end of its
+      // fade. Keep rendering it so the inherited row canvas has both halves.
+      (group.alpha < 0.001 && !isTransitionGroup)
+    ) {
       continue;
     }
 
@@ -399,13 +415,60 @@ async function loop(delta, features, fftOutput) {
       }
     }
 
-    const effectiveCanvas = drawTo.canvas;
+    let effectiveCanvas = drawTo.canvas;
 
-    renderedCanvasByGroupId[group.id] = effectiveCanvas;
+    if (isTransitionGroup) {
+      const row = Number(group.sceneRow);
+      const pending = rowTransitionCanvases.get(row) || {};
+
+      if (group.id === rowTransition.groupId) {
+        pending.toCanvas = drawTo.canvas;
+      } else {
+        pending.fromCanvas = drawTo.canvas;
+      }
+
+      rowTransitionCanvases.set(row, pending);
+
+      if (pending.fromCanvas && pending.toCanvas) {
+        const progress = store.getters["scenes/rowTransitionProgress"](row);
+
+        try {
+          effectiveCanvas =
+            renderRowFade({
+              fromCanvas: pending.fromCanvas,
+              toCanvas: pending.toCanvas,
+              progress,
+              width: drawTo.canvas.width,
+              height: drawTo.canvas.height,
+              rowIndex: row,
+              fromAlpha: rowTransition.fromAlpha,
+              toAlpha: rowTransition.targetAlpha,
+            }) || drawTo.canvas;
+        } catch (e) {
+          console.error("Could not render a row transition", e);
+          effectiveCanvas = drawTo.canvas;
+        }
+
+        // Both halves of the row resolve to the same blend so the next row
+        // (and an explicit inheritFrom target) sees the crossfade rather than
+        // just the incoming Group's canvas.
+        renderedCanvasByGroupId[rowTransition.groupId] = effectiveCanvas;
+        renderedCanvasByGroupId[rowTransition.ghostGroupId] = effectiveCanvas;
+
+        if (!group.hidden && group.enabled === GROUP_ENABLED) {
+          lastCanvas = effectiveCanvas;
+        }
+      }
+    }
+
+    renderedCanvasByGroupId[group.id] =
+      renderedCanvasByGroupId[group.id] || effectiveCanvas;
 
     // A fading ghost renders its own outgoing visuals, but must not become the
-    // canvas the next row inherits from: the incoming Group owns the row.
+    // canvas the next row inherits from: the incoming Group owns the row. Its
+    // blended canvas is assigned above instead.
     if (
+      !isTransitionGroup &&
       !group.hidden &&
       group.enabled === GROUP_ENABLED &&
       group.transitionGhost !== true

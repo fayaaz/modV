@@ -6,17 +6,18 @@ import { modVApp } from "../../pageObjectModel";
 
 const uniqueName = (prefix) => `${prefix} ${Date.now()}-${Math.random()}`;
 
-async function createGroup(name) {
+async function createGroup(name, options = {}) {
   return modVApp.evaluateWorker(
-    async ({ name, enabled }) => {
+    async ({ name, enabled, options }) => {
       const group = await self.store.dispatch("groups/createGroup", {
         name,
         enabled,
+        ...options,
       });
 
       return group.id;
     },
-    { name, enabled: GROUP_ENABLED },
+    { name, enabled: GROUP_ENABLED, options },
   );
 }
 
@@ -460,6 +461,177 @@ test("a row fade keeps the outgoing visuals animating", async () => {
   await removeScene(sceneB.id);
   await removeUserGroups();
   await ensureUserGroup();
+});
+
+test("a background row fade is visible through the rows that inherit it", async () => {
+  const prefix = uniqueName("E2E Row Inherit Fade");
+  const redName = uniqueName("E2E Solid Red");
+  const blueName = uniqueName("E2E Solid Blue");
+  const noopName = uniqueName("E2E Noop");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  await modVApp.evaluateWorker(
+    async ({ redName, blueName, noopName }) => {
+      const solid = (name, color) => ({
+        meta: {
+          name,
+          author: "e2e",
+          version: "1.0.0",
+          type: "2d",
+        },
+        props: {},
+        data: {},
+        draw({ context, canvas }) {
+          context.fillStyle = color;
+          context.fillRect(0, 0, canvas.width, canvas.height);
+        },
+      });
+
+      await self.store.dispatch("modules/registerModule", {
+        module: solid(redName, "#ff0000"),
+      });
+      await self.store.dispatch("modules/registerModule", {
+        module: solid(blueName, "#0000ff"),
+      });
+      await self.store.dispatch("modules/registerModule", {
+        module: {
+          meta: {
+            name: noopName,
+            author: "e2e",
+            version: "1.0.0",
+            type: "2d",
+          },
+          props: {},
+          data: {},
+          draw() {},
+        },
+      });
+    },
+    { redName, blueName, noopName },
+  );
+
+  const createInheritingScene = async (backgroundModule, suffix) => {
+    const background = await createGroup(`${prefix} Background ${suffix}`, {
+      inherit: false,
+      clearing: true,
+    });
+    await addModuleToGroup(background, backgroundModule);
+
+    const foreground = await createGroup(`${prefix} Foreground ${suffix}`, {
+      inherit: true,
+      clearing: true,
+    });
+    await addModuleToGroup(foreground, noopName);
+
+    const scene = await saveScene(`${prefix} ${suffix}`);
+    await removeUserGroups();
+
+    return scene;
+  };
+
+  const sceneA = await createInheritingScene(redName, "A");
+  const sceneB = await createInheritingScene(blueName, "B");
+
+  const sampleInheritedRow = () =>
+    modVApp.evaluateWorker(
+      async ({ galleryGroupName }) => {
+        const foreground = self.store.state.groups.groups.find(
+          (group) =>
+            group.name !== galleryGroupName &&
+            group.transitionGhost !== true &&
+            Number(group.sceneRow) === 1,
+        );
+
+        if (!foreground || !foreground.context || !foreground.context.context) {
+          return null;
+        }
+
+        const context = foreground.context.context;
+        const { width, height } = context.canvas;
+        const pixel = context.getImageData(
+          Math.floor(width / 2),
+          Math.floor(height / 2),
+          1,
+          1,
+        ).data;
+
+        return Array.from(pixel);
+      },
+      { galleryGroupName: constants.GALLERY_GROUP_NAME },
+    );
+
+  const waitForFrames = () =>
+    modVApp.evaluateWorker(
+      () =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }),
+    );
+
+  await applyScene(sceneA.id);
+
+  let before = null;
+
+  for (let i = 0; i < 60; i++) {
+    await waitForFrames();
+    before = await sampleInheritedRow();
+
+    if (before && before[0] > 200) {
+      break;
+    }
+  }
+
+  expect(before).toBeTruthy();
+  expect(before[0]).toBeGreaterThan(200);
+  expect(before[2]).toBeLessThan(60);
+
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/updatePerformance", {
+      transitionSeconds: 10,
+    });
+  });
+
+  await applySceneRow(sceneB.id, 0);
+  await modVApp.evaluateWorker(async () => {
+    await self.store.dispatch("scenes/tick", { delta: 3000 });
+  });
+  await waitForFrames();
+
+  // The row below inherits the fading background. Part way through the fade it
+  // must still show mostly the outgoing red, not the incoming blue immediately.
+  const during = await sampleInheritedRow();
+
+  expect(during).toBeTruthy();
+  expect(during[0]).toBeGreaterThan(during[2]);
+
+  await modVApp.evaluateWorker(async () => {
+    for (let i = 0; i < 220; i++) {
+      await self.store.dispatch("scenes/tick", { delta: 100 });
+    }
+  });
+  await waitForFrames();
+
+  const after = await sampleInheritedRow();
+
+  expect(after).toBeTruthy();
+  expect(after[2]).toBeGreaterThan(200);
+  expect(after[0]).toBeLessThan(60);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+
+  await modVApp.evaluateWorker(
+    async ({ moduleNames }) => {
+      for (const moduleName of moduleNames) {
+        self.store.commit("modules/REMOVE_REGISTERED_MODULE", { moduleName });
+      }
+    },
+    { moduleNames: [redName, blueName, noopName] },
+  );
 });
 
 test("the Scenes grid marks the applied row cell as active", async () => {
