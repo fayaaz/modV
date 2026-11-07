@@ -56,4 +56,4 @@
 - [x] Remove cube floor and replace it in the default scenes (done; module deleted, Neon Grid/Waveform Drive/Roto Zoom Riot/Dither District use working Point10 scenes, and existing installs migrate scenes that still reference it)
 - [x] Save my preset Circular Mountain as a default preset (done; new version 7 default Scene using fractal-mountain-tunnel with the saved Circular Screen/Corner Color Tint/badtv chain and audio links)
 - [x] Sometimes when a heavy scene loads in there can be a pause or lag (Smoke Room and Ball of Fire for example). (done; performance mode now picks a row's next Scene at the start of its dwell and warms its WebGPU Point10 scene in the background, adopting the warmed instance when the Scene is applied, so the expensive init no longer stalls the crossfade)
-- Add https://glslop.com/shader/d3a8uy1o
+- [x] Add https://glslop.com/shader/d3a8uy1o (done; added as the Plexus ISF module under 3D Scenes)

@@ -79,6 +79,7 @@ describe("CC0 scene ISF modules", () => {
     ["Back The Way You Came.fs", "3d-scenes"],
     ["River Walk.fs", "3d-scenes"],
     ["Ponder Orb.fs", "3d-scenes"],
+    ["Plexus.fs", "3d-scenes"],
     ["Mesmer.fs", "2d-scenes"],
     ["Singularity Rain.fs", "2d-scenes"],
     ["rave.exe.fs", "2d-scenes"],
