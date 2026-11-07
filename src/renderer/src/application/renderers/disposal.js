@@ -39,16 +39,56 @@ export function disposeISFRenderer(renderer) {
   }
 
   // ISFRenderer.cleanup does not release the shader programs or the textures
-  // created for image inputs, so do that here.
-  if (renderer.program && typeof renderer.program.cleanup === "function") {
-    renderer.program.cleanup();
+  // created for image inputs, so do that here. The vertex buffers are
+  // deliberately NOT deleted: every ISFRenderer on the shared ISF context draws
+  // the same unit quad through whichever buffer happens to be bound to
+  // ARRAY_BUFFER (see ISFGLProgram.bindVertices). Deleting that buffer leaves
+  // the still-bound attribute pointing at freed storage, so every other live
+  // ISF module silently stops drawing.
+  if (renderer.program) {
+    const program = renderer.program;
+    const gl = program.gl;
+
+    if (!gl) {
+      if (typeof program.cleanup === "function") {
+        program.cleanup();
+      }
+    } else {
+      if (program.fShader) {
+        gl.deleteShader(program.fShader);
+      }
+
+      if (program.vShader) {
+        gl.deleteShader(program.vShader);
+      }
+
+      if (program.program) {
+        gl.deleteProgram(program.program);
+      }
+    }
   }
 
-  if (
-    renderer.paintProgram &&
-    typeof renderer.paintProgram.cleanup === "function"
-  ) {
-    renderer.paintProgram.cleanup();
+  if (renderer.paintProgram) {
+    const paintProgram = renderer.paintProgram;
+    const gl = paintProgram.gl;
+
+    if (!gl) {
+      if (typeof paintProgram.cleanup === "function") {
+        paintProgram.cleanup();
+      }
+    } else {
+      if (paintProgram.fShader) {
+        gl.deleteShader(paintProgram.fShader);
+      }
+
+      if (paintProgram.vShader) {
+        gl.deleteShader(paintProgram.vShader);
+      }
+
+      if (paintProgram.program) {
+        gl.deleteProgram(paintProgram.program);
+      }
+    }
   }
 
   if (renderer.uniforms) {
