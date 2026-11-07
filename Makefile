@@ -45,7 +45,7 @@ endif
 GUI_RUN_ARGS := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(GUI_ENV) $(GUI_MOUNTS) $(GUI_AUDIO)
 
 .DEFAULT_GOAL := build
-.PHONY: build clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-unit yarn shell rave-reencode
+.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-unit yarn shell rave-reencode
 
 build:
 	mkdir -p "$(DIST_DIR)"
@@ -53,6 +53,18 @@ build:
 	docker buildx build \
 		--build-arg "APP_VERSION=$(APP_VERSION)" \
 		--target artifacts \
+		--output type=local,dest="$(DIST_DIR)" \
+		$(DOCKER_BUILD_ARGS) .
+
+# AppImage-only variant of `build`. The deb packaging step is by far the
+# slowest part (~70s vs ~2s for the AppImage), so this skips it for local runs.
+appimage:
+	mkdir -p "$(DIST_DIR)"
+	find "$(DIST_DIR)" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+	docker buildx build \
+		--build-arg "APP_VERSION=$(APP_VERSION)" \
+		--build-arg "PACKAGE_TARGETS=AppImage" \
+		--target appimage \
 		--output type=local,dest="$(DIST_DIR)" \
 		$(DOCKER_BUILD_ARGS) .
 

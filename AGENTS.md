@@ -10,6 +10,7 @@ All yarn work is Dockerised. The host only needs Docker (with Buildx) and make �
 - `make install` — rebuild the toolchain image and reseed `node_modules` (clean `yarn install`; applies `patches/` and fetches the Electron binary).
 - `make dev` — Dockerised `yarn dev` with HMR. On Linux, a Wayland socket is forwarded when available (falling back to X11), along with PulseAudio and `/dev/dri` (GPU); override with `DISPLAY_BACKEND=x11` or `DISPLAY_BACKEND=wayland`. Extend with `DOCKER_RUN_ARGS="..."`. For CDP attach: `make dev ARGS="-- --remote-debugging-port=9223"`.
 - `make build` — **the canonical Linux build** (see `Dockerfile`); empties `dist/` in place and writes the AppImage and `.deb` into it. Also used by CI. Set `APP_VERSION` to override the version, e.g. `APP_VERSION=1.2.3 make build`; `make clean` removes `dist/`. Do not use a local `electron-builder` build.
+- `make appimage` — AppImage-only local build (same layer cache, skips the slow `.deb` packaging); writes just the AppImage into `dist/`. Use `make build` when you need the `.deb` or release artifacts.
 - `make yarn ARGS="build"` — bundle main / preload / renderer into `out/`.
 - `make lint` — Dockerised `yarn lint` (`eslint . --fix`, Prettier runs through ESLint).
 - `make format` — Dockerised `yarn format`.

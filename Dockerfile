@@ -87,9 +87,12 @@ RUN if [ -n "$APP_VERSION" ]; then \
 RUN yarn build
 
 FROM build AS package
+# Default to both installers so CI/release behaviour is unchanged. Local
+# AppImage-only builds override this with `make appimage`.
+ARG PACKAGE_TARGETS
 RUN --mount=type=cache,target=/root/.cache/electron \
     --mount=type=cache,target=/root/.cache/electron-builder \
-    yarn electron-builder --linux AppImage deb --publish never
+    yarn electron-builder --linux ${PACKAGE_TARGETS:-AppImage deb} --publish never
 
 FROM scratch AS appimage
 COPY --from=package /app/dist/*.AppImage /
