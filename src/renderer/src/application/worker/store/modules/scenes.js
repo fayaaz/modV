@@ -51,6 +51,7 @@ import {
   DEFAULT_SCENE_BPM_TWEEN,
   isAutoLinkExcluded,
 } from "../../scene-link-defaults";
+import { pickTransitionName as pickPerformanceTransition } from "../../scene-transition-pick";
 
 const fs = require("fs");
 const path = require("path");
@@ -1524,16 +1525,13 @@ function getAvailableTransitionNames() {
 }
 
 function pickTransitionName(performance) {
-  const available = new Set(getAvailableTransitionNames());
-  const allowed = normalizeTransitionList(
-    performance.allowedTransitions,
-  ).filter((name) => available.has(name));
-
-  if (!allowed.length) {
-    return FADE_TRANSITION;
-  }
-
-  return allowed[Math.floor(Math.random() * allowed.length)];
+  // Performance-mode cell changes always crossfade; the allowed list only
+  // applies to manual Scene changes made while performance mode is stopped.
+  return pickPerformanceTransition({
+    performanceEnabled: performance.enabled,
+    allowedTransitions: normalizeTransitionList(performance.allowedTransitions),
+    availableTransitionNames: getAvailableTransitionNames(),
+  });
 }
 
 function pickNextScene(scenes, currentSceneId, order) {

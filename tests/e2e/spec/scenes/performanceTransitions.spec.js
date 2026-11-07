@@ -412,7 +412,7 @@ async function runShaderTransitionTest(
   }
 }
 
-test("a native shader transition renders and completes in performance mode", async () => {
+test("a native shader transition renders and completes on a manual scene change", async () => {
   await runShaderTransitionTest("Three Wipe");
 });
 
@@ -420,7 +420,7 @@ test("an unknown transition falls back to Fade", async () => {
   await runShaderTransitionTest(`E2E Missing Transition ${Date.now()}`, "Fade");
 });
 
-test("an ISF transition renders and completes in performance mode", async () => {
+test("an ISF transition renders and completes on a manual scene change", async () => {
   const transitionName = await findIsfTransitionName();
 
   expect(transitionName).toBeTruthy();
@@ -492,5 +492,57 @@ test("an uncompilable transition falls back to Fade", async () => {
       previousScenes,
       brokenName,
     });
+  }
+});
+
+test("performance mode always crossfades, even with shader transitions allowed", async () => {
+  await waitForMainOutput();
+
+  const prefix = uniqueName("E2E Performance Fade");
+  const { sceneA, sceneB } = await createVisualScenes(prefix);
+  const previousScenes = await isolateScenes([sceneA.id, sceneB.id]);
+
+  try {
+    const started = await modVApp.evaluateWorker(
+      async ({ sceneAId }) => {
+        await self.store.dispatch("scenes/updatePerformance", {
+          enabled: false,
+          allowedTransitions: ["None"],
+          transitionSeconds: 0.5,
+          minSeconds: 20,
+          maxSeconds: 30,
+          order: "in-order",
+        });
+
+        await self.store.dispatch("scenes/applyScene", { sceneId: sceneAId });
+        await self.store.dispatch("scenes/startPerformance");
+
+        // The user allowed a shader wipe, but the Scene change still happens
+        // through the running performance mode and must crossfade.
+        await self.store.dispatch("scenes/updatePerformance", {
+          allowedTransitions: ["Three Wipe"],
+        });
+        await self.store.dispatch("scenes/nextScene");
+
+        return {
+          enabled: self.store.state.scenes.performance.enabled,
+          transitioning: self.store.state.scenes.transitioning,
+          name: self.store.getters["scenes/currentTransitionName"],
+        };
+      },
+      { sceneAId: sceneA.id },
+    );
+
+    expect(started.enabled).toBe(true);
+    expect(started.transitioning).toBe(true);
+    expect(started.name).toBe("Fade");
+
+    const completed = await completeTransition();
+
+    expect(completed.transitioning).toBe(false);
+    expect(completed.groups).not.toContain(`${prefix} A Group`);
+    expect(completed.groups).toContain(`${prefix} B Group`);
+  } finally {
+    await cleanup({ sceneA, sceneB, previousScenes });
   }
 });
