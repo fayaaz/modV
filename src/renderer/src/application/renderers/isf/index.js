@@ -8,6 +8,8 @@ import {
   Upgrader as ISFUpgrader,
 } from "interactive-shader-format/src/main.js";
 import { getFeatures } from "../../worker/audio-features";
+import { getIsfGalleryCategory } from "../../module-category";
+import { installFloatBufferSupport } from "./float-buffer-support";
 import constants from "../../constants";
 
 const isfCanvas = new OffscreenCanvas(256, 256);
@@ -17,6 +19,7 @@ const isfContext = isfCanvas.getContext("webgl2", {
   powerPreference: "high-performance",
   premultipliedAlpha: false,
 });
+installFloatBufferSupport(isfContext);
 store.dispatch("outputs/addAuxillaryOutput", {
   name: "isf-buffer",
   context: isfContext,
@@ -30,6 +33,7 @@ const isfContextGallery = isfCanvasGallery.getContext("webgl2", {
   powerPreference: "high-performance",
   premultipliedAlpha: false,
 });
+installFloatBufferSupport(isfContextGallery);
 store.dispatch("outputs/addAuxillaryOutput", {
   name: "isf-buffer-gallery",
   context: isfContextGallery,
@@ -171,6 +175,11 @@ async function setupModule(moduleDefinition) {
   moduleDefinition.meta.author = parser.metadata.CREDIT;
   moduleDefinition.meta.description = parser.metadata.DESCRIPTION;
   moduleDefinition.meta.version = parser.metadata.VSN;
+
+  const galleryCategory = getIsfGalleryCategory(parser.metadata);
+  if (galleryCategory) {
+    moduleDefinition.meta.category = galleryCategory;
+  }
 
   function addProp(name, prop) {
     if (!moduleDefinition.props) {

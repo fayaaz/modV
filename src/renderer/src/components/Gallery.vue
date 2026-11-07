@@ -74,6 +74,7 @@
 <script>
 import { Container, Draggable } from "vue3-smooth-dnd";
 import constants from "../application/constants";
+import { normalizeModuleCategory } from "../application/module-category";
 import GalleryItem from "./GalleryItem.vue";
 
 const CATEGORY_ORDER = ["effects", "2d-scenes", "3d-scenes", "three"];
@@ -93,36 +94,9 @@ const DEFAULT_CATEGORY_BY_TYPE = {
   three: "three",
 };
 
-const CATEGORY_ALIASES = {
-  effect: "effects",
-  effects: "effects",
-  "2d": "2d-scenes",
-  "2d-scene": "2d-scenes",
-  "2d-scenes": "2d-scenes",
-  "3d": "3d-scenes",
-  "3d-scene": "3d-scenes",
-  "3d-scenes": "3d-scenes",
-  three: "three",
-  "three-js": "three",
-  threejs: "three",
-};
-
-function normalizeCategory(category) {
-  if (typeof category !== "string" || !category.trim()) {
-    return null;
-  }
-
-  const key = category
-    .toLowerCase()
-    .trim()
-    .replace(/[\s_]+/g, "-");
-
-  return CATEGORY_ALIASES[key] || null;
-}
-
 function getModuleCategory(meta) {
   return (
-    normalizeCategory(meta.category) ||
+    normalizeModuleCategory(meta.category) ||
     DEFAULT_CATEGORY_BY_TYPE[meta.type] ||
     DEFAULT_CATEGORY_BY_TYPE["2d"]
   );

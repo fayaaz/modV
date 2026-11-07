@@ -45,7 +45,7 @@ endif
 GUI_RUN_ARGS := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(GUI_ENV) $(GUI_MOUNTS) $(GUI_AUDIO)
 
 .DEFAULT_GOAL := build
-.PHONY: build clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-unit yarn shell
+.PHONY: build clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-unit yarn shell rave-reencode
 
 build:
 	mkdir -p "$(DIST_DIR)"
@@ -115,6 +115,9 @@ test-e2e: docker-node-modules
 
 test-unit: docker-node-modules
 	$(call run-yarn,test:unit $(ARGS))
+
+rave-reencode: docker-node-modules
+	$(call run-yarn,node tools/rave-reencode.mjs $(ARGS))
 
 yarn: docker-node-modules
 	$(call run-yarn,$(ARGS))

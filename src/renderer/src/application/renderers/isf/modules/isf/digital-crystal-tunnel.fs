@@ -1,5 +1,6 @@
 /*{
   "DESCRIPTION": "Fiddling with Abstract Corridor",
+  "MODV_CATEGORY": "3D Scenes",
   "CREDIT": "WilstonOreo",
   "CATEGORIES": [
     "tunnel",
