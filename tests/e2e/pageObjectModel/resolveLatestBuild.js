@@ -29,14 +29,14 @@ export function resolveLatestBuild(distDir) {
     throw new Error(`No unpacked build or AppImage found in ${distDir}`);
   }
 
-  const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), "modv-e2e-"));
+  const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-e2e-"));
   execFileSync(path.join(distDir, appImages[0].name), ["--appimage-extract"], {
     cwd: extractDir,
     stdio: "ignore",
   });
 
   // parseElectronApp infers the platform from the directory name.
-  const buildDir = path.join(extractDir, "modv-linux-unpacked");
+  const buildDir = path.join(extractDir, "vmodv-linux-unpacked");
   fs.renameSync(path.join(extractDir, "squashfs-root"), buildDir);
   // The AppImage's AppRun launcher is also executable and would otherwise be
   // picked as the Electron executable.

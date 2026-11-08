@@ -99,14 +99,14 @@ async function waitUntilModVReady(page, timeout = 60000) {
     await page.waitForTimeout(250);
   }
 
-  throw new Error("modV did not become ready before the quit test");
+  throw new Error("VmodV did not become ready before the quit test");
 }
 
 test("quitting the app leaves no orphaned process tree", async () => {
   test.setTimeout(90000);
 
   const latestBuild = resolveLatestBuild(path.resolve("./dist"));
-  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "modv-e2e-config-"));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-e2e-config-"));
   const appInfo = parseElectronApp(latestBuild.buildDir);
   const launchArgs = [];
 

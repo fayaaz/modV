@@ -31,9 +31,9 @@ class ModVApp {
       // find the latest build in the out directory
       const latestBuild = resolveLatestBuild(path.resolve("./dist"));
       this.buildDir = latestBuild.buildDir;
-      // Keep tests from reading or writing the user's real modV config.
+      // Keep tests from reading or writing the user's real VmodV config.
       const configDir = fs.mkdtempSync(
-        path.join(os.tmpdir(), "modv-e2e-config-"),
+        path.join(os.tmpdir(), "vmodv-e2e-config-"),
       );
       this.cleanupDirs = [latestBuild.cleanupDir, configDir].filter(Boolean);
 
@@ -103,7 +103,7 @@ class ModVApp {
 
       this.electronApp.on("window", attachDiagnostics);
 
-      // console.info("  ℹ    Waiting for modV to become ready…");
+      // console.info("  ℹ    Waiting for VmodV to become ready…");
       this.page = await modVApp.electronApp.firstWindow();
       attachDiagnostics(this.page);
       await this.waitUntilModVReady();
@@ -140,7 +140,7 @@ class ModVApp {
     }
 
     throw new Error(
-      `modV did not become ready within ${Math.round(timeout / 1000)}s. ` +
+      `VmodV did not become ready within ${Math.round(timeout / 1000)}s. ` +
         "Check the Electron log for a main/renderer crash.",
     );
   }

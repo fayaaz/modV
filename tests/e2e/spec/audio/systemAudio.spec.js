@@ -63,7 +63,7 @@ test.describe("system audio (loopback)", () => {
       .map((name) => fs.readFileSync(path.join(logsDirectory, name), "utf8"))
       .join("\n");
 
-    expect(contents).toContain("modV starting");
+    expect(contents).toContain("VmodV starting");
     expect(contents).toContain(logsDirectory);
   });
 });
