@@ -22,6 +22,104 @@ import { createWarmCache, registerWarmCache } from "./warm-cache.js";
 
 const instances = new Map();
 
+// A WebGPU frame is presented through an async transfer promise. If the
+// backend stalls (the promise never settles, as observed under GPU pressure),
+// the presented bitmap freezes and the Scene shows a permanent trail of its
+// last frame. The watchdog below resets a stalled presentation and switches
+// the instance to the synchronous readback path instead of freezing.
+const PRESENT_STALL_MS = 2000;
+
+// Temporary presentation telemetry. Written to the same daily log file as the
+// rest of the app (the worker stores the userData path on `self`), so a report
+// of frozen/trailing Point10 frames can be diagnosed from the log.
+const diagState = { scratch: null };
+
+function writeDiagLine(line) {
+  try {
+    if (typeof self === "undefined" || !self.__userData) {
+      return;
+    }
+
+    const fs = require("fs");
+    const path = require("path");
+    const now = new Date();
+    const stamp = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+    ].join("-");
+    const directory = path.join(self.__userData, "logs");
+
+    fs.mkdirSync(directory, { recursive: true });
+    fs.appendFileSync(
+      path.join(directory, `vmodv-${stamp}.log`),
+      `${now.toISOString()} INFO [point10-diag] ${line}\n`,
+    );
+  } catch (error) {
+    // Diagnostics must never break rendering.
+  }
+}
+
+function sceneLabel(instance) {
+  if (instance.SceneClass && instance.SceneClass.name) {
+    return instance.SceneClass.name;
+  }
+
+  return "unknown";
+}
+
+function logPresentationDiag(instance, now) {
+  if (instance.nextDiagAt && now < instance.nextDiagAt) {
+    return;
+  }
+
+  instance.nextDiagAt = now + 1000;
+
+  let lit = -1;
+
+  try {
+    if (instance.bitmap) {
+      const { width, height } = instance;
+
+      if (
+        !diagState.scratch ||
+        diagState.scratch.width !== width ||
+        diagState.scratch.height !== height
+      ) {
+        diagState.scratch = new OffscreenCanvas(width, height);
+      }
+
+      const context = diagState.scratch.getContext("2d");
+      context.clearRect(0, 0, width, height);
+      context.drawImage(instance.bitmap, 0, 0, width, height);
+
+      const data = context.getImageData(0, 0, width, height).data;
+      let count = 0;
+
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 8) {
+          count += 1;
+        }
+      }
+
+      lit = count / (width * height);
+    }
+  } catch (error) {
+    // Diag sampling is best-effort.
+  }
+
+  const age = instance.bitmapSwappedAt
+    ? Math.round(now - instance.bitmapSwappedAt)
+    : -1;
+
+  writeDiagLine(
+    `${sceneLabel(instance)} lit=${lit.toFixed(4)} bitmapAgeMs=${age} ` +
+      `readback=${!!instance.useReadback} presenting=${!!instance.presenting} ` +
+      `reading=${!!instance.reading} ready=${instance.ready} ` +
+      `dt=${instance.scene && instance.scene._dt}`,
+  );
+}
+
 // Every live scene holds its own GPU context (src/main/index.js allows 16
 // active contexts), its own canvas backing store and its own scene graph.
 // Gallery hovers and removed modules would otherwise accumulate forever, so the
@@ -61,6 +159,8 @@ function normalizeDimension(value) {
 
 function disposeInstance(instance) {
   instance.disposed = true;
+
+  writeDiagLine(`${sceneLabel(instance)} instance disposed`);
 
   try {
     instance.scene.dispose?.();
@@ -324,12 +424,13 @@ function resizeInstance(instance, width, height) {
 }
 
 function swapBitmap(instance, bitmap) {
-  if (!bitmap) {
+  if (!bitmap || instance.disposed) {
     return;
   }
 
   const previous = instance.bitmap;
   instance.bitmap = bitmap;
+  instance.bitmapSwappedAt = performance.now();
 
   if (previous) {
     previous.close();
@@ -340,10 +441,33 @@ function swapBitmap(instance, bitmap) {
 // an ImageBitmap without copying it through CPU memory.
 function presentFrame(instance) {
   if (instance.presenting) {
-    return;
+    const now = performance.now();
+
+    if (
+      instance.presentingSince &&
+      now - instance.presentingSince > PRESENT_STALL_MS
+    ) {
+      // The transfer promise stalled: keep the Scene alive by resetting the
+      // guard and switching to the readback path so a fresh frame is produced.
+      const stalledFor = Math.round(now - instance.presentingSince);
+
+      instance.presenting = false;
+      instance.presentingSince = 0;
+
+      if (!instance.useReadback) {
+        instance.useReadback = true;
+        writeDiagLine(
+          `${sceneLabel(instance)} transferToImageBitmap stalled for ` +
+            `${stalledFor}ms, switching to readback`,
+        );
+      }
+    } else {
+      return;
+    }
   }
 
   instance.presenting = true;
+  instance.presentingSince = performance.now();
 
   Promise.resolve(instance.scene.render())
     .then(() => instance.canvas.transferToImageBitmap())
@@ -361,6 +485,7 @@ function presentFrame(instance) {
     })
     .finally(() => {
       instance.presenting = false;
+      instance.presentingSince = 0;
       releaseIfIdle(instance);
     });
 }
@@ -371,10 +496,28 @@ function presentFrame(instance) {
 // the cost of this path.
 function readBackFrame(instance) {
   if (instance.reading) {
-    return;
+    const now = performance.now();
+
+    if (
+      instance.readingSince &&
+      now - instance.readingSince > PRESENT_STALL_MS
+    ) {
+      // A stalled readback freezes the frame the same way a stalled transfer
+      // does. Retry with a fresh read; the next draw will store its bitmap.
+      const stalledFor = Math.round(now - instance.readingSince);
+
+      instance.reading = false;
+      instance.readingSince = 0;
+      writeDiagLine(
+        `${sceneLabel(instance)} readback stalled for ${stalledFor}ms, retrying`,
+      );
+    } else {
+      return;
+    }
   }
 
   instance.reading = true;
+  instance.readingSince = performance.now();
 
   const { renderer, width, height } = instance;
 
@@ -408,6 +551,7 @@ function readBackFrame(instance) {
     })
     .finally(() => {
       instance.reading = false;
+      instance.readingSince = 0;
       releaseIfIdle(instance);
     });
 }
@@ -433,6 +577,11 @@ function createTrackedInstance({
   // time zero: eviction would reap a prewarmed Scene before its first draw.
   instance.lastUsed = performance.now();
   instances.set(moduleId, instance);
+
+  writeDiagLine(
+    `${sceneLabel(instance)} instance created webgpu=${!!webgpu} ` +
+      `gallery=${!!isGallery} size=${width}x${height}`,
+  );
 
   return instance;
 }
@@ -670,6 +819,8 @@ function drawScene({
     if (instance.bitmap) {
       context.drawImage(instance.bitmap, 0, 0, canvas.width, canvas.height);
     }
+
+    logPresentationDiag(instance, now);
 
     if (instance.useReadback) {
       readBackFrame(instance);
