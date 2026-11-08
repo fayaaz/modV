@@ -31,3 +31,6 @@ test-results
 
 # Local scratch space (diagnostic builds, logs)
 tmp
+
+# Local opencode configuration
+.opencode/
