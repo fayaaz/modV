@@ -317,7 +317,7 @@ export function renderScenePreview({
         pipeline: false,
         kick,
         fftCanvas,
-        isGallery: false,
+        isGallery: true,
         osc,
       });
     } catch (error) {

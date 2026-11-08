@@ -356,17 +356,23 @@ async function loop(delta, features, fftOutput) {
         moduleData = renderers[module.meta.type].updateModule({
           moduleDefinition,
           props,
-          data: { ...data },
+          data,
           canvas,
           context: drawTo,
           delta,
         });
 
-        store.commit("modules/UPDATE_ACTIVE_MODULE", {
-          id: module.$id,
-          key: "data",
-          value: moduleData,
-        });
+        // Modules that mutate and return the same data object need no commit:
+        // the store already holds that (now mutated) object. Committing
+        // anyway re-runs the mutation pipeline and Vue reactivity for every
+        // module on every frame.
+        if (moduleData !== data) {
+          store.commit("modules/UPDATE_ACTIVE_MODULE", {
+            id: module.$id,
+            key: "data",
+            value: moduleData,
+          });
+        }
       }
 
       if (pipeline && !isGalleryGroup) {

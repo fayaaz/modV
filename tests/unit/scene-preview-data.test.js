@@ -98,7 +98,9 @@ describe("createPreviewModule", () => {
     expect(module.$id).not.toBe(source.$id);
     expect(module.$moduleName).toBe("Ball");
     expect(module.meta.scenePreview).toBe(true);
-    expect(module.meta.isGallery).toBe(false);
+    // Previews render through the gallery GL contexts so the live
+    // composition's shared ISF/shader canvases are never resized by a hover.
+    expect(module.meta.isGallery).toBe(true);
     expect(module.meta.enabled).toBe(true);
     expect(module.meta.alpha).toBe(0.75);
     expect(module.meta.compositeOperation).toBe("overlay");

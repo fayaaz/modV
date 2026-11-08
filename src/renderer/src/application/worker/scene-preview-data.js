@@ -59,7 +59,10 @@ export function createPreviewModule(snapshot, definition, id) {
     meta: {
       ...(definition.meta || {}),
       ...clone(snapshot.meta),
-      isGallery: false,
+      // Previews render through the gallery GL contexts (like Gallery item
+      // previews) so they never resize or otherwise touch the live
+      // composition's shared ISF/shader canvases.
+      isGallery: true,
       scenePreview: true,
     },
     props: {

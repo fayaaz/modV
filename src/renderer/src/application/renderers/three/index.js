@@ -7,8 +7,11 @@ const THREE = { ...THREEimport, GLTFLoader };
 const threeModuleData = {};
 
 const threeCanvas = new OffscreenCanvas(300, 300);
+// The THREE renderer is constructed with antialias:false, so requesting an
+// antialiased context here only allocates a multisampled default framebuffer
+// that is never resolved.
 const threeContext = threeCanvas.getContext("webgl2", {
-  antialias: true,
+  antialias: false,
   desynchronized: true,
   powerPreference: "high-performance",
   premultipliedAlpha: false,

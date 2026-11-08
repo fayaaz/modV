@@ -60,7 +60,9 @@ function createCanvas(name, contextOptions) {
 }
 
 const shaderContext = createCanvas("shader-buffer", {
-  antialias: true,
+  // Shader modules draw a single full-screen quad: multisampling only costs
+  // fill rate and a resolve on every frame without improving any edge.
+  antialias: false,
   desynchronized: true,
   powerPreference: "high-performance",
   premultipliedAlpha: false,

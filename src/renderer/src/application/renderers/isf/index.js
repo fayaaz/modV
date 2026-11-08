@@ -1,5 +1,10 @@
 import store from "../../worker/store";
-import { resizeCanvases, clearCanvas, copyCanvas } from "../utils";
+import {
+  resizeCanvas,
+  resizeCanvases,
+  clearCanvas,
+  copyCanvas,
+} from "../utils";
 import { disposeISFRenderer, getModuleId } from "../disposal";
 
 import {
@@ -13,8 +18,10 @@ import { installFloatBufferSupport } from "./float-buffer-support";
 import constants from "../../constants";
 
 const isfCanvas = new OffscreenCanvas(256, 256);
+// ISF only ever draws full-screen quads: multisampling costs fill rate and a
+// resolve per pass without improving any edge.
 const isfContext = isfCanvas.getContext("webgl2", {
-  antialias: true,
+  antialias: false,
   desynchronized: true,
   powerPreference: "high-performance",
   premultipliedAlpha: false,
@@ -93,12 +100,15 @@ async function render({
   const resolvedIsfCanvas = isGallery ? isfCanvasGallery : isfCanvas;
   const resolvedIsfContext = isGallery ? isfContextGallery : isfContext;
 
-  // Optimized: Use proper resize function instead of manual canvas allocation
+  // Only resize the context this render targets. Resizing both contexts here
+  // made every gallery/preview render shrink the live composition canvas to
+  // thumbnail size and every live render grow it back, invalidating the live
+  // drawing buffer on every preview frame.
   if (
     resolvedIsfCanvas.width !== canvas.width ||
     resolvedIsfCanvas.height !== canvas.height
   ) {
-    resize({ width: canvas.width, height: canvas.height });
+    resizeCanvas(resolvedIsfCanvas, canvas.width, canvas.height);
   }
 
   // Optimized: Use shared utility for consistent canvas clearing
