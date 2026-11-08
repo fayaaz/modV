@@ -15,7 +15,7 @@ All yarn work is Dockerised. The host only needs Docker (with Buildx) and make �
 - `make lint` — Dockerised `yarn lint` (`eslint . --fix`, Prettier runs through ESLint).
 - `make format` — Dockerised `yarn format`.
 - `make test-unit` — Dockerised Vitest unit tests (`tests/unit/**/*.test.js`, Node environment). Single file: `make test-unit ARGS="tests/unit/<name>.test.js"`. Watch mode: `make yarn ARGS="test:unit:watch"`.
-- `make test-e2e` — Dockerised Playwright. Electron is launched with `--no-sandbox` and the Wayland/X11, PulseAudio and GPU forwarding above. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`.
+- `make test-e2e` — Dockerised Playwright. Electron is launched with `--no-sandbox` and the Wayland/X11, PulseAudio and GPU forwarding above. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`. WebGPU Point10 scenes do not present in this container (see "Debugging the built app on a real GPU" below); use the host AppImage + CDP for those.
 - `make yarn ARGS="<args>"` — any other yarn command, e.g. `make yarn ARGS="add three"`.
 - `make docker-reset` — delete the `modv-node-modules` volume; the next yarn target reseeds it from the toolchain image (use after dependency changes if `make install` is not enough).
 - `make shell` — interactive shell in the toolchain container with the repo bind-mounted.
@@ -176,3 +176,29 @@ Known flake: `performance mode dwell advances in real time` can still take the E
 Known flake: `scenes/performanceTransitions.spec.js` fails one of its four tests on a full-suite run, and it is a different test each time (the transition specs time out waiting for the shader to compile). It reproduces on an unmodified checkout, so it is a GPU-load artefact of the shared device rather than a regression. Re-run the spec on its own to confirm.
 
 Runs use **1 worker** (`MODV_E2E_WORKERS` overrides). Every worker launches its own Electron app, and the suite is GPU-bound: two concurrent apps over-subscribe the single GPU and Chromium aborts the renderer (`reason=crashed`, `exitCode=5`), failing whichever specs were running (reproducibly the ISF transition and performance-dwell specs). One worker is as fast as two and stable; use `--workers=2` only with GPU isolation.
+
+## Debugging the built app on a real GPU (AppImage + CDP)
+
+The Dockerised e2e container cannot exercise WebGPU: the app exposes `navigator.gpu`, but Point10 WebGPU scenes fail while building their TSL pipeline (`THREE.NodeBuilder: Uniform "storageTexture" not implemented.`), so `scene.render()` never settles and no frame is presented. To debug rendering — including WebGPU Point10 scenes — run the built AppImage directly on the host with remote debugging and drive it over CDP with the `browser-harness` skill:
+
+```bash
+make appimage
+nohup ./dist/VmodV-<version>.AppImage --appimage-extract-and-run \
+  --remote-debugging-port=9223 --no-sandbox > tmp/app-run.log 2>&1 &
+```
+
+```bash
+BU_CDP_URL=http://127.0.0.1:9223 browser-harness <<'PY'
+targets = cdp("Target.getTargets")["targetInfos"]
+main = [t for t in targets if "VmodV" in t.get("title", "")][0]
+switch_tab(main["targetId"])
+print(js("({title: document.title, store: typeof window.modV.store})"))
+print(capture_screenshot("tmp/main.png"))
+PY
+```
+
+- `--appimage-extract-and-run` avoids a FUSE dependency. `Target.getTargets` lists the main window, `output-window.html` and `color-picker.html`; the render worker is **not** a separate target. Drive it through the main renderer's `window.modV.store.dispatch/commit`, which forwards to the worker and resolves with the action's return value (e.g. `groups/createGroup` returns the Group, `modules/makeActiveModule` returns the Module — use `.id` / `.$id`).
+- The output window's canvas has been transferred to the worker (`transferControlToOffscreen`), so `getContext("2d")` there throws — use `capture_screenshot` / `Page.captureScreenshot` instead of reading pixels.
+- Inspect frames through the daily log at `~/.config/VmodV/logs/vmodv-YYYY-MM-DD.log`: `[point10-diag]` (from `point10/adapter.js`) reports each scene bitmap's `lit`/`bitmapAgeMs`/`presenting`, and `[render-diag]` (from `worker/render-diag.js`) reports the root canvas before/after `clearRect`, each Group's canvas and its inherit source, so frame-feedback loops are visible as a climbing `lit`/`alpha`.
+- `app.setName("VmodV")` means the host AppImage shares the real `~/.config/VmodV` userData/media tree — it seeds/loads the user's Scenes and the user's log file. Note the log offset before a run and read only appended lines.
+- Quit with the specific Electron PIDs (`for p in $(pgrep -x vmodv); do kill "$p"; done`); do not use `pkill -f`.

@@ -9,6 +9,13 @@ import { renderScenePreview } from "./scene-preview";
 import { renderRowFade } from "./row-transition";
 import { resolveInputLinkValue } from "./input-link-value";
 import { resolveInheritCanvas } from "./group-inherit";
+import {
+  diagShouldLog,
+  formatFrameDiag,
+  formatGroupDiag,
+  sampleCanvas,
+  writeDiagLine,
+} from "./render-diag";
 
 const meyda = { windowing: applyWindow };
 
@@ -62,6 +69,19 @@ async function loop(delta, features, fftOutput) {
 
   if (!main) {
     return;
+  }
+
+  const diagOn = diagShouldLog(performance.now());
+  const diagGroups = [];
+  let diagFrame = null;
+
+  if (diagOn) {
+    diagFrame = {
+      mainPrev: sampleCanvas(main.canvas),
+      mainAfterClear: null,
+      mainFinal: null,
+      ndi: !!store.state.ndi.outputEnabled,
+    };
   }
 
   // Advance scene crossfades / performance mode phrase detection. The delta
@@ -267,6 +287,31 @@ async function loop(delta, features, fftOutput) {
       drawTo = aux;
     }
 
+    const diagGroup = diagOn
+      ? {
+          index: i,
+          group,
+          drawTo,
+          moduleNames: group.modules
+            .map((moduleId) => {
+              const module = active[moduleId];
+
+              if (!module) {
+                return null;
+              }
+
+              return module.meta.enabled
+                ? `${module.$moduleName}:alpha=${module.meta.alpha}:composite=${module.meta.compositeOperation || "normal"}`
+                : null;
+            })
+            .filter(Boolean)
+            .join("|"),
+          inheritSource: null,
+          inheritSourceName: null,
+          groupSample: null,
+        }
+      : null;
+
     if (clearing) {
       drawTo.clearRect(0, 0, drawTo.canvas.width, drawTo.canvas.height);
     }
@@ -299,6 +344,16 @@ async function loop(delta, features, fftOutput) {
       });
 
       if (canvasToInherit) {
+        if (diagGroup) {
+          diagGroup.inheritSource = sampleCanvas(canvasToInherit);
+          diagGroup.inheritSourceName =
+            canvasToInherit === main.canvas
+              ? "mainPrev"
+              : inheritFrom === -1
+                ? "lastCanvas"
+                : "explicitGroup";
+        }
+
         drawTo.drawImage(
           canvasToInherit,
           0,
@@ -431,6 +486,11 @@ async function loop(delta, features, fftOutput) {
       }
     }
 
+    if (diagGroup) {
+      diagGroup.groupSample = sampleCanvas(drawTo.canvas);
+      diagGroups.push(diagGroup);
+    }
+
     let effectiveCanvas = drawTo.canvas;
 
     if (isTransitionGroup) {
@@ -497,6 +557,10 @@ async function loop(delta, features, fftOutput) {
   const windowsLength = windowKeys.length;
 
   main.clearRect(0, 0, main.canvas.width, main.canvas.height);
+
+  if (diagFrame) {
+    diagFrame.mainAfterClear = sampleCanvas(main.canvas);
+  }
 
   const scenesState = store.state.scenes;
   const transitionName = store.getters["scenes/currentTransitionName"];
@@ -658,6 +722,17 @@ async function loop(delta, features, fftOutput) {
       },
       [imageBitmap],
     );
+  }
+
+  if (diagFrame) {
+    diagFrame.mainFinal = sampleCanvas(main.canvas);
+    diagFrame.windowCount = windowsLength;
+
+    writeDiagLine(formatFrameDiag(diagFrame));
+
+    for (let i = 0; i < diagGroups.length; i++) {
+      writeDiagLine(formatGroupDiag(diagGroups[i]));
+    }
   }
 }
 

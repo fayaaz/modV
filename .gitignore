@@ -28,3 +28,6 @@ yarn-error.log*
 out
 
 test-results
+
+# Local scratch space (diagnostic builds, logs)
+tmp
