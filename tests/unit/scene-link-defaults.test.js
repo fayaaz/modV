@@ -3,6 +3,8 @@ import {
   AUTO_BASS_EXCLUDED_PROPS,
   AUTO_BPM_EXCLUDED_PROPS,
   DEFAULT_SCENE_BPM_TWEEN,
+  getBpmDivision,
+  getFeatureSmoothing,
   isAutoLinkExcluded,
 } from "../../src/renderer/src/application/worker/scene-link-defaults.js";
 
@@ -54,5 +56,40 @@ describe("scene link defaults", () => {
     expect(AUTO_BPM_EXCLUDED_PROPS["Kaleidoscope Tile"]).not.toContain(
       "rotation",
     );
+  });
+});
+
+describe("scene link options", () => {
+  it("keeps an explicit integer BPM tween division", () => {
+    expect(getBpmDivision(128)).toBe(128);
+    expect(getBpmDivision(8)).toBe(8);
+    expect(getBpmDivision(1)).toBe(1);
+  });
+
+  it("falls back to the default division for unusable input", () => {
+    expect(getBpmDivision(undefined)).toBe(32);
+    expect(getBpmDivision(NaN)).toBe(32);
+    expect(getBpmDivision(0)).toBe(32);
+    expect(getBpmDivision(-4)).toBe(32);
+    expect(getBpmDivision(3.5)).toBe(32);
+    expect(getBpmDivision("abc")).toBe(32);
+  });
+
+  it("keeps in-range feature smoothing values", () => {
+    expect(getFeatureSmoothing(0.3486748374187093)).toBeCloseTo(
+      0.3486748374187093,
+      10,
+    );
+    expect(getFeatureSmoothing(1)).toBe(1);
+    expect(getFeatureSmoothing(0.001)).toBe(0.001);
+  });
+
+  it("rejects unusable smoothing values", () => {
+    expect(getFeatureSmoothing(undefined)).toBeNull();
+    expect(getFeatureSmoothing(NaN)).toBeNull();
+    expect(getFeatureSmoothing(0)).toBeNull();
+    expect(getFeatureSmoothing(-0.5)).toBeNull();
+    expect(getFeatureSmoothing(2)).toBeNull();
+    expect(getFeatureSmoothing("abc")).toBeNull();
   });
 });

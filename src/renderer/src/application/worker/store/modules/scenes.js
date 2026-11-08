@@ -18,6 +18,7 @@ import DEFAULT_SCENES, {
   LEGACY_DEFAULTS_VERSION,
   REMOVED_DEFAULT_SCENE_MODULES,
   getDefaultSceneNamesUpTo,
+  getDefaultScenesToRemove,
   getDefaultScenesToReplace,
   getScenesToSeed,
 } from "../default-scenes";
@@ -54,6 +55,8 @@ import { clearWarmInstances } from "../../../point10/warm-cache.js";
 import { buildCapturedGroups } from "../../scene-capture";
 import {
   DEFAULT_SCENE_BPM_TWEEN,
+  getBpmDivision,
+  getFeatureSmoothing,
   isAutoLinkExcluded,
 } from "../../scene-link-defaults";
 import { pickTransitionName as pickPerformanceTransition } from "../../scene-transition-pick";
@@ -755,17 +758,27 @@ async function createBassLink({
   group,
   feature = "bass",
   range: rangeOverride,
+  smoothing,
 }) {
   const range =
     rangeOverride ||
     (module ? getBassLinkRange(module, propName) : { min: 0.55, max: 1 });
+  const smoothingValue = getFeatureSmoothing(smoothing);
+
+  let args = [feature];
+
+  if (smoothingValue !== null) {
+    const smoothingId = await store.dispatch("meyda/getSmoothingId");
+
+    args = [feature, smoothingId, smoothingValue];
+  }
 
   await store.dispatch("inputs/createInputLink", {
     inputId: inputId || group.alphaInputId,
     type: "getter",
     location: "meyda/getFeature",
     source: "meyda",
-    args: [feature],
+    args,
     min: range.min,
     max: range.max,
   });
@@ -777,11 +790,13 @@ async function createBpmTweenLink({
   propName,
   group,
   range: rangeOverride,
+  bpmDivision,
 }) {
   const targetInputId = inputId || group.alphaInputId;
   const range =
     rangeOverride ||
     (module ? getBpmLinkRange(module, propName) : { min: 0.4, max: 1 });
+  const division = getBpmDivision(bpmDivision);
 
   await store.dispatch("dataTypes/createType", {
     type: "tween",
@@ -793,7 +808,7 @@ async function createBpmTweenLink({
       easing: DEFAULT_SCENE_BPM_TWEEN.easing,
       loop: true,
       useBpm: true,
-      bpmDivision: DEFAULT_SCENE_BPM_TWEEN.bpmDivision,
+      bpmDivision: division,
       durationAsTotalTime: false,
       steps: 0,
     },
@@ -932,12 +947,17 @@ async function applyExplicitSceneInputLinks(
     const range = getExplicitLinkRange(link, target);
 
     if (link.source === "tween") {
-      await createBpmTweenLink({ ...target, range });
+      await createBpmTweenLink({
+        ...target,
+        range,
+        bpmDivision: link.bpmDivision,
+      });
     } else {
       await createBassLink({
         ...target,
         feature: link.feature || "bass",
         range,
+        smoothing: link.smoothing,
       });
     }
 
@@ -2837,6 +2857,7 @@ const actions = {
       defaultsVersion: currentVersion,
       scenes: state.scenes,
       removedModuleNames: REMOVED_DEFAULT_SCENE_MODULES,
+      seededNames: seededDefaultScenes,
     });
 
     for (let i = 0, len = migration.replacements.length; i < len; i++) {
@@ -2934,6 +2955,40 @@ const actions = {
       }
     } else {
       failed = true;
+    }
+
+    // Remove default Scenes that were retired without a replacement. Only
+    // Scenes that were seeded from the defaults are touched, so a user Scene
+    // that happens to share a name is kept.
+    const removals = getDefaultScenesToRemove({
+      defaultsVersion: currentVersion,
+      scenes: state.scenes,
+      seededNames: seededDefaultScenes,
+    });
+
+    for (let i = 0, len = removals.length; i < len; i++) {
+      const removal = removals[i];
+      const key = getSceneNameKey(removal.name);
+
+      try {
+        await dispatch("removeScene", { sceneId: removal.id });
+
+        const seededIndex = seededDefaultScenes.findIndex(
+          (name) => getSceneNameKey(name) === key,
+        );
+
+        if (seededIndex > -1) {
+          seededDefaultScenes.splice(seededIndex, 1);
+        }
+
+        seededKeys.delete(key);
+      } catch (e) {
+        failed = true;
+        console.error(
+          `Could not remove retired default Scene "${removal.name}"`,
+          e,
+        );
+      }
     }
 
     // A user Scene may already use a default's name. Treat it as seeded so

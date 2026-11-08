@@ -27,6 +27,34 @@ const EXCLUDED_PROPS_BY_MODE = {
 };
 
 /**
+ * Resolves an explicit BPM tween division for a Scene link. Falls back to the
+ * default when the value is not a positive integer.
+ */
+export function getBpmDivision(bpmDivision) {
+  const value = Number(bpmDivision);
+
+  if (!Number.isInteger(value) || value < 1) {
+    return DEFAULT_SCENE_BPM_TWEEN.bpmDivision;
+  }
+
+  return value;
+}
+
+/**
+ * Resolves the smoothing amount for a meyda feature link. Keeps values in
+ * (0, 1] and rejects anything else.
+ */
+export function getFeatureSmoothing(smoothing) {
+  const value = Number(smoothing);
+
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    return null;
+  }
+
+  return value;
+}
+
+/**
  * @param {String} moduleName
  * @param {String} propName
  * @param {"bass"|"bpm"} mode
