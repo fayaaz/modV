@@ -1,6 +1,6 @@
 # AGENTS.md
 
-modV — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **electron-vite** (Vite) and **electron-builder**.
+VmodV (fork of modV) — modular audio visualisation app. Electron + Vue 3 + Vuex, built with **electron-vite** (Vite) and **electron-builder**.
 
 ## Commands
 
@@ -56,7 +56,7 @@ Screen capture is lazy: `App.vue` only mounts `dialogs/ScreenPickerDialog.vue` w
 
 ## Lifecycle & shutdown
 
-- `src/main/index.js` takes a single-instance lock (`requestSingleInstanceLock`) to stop relaunching from stacking process trees; a `second-instance` event restores and focuses the main window. `app.setName("modV")` keeps dev and packaged builds sharing one userData/media tree.
+- `src/main/index.js` takes a single-instance lock (`requestSingleInstanceLock`) to stop relaunching from stacking process trees; a `second-instance` event restores and focuses the main window. `app.setName("VmodV")` keeps dev and packaged builds sharing one userData/media tree.
 - `src/main/shutdown.js` is the quit coordinator. On `before-quit` it sets the quitting flag, destroys all windows (including `window.open` output windows), stops the media watcher and system-audio capture with short timeouts (`CLEANUP_TIMEOUT_MS`), and starts a `WATCHDOG_TIMEOUT_MS` watchdog that force-exits if cleanup hangs. `stopActive` in `src/main/system-audio.js` is registered as the audio cleanup task rather than using its own `before-quit` hooks.
 - Closing the main window is intercepted synchronously (`preventDefault`) unless already quitting; it asks for confirmation outside dev/e2e, sends `modv-destroy`, waits for the renderer's `destroyed` IPC (bounded), runs cleanup, then calls `app.quit`. Both the worker and NDI worker tear down through this path.
 - The main window's `close` handler must not block on `await` before deciding: the old async path could leave the window open or skip `app.quit`.
@@ -109,7 +109,7 @@ Gotchas:
 
 ## Logging
 
-- `src/main/logger.js` and `src/renderer/src/application/logger.js` write to `<userData>/logs/modv-YYYY-MM-DD.log` (`~/.config/modV/logs` on Linux), keeping the last seven daily files. `src/shared/logger-format.js` holds the shared line formatter.
+- `src/main/logger.js` and `src/renderer/src/application/logger.js` write to `<userData>/logs/vmodv-YYYY-MM-DD.log` (`~/.config/VmodV/logs` on Linux), keeping the last seven daily files. `src/shared/logger-format.js` holds the shared line formatter.
 - The renderer has no filesystem access of its own, so it forwards its lines to the main process over the `log` IPC channel and everything lands in the same file. The main process also logs `render-process-gone` / `child-process-gone` and uncaught exceptions.
 - The "Open Logs" button in the Audio/Video panel (`get-logs-folder` / `open-logs-folder` IPC) shows the user where the file is.
 

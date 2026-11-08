@@ -46,7 +46,7 @@
 - [x] Make a preset with mbox as the background with light tunnel as the foreground with the alpha of the foreground affected by music. mbox should have (done; interpreted "mbox should have" as audio-reactive MBOX speed/hue controls)
 - [x] Point10 Boxy should have no background - alpha blending also doesn't work as it should on that module (done)
 - [x] Remove Kaleidoscope from defaults (done)
-- [x] Investigate orphaned modV processes left running after closing the app (multiple AppImage/modv-vite process trees persist and keep writing to ~/.config/modV). (done)
+- [x] Investigate orphaned modV processes left running after closing the app (multiple AppImage/VmodV process trees persist and keep writing to ~/.config/VmodV). (done)
 - [x] Make max scene time actually max cell time. Make it so that cells move independently and don't always change at once. (done)
 - [x] For any defaults using mbox - manipulate the hue using a beat tween. Bring the threshold to near 0 and manipulate the scale according to bass. (done; MBOX speed stays constant and the tunnel is smoothed to stop it being twitchy)
 - [x] In scenes tab hovering over the foreground for mbox light tunnel makes it take over the entire scene in the output. Same with Digital Crystal Tunnel. The effects for brickwork beat only show when hovering over effects. All of these pertain to main output. (done; hover previews were deleting the shared ISF context's vertex buffer on mouseleave, blanking every live ISF layer)
