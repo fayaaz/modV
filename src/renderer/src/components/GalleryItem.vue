@@ -131,12 +131,6 @@ export default {
         height: newHeight,
       });
 
-      this.$modV.store.commit("outputs/RESIZE_AUXILLARY", {
-        id: this.$modV.store.getters["groups/getById"](groupId).context.id,
-        width: newWidth,
-        height: newHeight,
-      });
-
       this.$modV.store.commit("groups/UPDATE_GROUP", {
         groupId,
         data: {
@@ -145,24 +139,15 @@ export default {
         },
       });
 
-      this.$modV.store.state.groups.groups
-        .find((group) => group.name === "modV internal Gallery Group")
-        .modules.filter(
-          (moduleId) =>
-            this.$modV.store.state.modules.active[moduleId].meta.enabled,
-        )
-        .forEach((moduleId) => {
-          this.$modV.store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
-            id: moduleId,
-            metaKey: "enabled",
-            data: false,
-          });
-        });
-
-      this.$modV.store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
-        id,
-        metaKey: "enabled",
-        data: true,
+      // Runs entirely in the worker's authoritative store: the renderer's
+      // mirror store replays worker mutations asynchronously and can lag, so
+      // reading the Group list from the mirror here (as before) silently
+      // disabled the preview while it caught up.
+      await this.$modV.store.dispatch("groups/focusGalleryItem", {
+        groupId,
+        moduleId: id,
+        width: newWidth,
+        height: newHeight,
       });
     },
 

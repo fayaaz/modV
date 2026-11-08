@@ -3,6 +3,7 @@ import store from "../";
 import constants, { GROUP_DISABLED } from "../../../constants";
 import { v4 as uuidv4 } from "uuid";
 import { applyExpression } from "../../../utils/apply-expression";
+import { getOtherEnabledGalleryModuleIds } from "../../gallery-focus";
 
 /**
  * @typedef {Object} Group
@@ -284,6 +285,78 @@ const actions = {
         name,
       },
     });
+  },
+
+  /**
+   * A Gallery item was hovered. Everything here runs against the worker's
+   * authoritative store: the renderer mirror replays worker mutations
+   * asynchronously and can lag the worker, so reading the Group list from
+   * the mirror (as GalleryItem#focus used to) throws or silently disables
+   * the wrong modules while the mirror catches up.
+   */
+  focusGalleryItem(_, { groupId, moduleId, width, height }) {
+    const group = state.groups.find((item) => item.id === groupId);
+
+    if (!group || !group.context) {
+      return;
+    }
+
+    store.commit("outputs/RESIZE_AUXILLARY", {
+      id: group.context.id,
+      width,
+      height,
+    });
+
+    const galleryGroup = state.groups.find(
+      (item) => item.name === constants.GALLERY_GROUP_NAME,
+    );
+
+    if (galleryGroup) {
+      const toDisable = getOtherEnabledGalleryModuleIds(
+        galleryGroup.modules,
+        store.state.modules.active,
+        moduleId,
+      );
+
+      for (let i = 0; i < toDisable.length; i++) {
+        store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
+          id: toDisable[i],
+          metaKey: "enabled",
+          data: false,
+        });
+      }
+    }
+
+    store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
+      id: moduleId,
+      metaKey: "enabled",
+      data: true,
+    });
+  },
+
+  /** The pointer left the Gallery panel: no preview module should render. */
+  disableGalleryItemModules() {
+    const galleryGroup = state.groups.find(
+      (item) => item.name === constants.GALLERY_GROUP_NAME,
+    );
+
+    if (!galleryGroup) {
+      return;
+    }
+
+    const toDisable = getOtherEnabledGalleryModuleIds(
+      galleryGroup.modules,
+      store.state.modules.active,
+      null,
+    );
+
+    for (let i = 0; i < toDisable.length; i++) {
+      store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
+        id: toDisable[i],
+        metaKey: "enabled",
+        data: false,
+      });
+    }
   },
 
   async loadPresetData({ dispatch, commit }, groups) {

@@ -262,19 +262,9 @@ export default {
     },
 
     clearUpGalleryActiveModules() {
-      this.$modV.store.state.groups.groups
-        .find((group) => group.name === "modV internal Gallery Group")
-        .modules.filter(
-          (moduleId) =>
-            this.$modV.store.state.modules.active[moduleId].meta.enabled,
-        )
-        .forEach((moduleId) => {
-          this.$modV.store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
-            id: moduleId,
-            metaKey: "enabled",
-            data: false,
-          });
-        });
+      // Runs in the worker's authoritative store; the renderer mirror can
+      // lag the worker while replaying its mutations.
+      this.$modV.store.dispatch("groups/disableGalleryItemModules");
     },
   },
 };
