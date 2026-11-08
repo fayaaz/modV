@@ -27,6 +27,9 @@ function fakeScene(fields = {}) {
     _fireLifespan: 0,
     _simSpeed: 0,
     _boxScale: 0,
+    _boxXYScale: 0,
+    _sceneOffsetX: 0,
+    _sceneOffsetY: 0,
     ...fields,
   };
 }
@@ -80,8 +83,16 @@ describe("Point10 scene prop registry", () => {
         fireLifespan: 99,
         simulationSpeed: 100,
         boxScale: 100,
+        boxXYScale: 100,
       },
       SMOKE_ROOM_PROPS,
+    );
+    const rolling = readSceneProps(
+      {
+        sceneOffsetX: 999,
+        sceneOffsetY: -999,
+      },
+      ROLLING_FIRE_PROPS,
     );
 
     expect(values.smokeDensity).toBe(100);
@@ -90,6 +101,9 @@ describe("Point10 scene prop registry", () => {
     expect(values.fireLifespan).toBe(SMOKE_ROOM_PROPS.fireLifespan.max);
     expect(values.simulationSpeed).toBe(4);
     expect(values.boxScale).toBe(SMOKE_ROOM_PROPS.boxScale.max);
+    expect(values.boxXYScale).toBe(SMOKE_ROOM_PROPS.boxXYScale.max);
+    expect(rolling.sceneOffsetX).toBe(10);
+    expect(rolling.sceneOffsetY).toBe(-10);
   });
 
   it("ignores non-numeric values", () => {
@@ -98,12 +112,23 @@ describe("Point10 scene prop registry", () => {
       fireIntensity: null,
       simulationSpeed: Number.NaN,
       boxScale: "big",
+      boxXYScale: "big",
     });
+    const rolling = readSceneProps(
+      {
+        sceneOffsetX: "big",
+        sceneOffsetY: "big",
+      },
+      ROLLING_FIRE_PROPS,
+    );
 
     expect(values.smokeDensity).toBe(28);
     expect(values.fireIntensity).toBe(40);
     expect(values.simulationSpeed).toBe(1.2);
     expect(values.boxScale).toBe(SMOKE_ROOM_PROPS.boxScale.default);
+    expect(values.boxXYScale).toBe(SMOKE_ROOM_PROPS.boxXYScale.default);
+    expect(rolling.sceneOffsetX).toBe(0);
+    expect(rolling.sceneOffsetY).toBe(0);
   });
 });
 
@@ -116,6 +141,7 @@ describe("Smoke scenes", () => {
       "fireLifespan",
       "simulationSpeed",
       "boxScale",
+      "boxXYScale",
     ]);
     expect(SMOKE_ROOM_PROPS.smokeDensity.label).toBe("Smoke Density");
   });
@@ -134,6 +160,7 @@ describe("Smoke scenes", () => {
     expect(DVD_ROOM_PROPS.fireIntensity.default).toBe(22);
     expect(DVD_ROOM_PROPS.smokeDensity).toEqual(SMOKE_ROOM_PROPS.smokeDensity);
     expect(DVD_ROOM_PROPS.boxScale).toEqual(SMOKE_ROOM_PROPS.boxScale);
+    expect(DVD_ROOM_PROPS.boxXYScale).toEqual(SMOKE_ROOM_PROPS.boxXYScale);
   });
 
   it("uses the Rolling Fire's smaller grid defaults", () => {
@@ -141,6 +168,19 @@ describe("Smoke scenes", () => {
     expect(ROLLING_FIRE_PROPS.fireIntensity.default).toBe(26);
     expect(ROLLING_FIRE_PROPS.smokeLifespan.default).toBe(1.5);
     expect(ROLLING_FIRE_PROPS.fireLifespan.default).toBe(0.9);
+  });
+
+  it("exposes scene offset levers for the Rolling Fire family", () => {
+    expect(ROLLING_FIRE_PROPS.sceneOffsetX.default).toBe(0);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetY.default).toBe(0);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetX.label).toBe("Offset X");
+    expect(ROLLING_FIRE_PROPS.sceneOffsetY.label).toBe("Offset Y");
+    expect(ROLLING_FIRE_PROPS.sceneOffsetX.min).toBe(-10);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetY.min).toBe(-10);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetX.max).toBe(10);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetY.max).toBe(10);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetX.step).toBe(0.1);
+    expect(ROLLING_FIRE_PROPS.sceneOffsetY.step).toBe(0.1);
   });
 
   it("writes the values onto a live scene", () => {
@@ -152,6 +192,7 @@ describe("Smoke scenes", () => {
       fireLifespan: 2,
       simulationSpeed: 2.5,
       boxScale: 1.7,
+      boxXYScale: 1.6,
     });
 
     expect(values.smokeDensity).toBe(12);
@@ -162,6 +203,8 @@ describe("Smoke scenes", () => {
     expect(scene._simSpeed).toBe(2.5);
     expect(values.boxScale).toBe(1.7);
     expect(scene._boxScale).toBe(1.7);
+    expect(values.boxXYScale).toBe(1.6);
+    expect(scene._boxXYScale).toBe(1.6);
   });
 
   it("survives the frame before the WebGPU volume exists", () => {
@@ -205,6 +248,27 @@ describe("Attractor Particles inputs", () => {
 });
 
 describe("Scene-specific bindings", () => {
+  it("wires the Smoke Room's box XY scale onto the scene", () => {
+    const config = SCENE_PROP_CONFIGS["Point10 Smoke Room"];
+    const scene = fakeScene();
+
+    config.apply(scene, { boxXYScale: 1.6 });
+
+    expect(scene._boxXYScale).toBe(1.6);
+  });
+
+  it("wires the scene offset onto both Rolling Fire scenes", () => {
+    for (const name of ["Point10 Rolling Fire", "Point10 Ball Of Fire"]) {
+      const config = SCENE_PROP_CONFIGS[name];
+      const scene = fakeScene();
+
+      config.apply(scene, { sceneOffsetX: 3, sceneOffsetY: -2 });
+
+      expect(scene._sceneOffsetX).toBe(3);
+      expect(scene._sceneOffsetY).toBe(-2);
+    }
+  });
+
   it("wires Around Plus water and ring controls", () => {
     const config = scenePropsFor("Point10 Around Plus");
     const scene = {};

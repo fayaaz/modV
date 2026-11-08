@@ -30,6 +30,10 @@ export const SMOKE_ROOM_PROPS = {
   // Large enough that the camera sits inside the glass room, so the box
   // fills the output instead of showing its rim.
   boxScale: float("Box Scale", 2.8, 0.5, 5, 0.05),
+  // X/Y multiplier on top of Box Scale: widens/tallies the glass room and the
+  // sim grid only. The orb (sphere, point light) and the sim's sphere radius
+  // stay on Box Scale alone.
+  boxXYScale: float("Box Width & Height", 1, 0.5, 5, 0.05),
 };
 
 export const DVD_ROOM_PROPS = {
@@ -45,6 +49,11 @@ export const ROLLING_FIRE_PROPS = {
   fireIntensity: float("Fire Intensity", 26, 0, 100, 0.1),
   smokeLifespan: float("Smoke Lifespan", 1.5, 0.1, 20, 0.1),
   fireLifespan: float("Fire Lifespan", 0.9, 0.1, 5, 0.1),
+  // Screen-space pan of the whole scene: added to both the camera position and
+  // its lookAt target each frame, so the frame shifts without rotating.
+  // World units; the sim world is ~32 m across.
+  sceneOffsetX: float("Offset X", 0, -10, 10, 0.1),
+  sceneOffsetY: float("Offset Y", 0, -10, 10, 0.1),
 };
 
 export const AROUND_PLUS_PROPS = {
@@ -142,6 +151,9 @@ const FIELD_BINDINGS = {
   fireLifespan: "_fireLifespan",
   simulationSpeed: "_simSpeed",
   boxScale: "_boxScale",
+  boxXYScale: "_boxXYScale",
+  sceneOffsetX: "_sceneOffsetX",
+  sceneOffsetY: "_sceneOffsetY",
 };
 
 const numeric = (value, fallback, min, max) => {

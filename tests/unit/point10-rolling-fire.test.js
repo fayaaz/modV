@@ -7,6 +7,15 @@ import {
 const construct = (SceneClass) => new SceneClass(null, null, {});
 
 describe("Rolling Fire transparency", () => {
+  it("starts with the scene offset at the origin", () => {
+    for (const SceneClass of [RollingFire, BallOfFire]) {
+      const scene = construct(SceneClass);
+
+      expect(scene._sceneOffsetX).toBe(0);
+      expect(scene._sceneOffsetY).toBe(0);
+    }
+  });
+
   it("composites Rolling Fire as a transparent foreground overlay", () => {
     const scene = construct(RollingFire);
 

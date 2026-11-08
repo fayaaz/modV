@@ -210,6 +210,8 @@ export class RollingFire extends BaseSceneWebGPU {
     this._kickX = 0;
     this._kickZ = 0; // beat velocity impulse (m/s)
     this._camFollow = new THREE.Vector3(9, 3.5, 2.8); // smoothed offset from ball
+    this._sceneOffsetX = 0;
+    this._sceneOffsetY = 0;
     this._camPos = new THREE.Vector3();
     this._camYaw = 0; // slow music-driven orbit angle (see update)
     this._pulse = { hue: 0, t: 0 };
@@ -1429,12 +1431,14 @@ export class RollingFire extends BaseSceneWebGPU {
     const swayT = this.time;
     const camera = this.camera;
     camera.up.set(0, 1, 0);
+    const ox = this._sceneOffsetX ?? 0;
+    const oy = this._sceneOffsetY ?? 0;
     const ballWorld = this.sphere.getWorldPosition(this._camPos);
     const cy = Math.cos(this._camYaw),
       sy = Math.sin(this._camYaw);
     const desired = this._camFollow.set(
-      ballWorld.x + this._camBase.x * cy - this._camBase.z * sy,
-      ballWorld.y + this._camBase.y,
+      ballWorld.x + this._camBase.x * cy - this._camBase.z * sy + ox,
+      ballWorld.y + this._camBase.y + oy,
       ballWorld.z + this._camBase.x * sy + this._camBase.z * cy,
     );
     camera.position.lerp(desired, Math.min(1, delta * 1.2));
@@ -1442,7 +1446,11 @@ export class RollingFire extends BaseSceneWebGPU {
     camera.position.z += n2.noise(0, 0, swayT * 0.3) * 0.15;
     // keep the ball near centre but aim slightly BELOW it so the floor always
     // stays in frame.
-    camera.lookAt(ballWorld.x, ballWorld.y - FLOOR_AIM_DOWN, ballWorld.z);
+    camera.lookAt(
+      ballWorld.x + ox,
+      ballWorld.y - FLOOR_AIM_DOWN + oy,
+      ballWorld.z,
+    );
 
     // key light: overhead spotlight, aimed straight down at the ball (tracks
     // the ball's X/Z so the fire is always lit).

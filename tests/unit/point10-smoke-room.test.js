@@ -29,6 +29,49 @@ describe("Smoke Room box scale", () => {
     expect(scaled.z).toBeCloseTo(base.z * 2.5, 6);
   });
 
+  it("stretches the box's X/Y extents without touching Z", () => {
+    const base = SmokeRoom.boxHalfExtents();
+    const scaled = SmokeRoom.boxHalfExtents(2.5, 1.6);
+
+    expect(scaled.x).toBeCloseTo(base.x * 2.5 * 1.6, 6);
+    expect(scaled.y).toBeCloseTo(base.y * 2.5 * 1.6, 6);
+    expect(scaled.z).toBeCloseTo(base.z * 2.5, 6);
+  });
+
+  it("puts the stretched box's top edge on the output's top edge", () => {
+    const scale = 1.5;
+    const xyScale = 1.4;
+    const camera = orbitCamera();
+    const top = SmokeRoom.requiredGlassTop(camera, scale, xyScale);
+    const { x: halfX, z: halfZ } = SmokeRoom.boxHalfExtents(scale, xyScale);
+
+    const corners = [
+      [-halfX, top, -halfZ],
+      [halfX, top, -halfZ],
+      [-halfX, top, halfZ],
+      [halfX, top, halfZ],
+    ];
+    const projected = corners.map((corner) =>
+      new THREE.Vector3(...corner).project(camera),
+    );
+
+    for (const point of projected) {
+      expect(point.y).toBeGreaterThanOrEqual(1 - 1e-6);
+    }
+    expect(Math.min(...projected.map((point) => point.y))).toBeCloseTo(1, 5);
+  });
+
+  it("anchors the stretched glass fit to the stretched bottom edge", () => {
+    const scale = 1.3;
+    const xyScale = 1.4;
+    const top = 20;
+    const { y: halfY } = SmokeRoom.boxHalfExtents(scale, xyScale);
+    const { height, centreY } = SmokeRoom.glassFit(top, scale, xyScale);
+
+    expect(centreY - height / 2).toBeCloseTo(-halfY, 6);
+    expect(centreY + height / 2).toBeCloseTo(top, 6);
+  });
+
   it("puts the scaled box's top edge on the output's top edge", () => {
     const scale = 1.5;
     const camera = orbitCamera();

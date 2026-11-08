@@ -119,6 +119,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     this._pulse = { hue: 0, t: 0 };
     this._camPos = new THREE.Vector3();
     this._boxScale = 1;
+    this._boxXYScale = 1;
     this._baseGridOrigin = new THREE.Vector3(0, -VOLUME_WORLD_SIZE_Y / 2, 0);
     if (!this._available) {
       console.warn("SmokeRoom: WebGPU not available, scene disabled.");
@@ -128,10 +129,10 @@ export class SmokeRoom extends BaseSceneWebGPU {
 
   // Half extents of the glass room at a given box scale. The top is stretched
   // separately by glassFit so the camera stays inside the room.
-  static boxHalfExtents(scale = 1) {
+  static boxHalfExtents(scale = 1, xyScale = 1) {
     return {
-      x: GLASS_HALF_X * scale,
-      y: GLASS_HALF_Y * scale,
+      x: GLASS_HALF_X * scale * xyScale,
+      y: GLASS_HALF_Y * scale * xyScale,
       z: GLASS_HALF_Z * scale,
     };
   }
@@ -142,7 +143,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
   // Solve that for p.y over the four top corners and take the highest - the
   // far corners are the ones that otherwise peek into frame. Aspect ratio does
   // not enter because three's fov is vertical.
-  static requiredGlassTop(camera, scale = 1) {
+  static requiredGlassTop(camera, scale = 1, xyScale = 1) {
     camera.updateMatrixWorld();
 
     const forward = camera.getWorldDirection(new THREE.Vector3());
@@ -153,7 +154,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
     const denominator = up.y - tanHalfFov * forward.y;
     const { x: camX, y: camY, z: camZ } = camera.position;
-    const { x: halfX, z: halfZ } = this.boxHalfExtents(scale);
+    const { x: halfX, z: halfZ } = this.boxHalfExtents(scale, xyScale);
 
     let top = -Infinity;
 
@@ -173,8 +174,8 @@ export class SmokeRoom extends BaseSceneWebGPU {
   }
 
   // Height and centre for a bottom-anchored room that reaches `top`.
-  static glassFit(top, scale = 1) {
-    const halfY = this.boxHalfExtents(scale).y;
+  static glassFit(top, scale = 1, xyScale = 1) {
+    const halfY = this.boxHalfExtents(scale, xyScale).y;
     const topY = Math.max(top, halfY);
 
     return {
@@ -281,28 +282,41 @@ export class SmokeRoom extends BaseSceneWebGPU {
     if (!glass) return;
 
     const scale = this._boxScale ?? 1;
+    const xyScale = this._boxXYScale ?? 1;
     const { height, centreY } = this.constructor.glassFit(
-      this.constructor.requiredGlassTop(this.camera, scale) +
+      this.constructor.requiredGlassTop(this.camera, scale, xyScale) +
         GLASS_TOP_MARGIN * scale,
       scale,
+      xyScale,
     );
-    glass.scale.set(scale, height / (GLASS_HALF_Y * 2), scale);
+    glass.scale.set(scale * xyScale, height / (GLASS_HALF_Y * 2), scale);
     glass.position.y = centreY;
   }
 
   _applyBoxScale() {
     const scale = this._boxScale ?? 1;
+    const xyScale = this._boxXYScale ?? 1;
     if (this._boxGroup) this._boxGroup.scale.setScalar(scale);
+    if (this._volumetricMesh) {
+      this._volumetricMesh.scale.set(xyScale, xyScale, 1);
+    }
+    if (this._volumetricShadowMesh) {
+      this._volumetricShadowMesh.scale.set(xyScale, xyScale, 1);
+    }
     if (this._uBoxScale) this._uBoxScale.value = scale;
     if (this._uVolumeWorldSize) {
       this._uVolumeWorldSize.value.set(
-        VOLUME_WORLD_SIZE_X * scale,
-        VOLUME_WORLD_SIZE_Y * scale,
+        VOLUME_WORLD_SIZE_X * scale * xyScale,
+        VOLUME_WORLD_SIZE_Y * scale * xyScale,
         VOLUME_WORLD_SIZE_Z * scale,
       );
     }
-    if (this._uGridOrigin && this._baseGridOrigin) {
-      this._uGridOrigin.value.copy(this._baseGridOrigin).multiplyScalar(scale);
+    if (this._uGridOrigin) {
+      this._uGridOrigin.value.set(
+        0,
+        -(VOLUME_WORLD_SIZE_Y * scale * xyScale) / 2,
+        0,
+      );
     }
     this._fitGlassToOutput();
   }
@@ -315,9 +329,10 @@ export class SmokeRoom extends BaseSceneWebGPU {
     const worldPos = this.emitter.getWorldPosition(this._camPos);
     this._uSpherePosition.value.copy(worldPos);
     const scale = this._boxScale ?? 1;
+    const xyScale = this._boxXYScale ?? 1;
     this._uGridOrigin.value.set(
       worldPos.x,
-      worldPos.y - (VOLUME_WORLD_SIZE_Y * scale) / 2,
+      worldPos.y - (VOLUME_WORLD_SIZE_Y * scale * xyScale) / 2,
       worldPos.z,
     );
   }
