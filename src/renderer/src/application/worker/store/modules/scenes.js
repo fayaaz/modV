@@ -62,6 +62,7 @@ import {
   isAutoLinkExcluded,
 } from "../../scene-link-defaults";
 import { pickTransitionName as pickPerformanceTransition } from "../../scene-transition-pick";
+import { shouldLoadSceneFromDisk } from "../../scene-disk";
 
 const fs = require("fs");
 const path = require("path");
@@ -3065,6 +3066,11 @@ const actions = {
    * Reads saved Scene JSON files from the current project's scene folder.
    * The Electron main process (media manager watcher) discovers the files;
    * this reads their contents, mirroring how presets are loaded.
+   *
+   * `scenes.json` is the authoritative list and is auto-persisted after every
+   * Scene mutation, while these per-Scene files are only written on explicit
+   * saves. A file older than the saved list must never replace the in-memory
+   * Scene, otherwise reloading silently reverts the user's work.
    */
   async loadScenesFromDisk({ commit, state, rootState }) {
     const { media, path: mediaPath } = rootState.media;
@@ -3074,22 +3080,47 @@ const actions = {
       return;
     }
 
+    const existingSceneIds = new Set(
+      state.scenes.map((scene) => scene && scene.id).filter(Boolean),
+    );
+    const storagePath = getScenesStoragePath();
+    let storeMtimeMs = null;
+
+    if (storagePath) {
+      try {
+        storeMtimeMs = (await fs.promises.stat(storagePath)).mtimeMs;
+      } catch (e) {
+        // No saved Scene list yet; only brand-new files are imported.
+      }
+    }
+
     const items = Object.values(media[project].scene);
 
     for (let i = 0, len = items.length; i < len; i++) {
       const item = items[i];
+      const filePath = path.join(mediaPath, item.path);
 
       try {
-        const fileBuffer = await fs.promises.readFile(
-          path.join(mediaPath, item.path),
-        );
+        const [fileBuffer, stats] = await Promise.all([
+          fs.promises.readFile(filePath),
+          fs.promises.stat(filePath),
+        ]);
         const scene = normalizeScene(JSON.parse(fileBuffer.toString()));
 
-        if (scene) {
+        if (
+          scene &&
+          shouldLoadSceneFromDisk({
+            sceneId: scene.id,
+            existingSceneIds,
+            fileMtimeMs: stats.mtimeMs,
+            storeMtimeMs,
+          })
+        ) {
           commit("ADD_SCENE", {
             ...scene,
             ...normalizeSceneTiming(scene, state.performance),
           });
+          existingSceneIds.add(scene.id);
         }
       } catch (e) {
         console.error(`Could not load scene "${item.name}"`, e);
