@@ -6,5 +6,5 @@ test("renders the main window", async () => {
 
   await expect(tabs.getLocators().inputConfig).toBeVisible();
 
-  await expect(page).toHaveTitle("Untitled");
+  await expect(page).toHaveTitle("VmodV");
 });

@@ -55,7 +55,7 @@ test.describe("system audio (loopback)", () => {
 
     const files = fs
       .readdirSync(logsDirectory)
-      .filter((name) => name.startsWith("modv-") && name.endsWith(".log"));
+      .filter((name) => name.startsWith("vmodv-") && name.endsWith(".log"));
 
     expect(files.length).toBeGreaterThan(0);
 

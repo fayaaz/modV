@@ -49,13 +49,29 @@ export const groups = {
   },
 
   async getUserGroups(groups) {
-    if (!groups) {
-      ({ groups } = await modVApp.groups.mainState());
+    if (groups) {
+      return groups.filter(
+        (group) => group.name !== constants.GALLERY_GROUP_NAME,
+      );
     }
 
-    return groups.filter(
-      (group) => group.name !== constants.GALLERY_GROUP_NAME,
-    );
+    const deadline = Date.now() + 10000;
+    let userGroups = [];
+
+    while (userGroups.length === 0 && Date.now() < deadline) {
+      const state = await modVApp.groups.mainState();
+      const allGroups = (state && state.groups) || [];
+
+      userGroups = allGroups.filter(
+        (group) => group.name !== constants.GALLERY_GROUP_NAME,
+      );
+
+      if (userGroups.length === 0) {
+        await modVApp.page.waitForTimeout(100);
+      }
+    }
+
+    return userGroups;
   },
 
   async getFirstUserGroupIdAndIndex() {
