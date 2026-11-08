@@ -129,13 +129,26 @@
       </c>
     </grid>
 
-    <div v-if="scenes.length" class="scenes__gridWrapper">
+    <div v-if="scenes.length" ref="gridWrapper" class="scenes__gridWrapper">
       <div class="scenes__grid" :style="{ gridTemplateColumns }">
         <div class="scenes__gridCorner">
           <span>Layers</span>
-          <button class="light scenes__addRowButton" @click="addRow">
-            + Row
-          </button>
+          <div class="scenes__gridCornerButtons">
+            <button
+              class="light scenes__addRowButton"
+              title="Add a new empty Scene column"
+              @click="addColumn"
+            >
+              + Column
+            </button>
+            <button
+              class="light scenes__addRowButton"
+              title="Add a new row"
+              @click="addRow"
+            >
+              + Row
+            </button>
+          </div>
         </div>
         <div
           v-for="scene in scenes"
@@ -208,6 +221,7 @@
                 this.cellDragTarget.rowIndex === row.index,
             }"
             :draggable="true"
+            v-contextMenu="() => sceneCellContextMenu(scene, row.index)"
             @click="
               isRowCellEmpty(scene, row.index)
                 ? null
@@ -268,6 +282,41 @@
     <p v-else class="scenes__empty">
       No Scenes yet. Save the current setup as a Scene to fill the grid.
     </p>
+
+    <Dialog
+      v-if="editGroupId"
+      :title="editTitle"
+      @close="closeSceneCellEditor"
+    >
+      <div class="scenes__groupEditor">
+        <Group v-if="editGroup" :group-id="editGroupId" />
+
+        <grid columns="6" class="scenes__addModuleRow">
+          <c span="4">
+            <Select v-model="moduleToAdd">
+              <option value="">Add a module…</option>
+              <option v-for="name in moduleOptions" :key="name" :value="name">
+                {{ name }}
+              </option>
+            </Select>
+          </c>
+          <c span="2">
+            <Button
+              class="light"
+              :disabled="!moduleToAdd"
+              @click="addModuleToEditedGroup"
+            >
+              Add module
+            </Button>
+          </c>
+        </grid>
+
+        <ModuleInspector
+          v-if="editFocusedModuleId"
+          :module-id="editFocusedModuleId"
+        />
+      </div>
+    </Dialog>
 
     <details class="scenes__manage">
       <summary>Manage Scenes</summary>
@@ -378,10 +427,21 @@ import {
   isRowCellEmpty as isSceneRowCellEmpty,
 } from "../application/worker/scene-rows";
 import { SceneHeaderContextMenu } from "../menus/context/sceneHeaderContextMenu.js";
+import { SceneCellContextMenu } from "../menus/context/sceneCellContextMenu.js";
+import Dialog from "./Dialog.vue";
+import Group from "./Group.vue";
+import ModuleInspector from "./ModuleInspector.vue";
 
 const { ipcRenderer } = window.electron;
 
 export default {
+  components: {
+    // eslint-disable-next-line vue/no-reserved-component-names
+    Dialog,
+    Group,
+    ModuleInspector,
+  },
+
   data() {
     return {
       iVTitle: "Scenes",
@@ -395,6 +455,10 @@ export default {
       dragRowIndex: null,
       cellDragSource: null,
       cellDragTarget: null,
+      editSceneId: null,
+      editRowIndex: null,
+      editGroupId: null,
+      moduleToAdd: "",
       sceneSaveTimer: null,
       previewKey: null,
       previewFrames: {},
@@ -426,6 +490,42 @@ export default {
       return Array.isArray(this.performance.rowNames)
         ? this.performance.rowNames
         : [];
+    },
+
+    editGroup() {
+      if (!this.editGroupId) {
+        return null;
+      }
+
+      return (
+        this.$modV.store.state.groups.groups.find(
+          (group) => group.id === this.editGroupId,
+        ) || null
+      );
+    },
+
+    editFocusedModuleId() {
+      const focused = this.$store.state.uiModules.focused;
+
+      if (!focused || !this.editGroup) {
+        return null;
+      }
+
+      return (this.editGroup.modules || []).includes(focused) ? focused : null;
+    },
+
+    editTitle() {
+      const scene = this.scenes.find((item) => item.id === this.editSceneId);
+
+      return `${scene ? scene.name : "Scene"} · ${
+        this.editGroup ? this.editGroup.name : "Group"
+      }`;
+    },
+
+    moduleOptions() {
+      return Object.keys(this.$modV.store.state.modules.registered).sort(
+        (a, b) => a.localeCompare(b),
+      );
     },
 
     transitioning() {
@@ -594,6 +694,119 @@ export default {
         sceneId: scene.id,
         rowIndex,
       });
+    },
+
+    sceneCellContextMenu(scene, rowIndex) {
+      return SceneCellContextMenu({
+        scene,
+        rowIndex,
+        group: this.sceneGroupForRow(scene, rowIndex),
+        editEnabled: !this.isRowCellEmpty(scene, rowIndex) && !this.performanceEnabled,
+        clearEnabled: !this.isRowCellEmpty(scene, rowIndex),
+        onEdit: () => this.openSceneCellEditor(scene, rowIndex),
+        onClear: () => this.clearSceneCell(scene, rowIndex),
+      });
+    },
+
+    async openSceneCellEditor(scene, rowIndex) {
+      if (this.performanceEnabled) {
+        return;
+      }
+
+      const active = this.$modV.store.getters["scenes/activeRow"](rowIndex);
+      let groupId =
+        active && active.sceneId === scene.id ? active.groupId : null;
+
+      if (!groupId) {
+        const result = await this.$modV.store.dispatch(
+          "scenes/applySceneRow",
+          {
+            sceneId: scene.id,
+            rowIndex,
+          },
+        );
+
+        groupId = result && result.groupId;
+      }
+
+      if (!groupId) {
+        return;
+      }
+
+      this.editSceneId = scene.id;
+      this.editRowIndex = rowIndex;
+      this.editGroupId = groupId;
+      this.moduleToAdd = "";
+    },
+
+    async closeSceneCellEditor() {
+      const sceneId = this.editSceneId;
+      const rowIndex = this.editRowIndex;
+
+      this.editSceneId = null;
+      this.editRowIndex = null;
+      this.editGroupId = null;
+      this.moduleToAdd = "";
+
+      if (!sceneId || rowIndex === null) {
+        return;
+      }
+
+      const updated = await this.$modV.store.dispatch(
+        "scenes/captureSceneRowToScene",
+        { sceneId, rowIndex },
+      );
+
+      if (updated) {
+        this.persistScene(updated);
+      }
+    },
+
+    async addModuleToEditedGroup() {
+      const moduleName = this.moduleToAdd;
+      const groupId = this.editGroupId;
+
+      if (!moduleName || !groupId) {
+        return;
+      }
+
+      const module = await this.$modV.store.dispatch(
+        "modules/makeActiveModule",
+        { moduleName },
+      );
+
+      if (!module) {
+        return;
+      }
+
+      this.$modV.store.commit("groups/ADD_MODULE_TO_GROUP", {
+        moduleId: module.$id,
+        groupId,
+      });
+      this.$store.commit("uiModules/SET_FOCUSED", module.$id);
+      this.moduleToAdd = "";
+    },
+
+    async clearSceneCell(scene, rowIndex) {
+      const group = this.sceneGroupForRow(scene, rowIndex);
+      const groupName = (group && group.name) || `Row ${rowIndex + 1}`;
+      const confirmed = window.confirm(
+        `Remove all modules from "${groupName}" in "${scene.name}"?`,
+      );
+
+      if (!confirmed) {
+        return;
+      }
+
+      const updated = await this.$modV.store.dispatch(
+        "scenes/clearSceneCell",
+        { sceneId: scene.id, rowIndex },
+      );
+
+      if (updated) {
+        this.persistScene(updated);
+        this.$store.commit("uiModules/SET_FOCUSED", null);
+      }
     },
 
     scenePreviewSize(cell) {
@@ -806,6 +1019,22 @@ export default {
       names[rowIndex] = name;
 
       await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+    },
+
+    async addColumn() {
+      const scene = await this.$modV.store.dispatch("scenes/addEmptyScene");
+
+      if (!scene) {
+        return;
+      }
+
+      await this.$nextTick();
+
+      const wrapper = this.$refs.gridWrapper;
+
+      if (wrapper) {
+        wrapper.scrollLeft = wrapper.scrollWidth;
+      }
     },
 
     async addRow() {
@@ -1300,6 +1529,13 @@ div.scenes__gridCorner {
   align-items: center;
   justify-content: space-between;
   gap: 4px;
+  flex-wrap: wrap;
+}
+
+div.scenes__gridCornerButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 button.scenes__addRowButton {
@@ -1540,5 +1776,17 @@ grid.scenes__footer {
 span.scenes__status {
   font-size: 12px;
   opacity: 0.8;
+}
+
+div.scenes__groupEditor {
+  min-width: 420px;
+  max-height: 70vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+grid.scenes__addModuleRow {
+  padding: 8px 0;
+  grid-row-gap: 4px;
 }
 </style>

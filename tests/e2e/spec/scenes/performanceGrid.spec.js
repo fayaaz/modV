@@ -1021,3 +1021,286 @@ test("hovering a grid cell previews the saved group and leaves a still", async (
   await removeUserGroups();
   await ensureUserGroup();
 });
+
+test("the Scenes grid adds a new empty Scene column", async () => {
+  const before = await modVApp.evaluateWorker(() =>
+    self.store.state.scenes.scenes.map((scene) => ({
+      id: scene.id,
+      name: scene.name,
+    })),
+  );
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  await page
+    .locator(".scenes__gridCornerButtons button", { hasText: "+ Column" })
+    .click();
+
+  await expect
+    .poll(async () =>
+      modVApp.evaluateWorker(() => self.store.state.scenes.scenes.length),
+    )
+    .toBe(before.length + 1);
+
+  const beforeIds = before.map((scene) => scene.id);
+  const added = await modVApp.evaluateWorker(
+    ({ beforeIds: ids }) => {
+      const scene = self.store.state.scenes.scenes.find(
+        (item) => !ids.includes(item.id),
+      );
+
+      return scene ? JSON.parse(JSON.stringify(scene)) : null;
+    },
+    { beforeIds },
+  );
+
+  expect(added).toBeTruthy();
+  expect(added.name).toMatch(/^Scene \d+$/);
+  expect(added.groups).toEqual([]);
+  expect(added.modules).toEqual({});
+
+  await expect(page.locator(".scenes__gridHeader")).toHaveCount(
+    before.length + 1,
+  );
+  await expect(
+    page.locator(".scenes__gridHeaderName", { hasText: added.name }),
+  ).toHaveCount(1);
+
+  await removeScene(added.id);
+});
+
+test("editing a grid cell saves added modules back into the Scene", async () => {
+  const prefix = uniqueName("E2E Cell Edit");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const groupId = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(`${prefix} A`);
+
+  await applyScene(scene.id);
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const cell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="0"]`,
+  );
+
+  await expect(cell).not.toHaveClass(/scenes__gridCell--empty/);
+
+  try {
+    await page.evaluate(() => {
+      const { Menu } = window.remote;
+
+      window.__e2eMenuOriginal = Menu.buildFromTemplate;
+      window.__e2eMenuTemplate = null;
+      Menu.buildFromTemplate = (template) => {
+        window.__e2eMenuTemplate = template;
+        return { popup() {} };
+      };
+    });
+
+    await cell.click({ button: "right" });
+
+    await expect
+      .poll(async () => page.evaluate(() => !!window.__e2eMenuTemplate))
+      .toBe(true);
+
+    const labels = await page.evaluate(() =>
+      window.__e2eMenuTemplate
+        .map((item) => item.label)
+        .filter((label) => typeof label === "string"),
+    );
+
+    expect(labels).toEqual(expect.arrayContaining(["Edit", "Clear"]));
+
+    await page.evaluate(async () => {
+      const item = window.__e2eMenuTemplate.find(
+        (entry) => entry.label === "Edit",
+      );
+
+      await item.click();
+    });
+
+    const dialog = page.locator("dialog[open]");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator(".scenes__groupEditor .group")).toBeVisible();
+
+    const beforeModules = await dialog.locator(".active-module").count();
+    expect(beforeModules).toBe(1);
+
+    await dialog.locator(".scenes__addModuleRow select").selectOption("Bands");
+    await dialog.getByRole("button", { name: "Add module" }).click();
+    await expect(dialog.locator(".active-module")).toHaveCount(
+      beforeModules + 1,
+    );
+
+    await dialog.locator("header button.close").click();
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+
+    await expect
+      .poll(() =>
+        modVApp.evaluateWorker(
+          async ({ sceneId }) => {
+            const saved = self.store.state.scenes.scenes.find(
+              (item) => item.id === sceneId,
+            );
+
+            if (!saved || !saved.groups[0]) {
+              return null;
+            }
+
+            return saved.groups[0].modules.map(
+              (moduleId) =>
+                saved.modules[moduleId] && saved.modules[moduleId].$moduleName,
+            );
+          },
+          { sceneId: scene.id },
+        ),
+      )
+      .toEqual(["Ball", "Bands"]);
+  } finally {
+    await page.evaluate(() => {
+      if (window.__e2eMenuOriginal) {
+        window.remote.Menu.buildFromTemplate = window.__e2eMenuOriginal;
+      }
+
+      delete window.__e2eMenuOriginal;
+      delete window.__e2eMenuTemplate;
+    });
+  }
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("clearing a grid cell removes its modules after confirmation", async () => {
+  const prefix = uniqueName("E2E Cell Clear");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const groupId = await createGroup(`${prefix} A0`);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(`${prefix} A`);
+
+  await applyScene(scene.id);
+
+  const moduleId = await modVApp.evaluateWorker(
+    ({ sceneId }) =>
+      self.store.state.scenes.scenes.find((item) => item.id === sceneId)
+        .groups[0].modules[0],
+    { sceneId: scene.id },
+  );
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const cell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="0"]`,
+  );
+
+  try {
+    await page.evaluate(() => {
+      const { Menu } = window.remote;
+
+      window.__e2eMenuOriginal = Menu.buildFromTemplate;
+      window.__e2eMenuTemplate = null;
+      window.__e2eConfirmOriginal = window.confirm;
+      window.__e2eConfirmCalls = [];
+      window.confirm = (message) => {
+        window.__e2eConfirmCalls.push(message);
+        return true;
+      };
+      Menu.buildFromTemplate = (template) => {
+        window.__e2eMenuTemplate = template;
+        return { popup() {} };
+      };
+    });
+
+    await cell.click({ button: "right" });
+
+    await expect
+      .poll(async () => page.evaluate(() => !!window.__e2eMenuTemplate))
+      .toBe(true);
+
+    await page.evaluate(async () => {
+      const item = window.__e2eMenuTemplate.find(
+        (entry) => entry.label === "Clear",
+      );
+
+      await item.click();
+    });
+
+    await expect
+      .poll(async () => page.evaluate(() => window.__e2eConfirmCalls.length))
+      .toBe(1);
+
+    const confirmMessage = await page.evaluate(
+      () => window.__e2eConfirmCalls[0],
+    );
+    expect(confirmMessage).toContain(`${prefix} A0`);
+    expect(confirmMessage).toContain(scene.name);
+
+    await expect
+      .poll(() =>
+        modVApp.evaluateWorker(
+          ({ sceneId, moduleId: clearedModuleId }) => {
+            const saved = self.store.state.scenes.scenes.find(
+              (item) => item.id === sceneId,
+            );
+            const live = self.store.state.groups.groups.find(
+              (group) =>
+                group.sceneId === sceneId && group.transitionGhost !== true,
+            );
+
+            return {
+              savedModules:
+                saved && saved.groups[0]
+                  ? saved.groups[0].modules.length
+                  : null,
+              savedSnapshot:
+                saved && saved.modules
+                  ? !!saved.modules[clearedModuleId]
+                  : true,
+              liveModules: live ? live.modules.length : null,
+              activeModule: !!self.store.state.modules.active[clearedModuleId],
+            };
+          },
+          { sceneId: scene.id, moduleId },
+        ),
+      )
+      .toEqual({
+        savedModules: 0,
+        savedSnapshot: false,
+        liveModules: 0,
+        activeModule: false,
+      });
+  } finally {
+    await page.evaluate(() => {
+      if (window.__e2eMenuOriginal) {
+        window.remote.Menu.buildFromTemplate = window.__e2eMenuOriginal;
+      }
+
+      if (window.__e2eConfirmOriginal) {
+        window.confirm = window.__e2eConfirmOriginal;
+      }
+
+      delete window.__e2eMenuOriginal;
+      delete window.__e2eMenuTemplate;
+      delete window.__e2eConfirmOriginal;
+      delete window.__e2eConfirmCalls;
+    });
+  }
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});

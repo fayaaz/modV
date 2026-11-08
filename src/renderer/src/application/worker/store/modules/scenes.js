@@ -52,7 +52,9 @@ import {
 } from "../../scene-rows";
 import { prewarmSceneModules } from "../../point10-prewarm";
 import { clearWarmInstances } from "../../../point10/warm-cache.js";
-import { buildCapturedGroups } from "../../scene-capture";
+import { collectSceneGroups } from "../../scene-capture";
+import { createEmptyScene } from "../../scene-columns";
+import { clearSceneCellModules, mergeSceneCell } from "../../scene-cell";
 import {
   DEFAULT_SCENE_BPM_TWEEN,
   getBpmDivision,
@@ -1883,6 +1885,25 @@ async function completeTransition(commit) {
 
 const actions = {
   /**
+   * Adds a new, empty Scene column. It holds no Groups or Modules and is
+   * intended to be filled by Ctrl+dragging cells from other Scenes.
+   */
+  async addEmptyScene({ commit, dispatch, state }, args = {}) {
+    const timing = normalizePerformanceTiming(state.performance);
+    const scene = createEmptyScene({
+      id: uuidv4(),
+      name: args.name,
+      existingNames: state.scenes.map((item) => item && item.name),
+      timing,
+    });
+
+    commit("ADD_SCENE", scene);
+    await dispatch("persistScenes");
+
+    return JSON.parse(JSON.stringify(scene));
+  },
+
+  /**
    * Snapshots the whole preset-aware store using the same serializer as a
    * preset, then adds Scene metadata.
    */
@@ -1914,7 +1935,9 @@ const actions = {
    * Writes the current live state of an applied Scene back into its Scene
    * document. Only the live Groups stamped with the Scene's `sceneId` are
    * captured (never transition ghosts, the Gallery group or other Scenes'
-   * groups), and capture is refused while performance mode is running.
+   * groups), and capture is refused while performance mode is running. An
+   * empty Scene column captures the current live layer stack instead, so it
+   * can be filled after being added.
    */
   async captureLiveStateToScene(
     { commit, dispatch, state, rootState },
@@ -1933,10 +1956,31 @@ const actions = {
     await completeTransition(commit);
     await completeAllRowTransitions();
 
-    const captured = buildCapturedGroups(scene, rootState.groups.groups);
+    const collected = collectSceneGroups(scene, rootState.groups.groups);
 
-    if (!captured) {
+    if (!collected) {
       return { error: "not-applied" };
+    }
+
+    const captured = { groups: collected.groups };
+    // An empty Scene has no stamped Groups yet. When it is the applied Scene,
+    // stamp the captured live Groups so later saves keep finding them.
+    if (collected.fromLive && state.performance.currentSceneId === scene.id) {
+      for (let row = 0, len = captured.groups.length; row < len; row++) {
+        const group = captured.groups[row];
+
+        if (!group) {
+          continue;
+        }
+
+        group.sceneId = scene.id;
+        group.sceneRow = row;
+
+        store.commit("groups/UPDATE_GROUP", {
+          groupId: group.id,
+          data: { sceneId: scene.id, sceneRow: row },
+        });
+      }
     }
 
     const moduleIds = [];
@@ -3269,6 +3313,153 @@ const actions = {
     await dispatch("persistScenes");
 
     return normalized;
+  },
+
+  /**
+   * Removes every Module from a performance-grid cell. When that cell is the
+   * applied row, the same Modules are removed from the live Group so the grid
+   * and the stage stay in sync.
+   */
+  async clearSceneCell(
+    { commit, dispatch, state },
+    { sceneId, rowIndex } = {},
+  ) {
+    const scene = state.scenes.find((item) => item.id === sceneId);
+    const row = Number(rowIndex);
+
+    if (!scene || !Number.isInteger(row) || row < 0) {
+      return null;
+    }
+
+    const cleared = clearSceneCellModules(
+      scene,
+      row,
+      state.performance.rowNames,
+    );
+
+    if (!cleared) {
+      return null;
+    }
+
+    commit("UPDATE_SCENE", {
+      sceneId,
+      data: { groups: cleared.groups, modules: cleared.modules },
+    });
+
+    const active = state.activeRows[row];
+
+    if (active && active.sceneId === sceneId) {
+      const liveGroup = store.state.groups.groups.find(
+        (group) => group.id === active.groupId,
+      );
+
+      if (liveGroup) {
+        const liveModuleIds = Array.isArray(liveGroup.modules)
+          ? [...liveGroup.modules]
+          : [];
+
+        for (let i = 0, len = liveModuleIds.length; i < len; i++) {
+          await store.dispatch("modules/removeActiveModule", {
+            moduleId: liveModuleIds[i],
+          });
+        }
+
+        store.commit("groups/REPLACE_GROUP_MODULES", {
+          groupId: liveGroup.id,
+          modules: [],
+        });
+      }
+    }
+
+    await dispatch("persistScenes");
+
+    return JSON.parse(JSON.stringify(scene));
+  },
+
+  /**
+   * Saves the live Group shown in a performance-grid cell back into that
+   * Scene without touching the Scene's other rows. Used when the cell editor
+   * closes, so edits and added Modules stick.
+   */
+  async captureSceneRowToScene(
+    { commit, dispatch, state },
+    { sceneId, rowIndex } = {},
+  ) {
+    if (state.performance.enabled) {
+      return null;
+    }
+
+    const scene = state.scenes.find((item) => item.id === sceneId);
+    const row = Number(rowIndex);
+
+    if (!scene || !Number.isInteger(row) || row < 0) {
+      return null;
+    }
+
+    await completeTransition(commit);
+    await completeRowTransition(row);
+
+    const active = state.activeRows[row];
+    const liveGroups = store.state.groups.groups;
+    let liveGroup = null;
+
+    if (active && active.sceneId === sceneId) {
+      liveGroup =
+        liveGroups.find(
+          (group) => group.id === active.groupId && !group.transitionGhost,
+        ) || null;
+    }
+
+    if (!liveGroup) {
+      liveGroup =
+        liveGroups.find(
+          (group) =>
+            group &&
+            group.sceneId === sceneId &&
+            !group.transitionGhost &&
+            !isGalleryGroup(group) &&
+            Number(group.sceneRow) === row,
+        ) || null;
+    }
+
+    if (!liveGroup) {
+      return null;
+    }
+
+    const moduleIds = Array.isArray(liveGroup.modules)
+      ? [...liveGroup.modules]
+      : [];
+    const presetData = await store.dispatch("modules/createPresetData");
+    const moduleSnapshots = {};
+
+    for (let i = 0, len = moduleIds.length; i < len; i++) {
+      if (presetData[moduleIds[i]]) {
+        moduleSnapshots[moduleIds[i]] = presetData[moduleIds[i]];
+      }
+    }
+
+    const snapshot = JSON.parse(JSON.stringify(liveGroup));
+    delete snapshot.context;
+    delete snapshot.writeToSwap;
+    delete snapshot.readFromSwap;
+
+    const scoped = createScopedSceneData([snapshot], moduleSnapshots);
+    const data = mergeSceneCell(scene, row, state.performance.rowNames, {
+      group: scoped.groups[0],
+      modules: scoped.modules,
+      inputs: scoped.inputs,
+      expressions: scoped.expressions,
+      tweens: scoped.tweens,
+    });
+
+    if (!data) {
+      return null;
+    }
+
+    commit("UPDATE_SCENE", { sceneId, data });
+    await dispatch("persistScenes");
+
+    return JSON.parse(JSON.stringify(scene));
   },
 
   async copySceneCellToScene(

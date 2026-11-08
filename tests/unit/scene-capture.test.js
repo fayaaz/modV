@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import constants from "../../src/renderer/src/application/constants.js";
-import { buildCapturedGroups } from "../../src/renderer/src/application/worker/scene-capture.js";
+import {
+  buildCapturedGroups,
+  buildCapturedGroupsFromLive,
+  canCaptureScene,
+  collectSceneGroups,
+  sceneHasGroups,
+} from "../../src/renderer/src/application/worker/scene-capture.js";
 
 const GALLERY = constants.GALLERY_GROUP_NAME;
 
@@ -101,5 +107,129 @@ describe("buildCapturedGroups", () => {
     ]);
 
     expect(captured).toBeNull();
+  });
+});
+
+describe("buildCapturedGroupsFromLive", () => {
+  it("returns null when there are no user groups", () => {
+    expect(buildCapturedGroupsFromLive([])).toBeNull();
+    expect(
+      buildCapturedGroupsFromLive([
+        liveGroup("g1", GALLERY),
+        liveGroup("g2", "Ghost", { transitionGhost: true }),
+        null,
+      ]),
+    ).toBeNull();
+  });
+
+  it("collects every live user group and drops the Gallery and ghosts", () => {
+    const captured = buildCapturedGroupsFromLive([
+      liveGroup("g1", GALLERY),
+      liveGroup("g2", "Ghost", { transitionGhost: true }),
+      liveGroup("g3", "Foreground"),
+    ]);
+
+    expect(captured.groups.map((group) => group && group.id)).toEqual(["g3"]);
+  });
+
+  it("uses scene rows when present and keeps holes", () => {
+    const captured = buildCapturedGroupsFromLive([
+      liveGroup("g2", "Row 2", { sceneRow: 2 }),
+      liveGroup("g0", "Row 0", { sceneRow: 0 }),
+    ]);
+
+    expect(captured.groups.map((group) => group && group.id)).toEqual([
+      "g0",
+      null,
+      "g2",
+    ]);
+  });
+
+  it("falls back to the live order for unstamped groups", () => {
+    const captured = buildCapturedGroupsFromLive([
+      liveGroup("g0", "First"),
+      liveGroup("g1", "Second"),
+    ]);
+
+    expect(captured.groups.map((group) => group && group.id)).toEqual([
+      "g0",
+      "g1",
+    ]);
+  });
+
+  it("clones groups and strips render-only fields", () => {
+    const live = liveGroup("g1", "Real", {
+      context: { ctx: true },
+      writeToSwap: true,
+      readFromSwap: false,
+    });
+    const captured = buildCapturedGroupsFromLive([live]);
+
+    expect(captured.groups[0]).not.toBe(live);
+    expect(captured.groups[0].context).toBeUndefined();
+    expect(captured.groups[0].writeToSwap).toBeUndefined();
+    expect(captured.groups[0].readFromSwap).toBeUndefined();
+    expect(live.name).toBe("Real");
+  });
+});
+
+describe("sceneHasGroups", () => {
+  it("detects populated and empty scene documents", () => {
+    expect(sceneHasGroups(scene("s1", []))).toBe(false);
+    expect(sceneHasGroups(scene("s1", [null, null]))).toBe(false);
+    expect(sceneHasGroups(scene("s1", [null, { id: "g1" }]))).toBe(true);
+    expect(sceneHasGroups({ id: "legacy", layers: [] })).toBe(false);
+    expect(sceneHasGroups({ id: "legacy", layers: [{ $id: "m1" }] })).toBe(
+      true,
+    );
+  });
+});
+
+describe("collectSceneGroups", () => {
+  it("returns null for a populated Scene that is not applied", () => {
+    expect(
+      collectSceneGroups(scene("s1", [{ id: "g1" }]), [
+        liveGroup("g1", "Other", { sceneId: "s2", sceneRow: 0 }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("captures an applied Scene's stamped groups", () => {
+    const collected = collectSceneGroups(scene("s1", []), [
+      liveGroup("g1", "Own", { sceneId: "s1", sceneRow: 0 }),
+    ]);
+
+    expect(collected.fromLive).toBe(false);
+    expect(collected.groups.map((group) => group && group.id)).toEqual(["g1"]);
+  });
+
+  it("captures the live layer stack into an empty Scene column", () => {
+    const collected = collectSceneGroups(scene("s1", []), [
+      liveGroup("g1", "Foreground"),
+      liveGroup("g2", "Background"),
+    ]);
+
+    expect(collected.fromLive).toBe(true);
+    expect(collected.groups.map((group) => group && group.id)).toEqual([
+      "g1",
+      "g2",
+    ]);
+  });
+
+  it("returns null for an empty Scene when there is nothing live", () => {
+    expect(
+      collectSceneGroups(scene("s1", []), [liveGroup("g1", GALLERY)]),
+    ).toBeNull();
+  });
+});
+
+describe("canCaptureScene", () => {
+  it("allows applied and empty Scenes, but not unapplied populated ones", () => {
+    const empty = scene("s1", []);
+    const populated = scene("s2", [{ id: "g1" }]);
+    const live = [liveGroup("g1", "Own", { sceneId: "s1", sceneRow: 0 })];
+
+    expect(canCaptureScene(empty, live)).toBe(true);
+    expect(canCaptureScene(populated, live)).toBe(false);
   });
 });
