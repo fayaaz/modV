@@ -17,20 +17,56 @@
 // since their last seeding pass. Version 1 is the original six Scenes,
 // version 2 the second batch, version 3 the glitch/twirl batch,
 // version 4 the varied Point10 scene batch, version 5 the ASCII/filter
-// variety batch, version 6 the new digital scene batch and version 7 replaces
-// the removed Cube Floor visuals and adds Circular Mountain.
+// variety batch, version 6 the new digital scene batch, version 7 replaces
+// the removed Cube Floor visuals and adds Circular Mountain, and version 8
+// retires seven Scenes (see REMOVED_DEFAULT_SCENES), renames and updates
+// several Scenes from the author's live configuration, turns Twirl Tunnel
+// into Golden Spiral Tunnel and adds Rave.exe.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 7;
+export const DEFAULTS_VERSION = 8;
 
 // The Cube Floor module was removed in version 7. Existing installs may still
 // hold default Scenes that reference it, so the migration below rebuilds those
 // Scenes from their current definitions (or replaces the old name entirely).
 export const REMOVED_DEFAULT_SCENE_MODULES = ["Point10 Cube Floor"];
 
+// Default Scenes retired in version 8. Installs upgrading to version 8 drop
+// these Scenes, but only when they were seeded from the defaults.
+export const REMOVED_DEFAULT_SCENES = [
+  "Ferrofluid Pulse",
+  "Kaleidoscope Cathedral",
+  "Slit Scan Horizon",
+  "Spiral Particles",
+  "Spectral Bloom",
+  "Fractured Kaleidoscope",
+  "Broken Mirror Ball",
+];
+
 const RENAMED_DEFAULT_SCENES = [
   {
     oldName: "Cube Floor Drive",
     newName: "Waveform Drive",
+    requiresRemovedModule: true,
+  },
+  {
+    oldName: "VHS Afterglow",
+    newName: "Digital Black Hole",
+  },
+  {
+    oldName: "It Comes At Night",
+    newName: "It Twirls At Night",
+  },
+  {
+    oldName: "Neon Grid",
+    newName: "Smoke Tunnel",
+  },
+  {
+    oldName: "Chromatic Sphere",
+    newName: "Chromatic Waveform",
+  },
+  {
+    oldName: "Twirl Tunnel",
+    newName: "Golden Spiral Tunnel",
   },
 ];
 
@@ -106,10 +142,66 @@ function getDefaultDefinition(name) {
  * in the current definition, `removals` are old defaults that no longer exist
  * (a rename) and `additions` are the new definitions to seed in their place.
  */
+/**
+ * Finds seeded default Scenes that were retired without a replacement (see
+ * REMOVED_DEFAULT_SCENES). Only Scenes seeded from the defaults are returned;
+ * user Scenes that happen to share a name are preserved. Returns nothing once
+ * the install is on the new defaults version.
+ */
+export function getDefaultScenesToRemove({
+  defaultsVersion = 0,
+  scenes = [],
+  seededNames,
+  removedNames = REMOVED_DEFAULT_SCENES,
+} = {}) {
+  const version = Number.isFinite(Number(defaultsVersion))
+    ? Number(defaultsVersion)
+    : 0;
+  const result = [];
+
+  if (version >= DEFAULTS_VERSION) {
+    return result;
+  }
+
+  const names = new Set((removedNames || []).map(sceneKey));
+
+  if (!names.size) {
+    return result;
+  }
+
+  const seeded =
+    seededNames === undefined
+      ? null
+      : new Set((seededNames || []).map(sceneKey));
+  const seen = new Set();
+
+  for (const scene of scenes || []) {
+    if (!scene || !scene.name) {
+      continue;
+    }
+
+    const key = sceneKey(scene.name);
+
+    if (!names.has(key) || seen.has(key)) {
+      continue;
+    }
+
+    if (seeded !== null && !seeded.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push({ id: scene.id, name: scene.name });
+  }
+
+  return result;
+}
+
 export function getDefaultScenesToReplace({
   defaultsVersion = 0,
   scenes = [],
   removedModuleNames = REMOVED_DEFAULT_SCENE_MODULES,
+  seededNames,
 } = {}) {
   const version = Number.isFinite(Number(defaultsVersion))
     ? Number(defaultsVersion)
@@ -121,10 +213,11 @@ export function getDefaultScenesToReplace({
   }
 
   const removed = new Set((removedModuleNames || []).filter(Boolean));
-
-  if (!removed.size) {
-    return result;
-  }
+  const seeded =
+    seededNames === undefined
+      ? null
+      : new Set((seededNames || []).map(sceneKey));
+  const isSeeded = (key) => seeded === null || seeded.has(key);
 
   const existingByKey = new Map();
 
@@ -146,7 +239,14 @@ export function getDefaultScenesToReplace({
     const key = sceneKey(rename.oldName);
     const existing = existingByKey.get(key);
 
-    if (!existing || !sceneUsesRemovedModule(existing, removed)) {
+    if (!existing || !isSeeded(key)) {
+      continue;
+    }
+
+    if (
+      rename.requiresRemovedModule &&
+      (!removed.size || !sceneUsesRemovedModule(existing, removed))
+    ) {
       continue;
     }
 
@@ -159,6 +259,10 @@ export function getDefaultScenesToReplace({
     result.removals.push({ id: existing.id, name: existing.name });
     result.additions.push(definition);
     consumedKeys.add(key);
+  }
+
+  if (!removed.size) {
+    return result;
   }
 
   for (const definition of DEFAULT_SCENES) {
@@ -248,7 +352,7 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Chromatic Sphere",
+    name: "Chromatic Waveform",
     introducedVersion: 1,
     minSeconds: 8,
     maxSeconds: 20,
@@ -300,65 +404,6 @@ const DEFAULT_SCENES = [
               rOffset: 1,
               gOffset: 1.012,
               bOffset: 1.024,
-            },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
-    name: "Ferrofluid Pulse",
-    introducedVersion: 1,
-    minSeconds: 12,
-    maxSeconds: 28,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Mycelium",
-            props: {
-              gain: 1.3,
-              bassGain: 1.6,
-              midGain: 1.2,
-              smoothing: 0.1,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Bands",
-            props: {
-              u_ringWidth: 0.045,
-            },
-            meta: { alpha: 0.6, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 4,
-              intensity: 0.65,
             },
           },
         ],
@@ -646,79 +691,10 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Kaleidoscope Cathedral",
-    introducedVersion: 2,
-    minSeconds: 10,
-    maxSeconds: 26,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Geometric Tunnel",
-            props: {
-              gain: 1.2,
-              bassGain: 1.4,
-              trebleGain: 1.1,
-              smoothing: 0.06,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Spiral Particles",
-            props: {
-              gain: 1.15,
-              bassGain: 1.1,
-              trebleGain: 1.4,
-              smoothing: 0.05,
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Mirror",
-            props: {
-              horizontal: true,
-              vertical: false,
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 4,
-              intensity: 0.4,
-            },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
-    name: "Neon Grid",
+    name: "Smoke Tunnel",
     introducedVersion: 2,
     minSeconds: 8,
-    maxSeconds: 20,
+    maxSeconds: 24,
     groups: [
       {
         name: "Background",
@@ -730,13 +706,15 @@ const DEFAULT_SCENES = [
           {
             name: "Point10 Light Tunnel",
             props: {
+              gain: 1.25,
+              smoothing: 0.08,
+              bassGain: 1.5,
+              midGain: 1.1,
+              trebleGain: 1,
+              useAgc: true,
               scrollSpeed: 1.2,
               glow: 1.2,
               bloom: 1.1,
-              gain: 1.25,
-              bassGain: 1.5,
-              midGain: 1.1,
-              smoothing: 0.08,
             },
           },
         ],
@@ -754,8 +732,59 @@ const DEFAULT_SCENES = [
               rotation: 45,
               thickness: 18,
               strobe: 0,
+              color1: {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 1,
+              },
+              color2: {
+                r: 1,
+                g: 1,
+                b: 1,
+                a: 1,
+              },
             },
-            meta: { alpha: 0.8, compositeOperation: "screen" },
+            meta: {
+              compositeOperation: "screen",
+              alpha: 0.8,
+              enabled: false,
+            },
+          },
+          {
+            name: "Point10 Smoke Room",
+            props: {
+              gain: 1,
+              smoothing: 0,
+              bassGain: 1,
+              midGain: 1,
+              trebleGain: 1,
+              useAgc: true,
+              smokeDensity: 28,
+              fireIntensity: 40,
+              smokeLifespan: 4.05,
+              fireLifespan: 1.3,
+              simulationSpeed: 1.2,
+              boxScale: 0.9,
+            },
+          },
+          {
+            name: "Cube",
+            props: {
+              rotation: [0, 0, 0],
+              scale: [1, 1, 1],
+              position: [0, 0, 0],
+              color: {
+                r: 1,
+                g: 1,
+                b: 1,
+                a: 1,
+              },
+              useMap: false,
+            },
+            meta: {
+              enabled: false,
+            },
           },
         ],
       },
@@ -769,8 +798,9 @@ const DEFAULT_SCENES = [
           {
             name: "Neon",
             props: {
-              intensity: 6,
-              gain: 0.8,
+              intensity: 3.5999999999999996,
+              gain: 0.9847759065022574,
+              neonColor: [1, 0.4, 0.64, 1],
             },
           },
           {
@@ -783,13 +813,31 @@ const DEFAULT_SCENES = [
         ],
       },
     ],
+    inputLinks: [
+      {
+        group: "Effects",
+        module: "Neon",
+        control: "intensity",
+        feature: "bass",
+        min: 3.5999999999999996,
+        max: 8.399999999999999,
+      },
+      {
+        group: "Effects",
+        module: "Neon",
+        control: "gain",
+        source: "tween",
+        min: 0.6000000000000001,
+        max: 1,
+      },
+    ],
   },
 
   {
-    name: "VHS Afterglow",
+    name: "Digital Black Hole",
     introducedVersion: 2,
-    minSeconds: 9,
-    maxSeconds: 23,
+    minSeconds: 8,
+    maxSeconds: 24,
     groups: [
       {
         name: "Background",
@@ -802,9 +850,15 @@ const DEFAULT_SCENES = [
             name: "Point10 Water Ripple",
             props: {
               gain: 1.15,
+              smoothing: 0.18,
               bassGain: 1.3,
               midGain: 1.1,
-              smoothing: 0.18,
+              trebleGain: 1,
+              useAgc: true,
+              speed: 1,
+              distortion: 1,
+              radius: 1,
+              brightness: 1,
             },
           },
         ],
@@ -822,8 +876,41 @@ const DEFAULT_SCENES = [
               rotation: 0,
               thickness: 26,
               strobe: 0,
+              color1: {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 1,
+              },
+              color2: {
+                r: 1,
+                g: 1,
+                b: 1,
+                a: 1,
+              },
             },
-            meta: { alpha: 0.65, compositeOperation: "screen" },
+            meta: {
+              compositeOperation: "screen",
+              alpha: 0.65,
+              enabled: false,
+            },
+          },
+          {
+            name: "Singularity Rain",
+            props: {
+              speed: 0,
+              density: 1,
+              shear: 0.35,
+              swirl: 0.5642799587694213,
+              horizon: 0.02,
+              beaming: 0.2375,
+              stars: 1,
+              glow: 0.3252663394070569,
+              brightness: 1,
+            },
+            meta: {
+              alpha: 0.607261398057038,
+            },
           },
         ],
       },
@@ -838,16 +925,21 @@ const DEFAULT_SCENES = [
             name: "VHS Glitch",
             props: {
               autoScan: true,
-              xScanline: 0.45,
+              xScanline: 0.22455150927394874,
               xScanline2: 0.55,
               yScanline: 0.1,
-              xScanlineSize: 0.5,
-              xScanlineSize2: 0.2,
-              yScanlineAmount: 0.2,
-              grainLevel: 0.15,
+              xScanlineSize: 0,
+              xScanlineSize2: 0.175,
+              yScanlineAmount: 0,
+              grainLevel: 1.65,
               scanFollow: true,
-              analogDistort: 1.4,
-              bleedAmount: 0.9,
+              analogDistort: 0.5,
+              bleedAmount: 0.9772282066010674,
+              bleedDistort: 0.7125,
+              bleedRange: 1.3,
+              colorBleedL: [0.8, 0, 0.4, 1],
+              colorBleedC: [0, 0.5, 0.75, 1],
+              colorBleedR: [0.8, 0, 0.4, 1],
             },
           },
           {
@@ -859,75 +951,40 @@ const DEFAULT_SCENES = [
         ],
       },
     ],
-  },
-
-  {
-    name: "Slit Scan Horizon",
-    introducedVersion: 2,
-    minSeconds: 10,
-    maxSeconds: 25,
-    groups: [
+    inputLinks: [
       {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Chromatic Wave",
-            props: {
-              gain: 1.2,
-              bassGain: 1.4,
-              midGain: 1.1,
-              smoothing: 0.1,
-            },
-          },
-        ],
+        group: "Foreground",
+        module: "Singularity Rain",
+        control: "alpha",
+        feature: "bass",
+        min: 0,
+        max: 1,
       },
       {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Waveform",
-            props: {
-              strokeWeight: 2,
-              maxHeight: 70,
-              maxWidth: 0.85,
-              windowing: "hanning",
-            },
-            meta: { alpha: 0.8, compositeOperation: "screen" },
-          },
-        ],
+        group: "Foreground",
+        module: "Singularity Rain",
+        control: "glow",
+        feature: "mid",
+        min: 0,
+        max: 1,
+        smoothing: 0.3486748374187093,
       },
       {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Slit Scan",
-            props: {
-              spacing: 0.8,
-              line_width: 0.28,
-              angle: 0.2,
-              shift: 0.45,
-            },
-          },
-          {
-            name: "Hue-Saturation",
-            props: {
-              hue: 0.1,
-              saturation: 0.2,
-            },
-          },
-        ],
+        group: "Effects",
+        module: "VHS Glitch",
+        control: "xScanline",
+        source: "tween",
+        min: 0,
+        max: 1,
+        bpmDivision: 128,
+      },
+      {
+        group: "Effects",
+        module: "VHS Glitch",
+        control: "bleedAmount",
+        feature: "bass",
+        min: 0.54,
+        max: 1.26,
       },
     ],
   },
@@ -1221,75 +1278,6 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Spiral Particles",
-    introducedVersion: 2,
-    minSeconds: 10,
-    maxSeconds: 24,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Spiral Particles",
-            props: {
-              gain: 1.2,
-              bassGain: 1.2,
-              trebleGain: 1.5,
-              smoothing: 0.04,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Particle Field",
-            props: {
-              gain: 1.1,
-              trebleGain: 1.4,
-              smoothing: 0.06,
-            },
-            meta: { alpha: 0.6, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Twirl",
-            props: {
-              radius: 0.8,
-              amount: 1.5,
-              center: [0.5, 0.5],
-            },
-          },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 18,
-              extension: 0.3,
-            },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
     name: "Rolling Fire Bloom",
     introducedVersion: 2,
     minSeconds: 10,
@@ -1356,76 +1344,7 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Spectral Bloom",
-    introducedVersion: 2,
-    minSeconds: 8,
-    maxSeconds: 22,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.1,
-              midGain: 1.4,
-              trebleGain: 1.2,
-              smoothing: 0.05,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.2,
-              midGain: 1.3,
-              smoothing: 0.04,
-            },
-            meta: { alpha: 0.6, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Glow",
-            props: {
-              intensity: 0.6,
-            },
-          },
-          {
-            name: "Color Controls",
-            props: {
-              bright: 0.02,
-              contrast: 1.05,
-              hue: 0.05,
-              saturation: 1.3,
-            },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
-    name: "Twirl Tunnel",
+    name: "Golden Spiral Tunnel",
     introducedVersion: 2,
     minSeconds: 9,
     maxSeconds: 23,
@@ -1474,11 +1393,9 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Twirl",
+            name: "LogTransWarpSpiral",
             props: {
-              radius: 1,
-              amount: 2,
-              center: [0.5, 0.5],
+              rate: 0.25,
             },
           },
           {
@@ -1565,71 +1482,6 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Fractured Kaleidoscope",
-    introducedVersion: 3,
-    minSeconds: 6,
-    maxSeconds: 16,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Mycelium",
-            props: {
-              gain: 1.15,
-              bassGain: 1.5,
-              midGain: 1.1,
-              smoothing: 0.12,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Twirl",
-            props: {
-              radius: 0.8,
-              amount: 2.6,
-              center: [0.5, 0.5],
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 4,
-              intensity: 0.4,
-            },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
     name: "Prism Reliquary",
     introducedVersion: 3,
     minSeconds: 9,
@@ -1686,67 +1538,6 @@ const DEFAULT_SCENES = [
               blurAmount: 5,
               intensity: 0.45,
             },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
-    name: "Broken Mirror Ball",
-    introducedVersion: 3,
-    minSeconds: 7,
-    maxSeconds: 18,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Mycelium",
-            props: {
-              gain: 1.25,
-              bassGain: 1.45,
-              midGain: 1.15,
-              smoothing: 0.08,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.6, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Mirror",
-            props: {
-              horizontal: true,
-              vertical: true,
-            },
-          },
-          {
-            name: "Point10 Contrast",
-            props: {},
           },
         ],
       },
@@ -2438,9 +2229,9 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "It Comes At Night",
+    name: "It Twirls At Night",
     introducedVersion: 4,
-    minSeconds: 9,
+    minSeconds: 8,
     maxSeconds: 24,
     groups: [
       {
@@ -2453,12 +2244,18 @@ const DEFAULT_SCENES = [
           {
             name: "Point10 It Is Coming For You",
             props: {
+              gain: 1.2,
+              smoothing: 0,
+              bassGain: 1.35,
+              midGain: 1.15,
+              trebleGain: 1,
+              useAgc: true,
               speed: 0.8,
               glow: 0.9,
               bloom: 0.9,
-              gain: 1.2,
-              bassGain: 1.35,
-              midGain: 1.15,
+            },
+            meta: {
+              alpha: 0.7446732251408736,
             },
           },
         ],
@@ -2472,8 +2269,10 @@ const DEFAULT_SCENES = [
         modules: [
           {
             name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.65, compositeOperation: "screen" },
+            meta: {
+              compositeOperation: "screen",
+              alpha: 0.65,
+            },
           },
         ],
       },
@@ -2491,12 +2290,15 @@ const DEFAULT_SCENES = [
               amount: -2.4,
               center: [0.5, 0.5],
             },
+            meta: {
+              alpha: 0.616,
+            },
           },
           {
             name: "Bloom",
             props: {
-              blurAmount: 6,
-              intensity: 0.5,
+              blurAmount: 5.710711967387224,
+              intensity: 0.5638257200751327,
             },
           },
         ],
@@ -2510,6 +2312,22 @@ const DEFAULT_SCENES = [
         feature: "bass",
         min: 0.25,
         max: 1,
+      },
+      {
+        group: "Effects",
+        module: "Bloom",
+        control: "blurAmount",
+        source: "tween",
+        min: 3.5999999999999996,
+        max: 8.4,
+      },
+      {
+        group: "Effects",
+        module: "Bloom",
+        control: "intensity",
+        feature: "bass",
+        min: 0.3,
+        max: 0.7,
       },
     ],
   },
@@ -4662,6 +4480,74 @@ const DEFAULT_SCENES = [
         module: "badtv",
         control: "scanLineIntensity",
         feature: "treble",
+        min: 0,
+        max: 1,
+      },
+    ],
+  },
+  {
+    name: "Rave.exe",
+    introducedVersion: 8,
+    minSeconds: 10,
+    maxSeconds: 24,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "rave.exe",
+            props: {},
+          },
+        ],
+      },
+      {
+        name: "Foreground",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "screen",
+        modules: [
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.5, compositeOperation: "screen" },
+          },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 4,
+              intensity: 0.4,
+            },
+          },
+          {
+            name: "Vignette",
+            props: {
+              intensity: 18,
+              extension: 0.3,
+            },
+          },
+        ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Background",
+        module: "rave.exe",
+        control: "kick",
+        feature: "bass",
         min: 0,
         max: 1,
       },

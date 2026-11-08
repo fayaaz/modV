@@ -149,7 +149,7 @@ test("ships a version 3 batch of glitch and twirl scenes", async () => {
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(7);
+  expect(DEFAULTS_VERSION).toBe(8);
   expect(newBatch.length).toBeGreaterThanOrEqual(10);
 
   for (const scene of newBatch) {
@@ -280,6 +280,10 @@ test("version 4 scenes pin foreground and background alpha to bass", async () =>
     );
 
     for (const link of definition.inputLinks || []) {
+      if (link.control !== "alpha") {
+        continue;
+      }
+
       const match = links.find(
         (candidate) =>
           candidate.source === "meyda" &&
@@ -381,7 +385,7 @@ test("version 7 replaces Cube Floor and ships Circular Mountain", () => {
     (scene) => scene.name === "Circular Mountain",
   );
 
-  expect(DEFAULTS_VERSION).toBe(7);
+  expect(DEFAULTS_VERSION).toBe(8);
   expect(circularMountain).toBeTruthy();
   expect(getGroupModules(circularMountain, "Background")).toEqual([
     "fractal-mountain-tunnel",

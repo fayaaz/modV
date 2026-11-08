@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import DEFAULT_SCENES, {
   DEFAULTS_VERSION,
+  REMOVED_DEFAULT_SCENES,
   getDefaultSceneNamesUpTo,
+  getDefaultScenesToRemove,
   getDefaultScenesToReplace,
   getScenesToSeed,
 } from "../../src/renderer/src/application/worker/store/default-scenes.js";
@@ -81,12 +83,12 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 7", () => {
-    expect(DEFAULTS_VERSION).toBe(7);
+  it("bumps the defaults version to 8", () => {
+    expect(DEFAULTS_VERSION).toBe(8);
   });
 
-  it("ships at least 55 default scenes with unique names", () => {
-    expect(DEFAULT_SCENES.length).toBeGreaterThanOrEqual(55);
+  it("ships at least 54 default scenes with unique names", () => {
+    expect(DEFAULT_SCENES.length).toBeGreaterThanOrEqual(54);
 
     const keys = DEFAULT_SCENES.map((scene) => sceneKey(scene.name));
 
@@ -99,7 +101,7 @@ describe("default scenes", () => {
       (scene) => scene.introducedVersion < 3,
     );
 
-    expect(legacy.length).toBeGreaterThanOrEqual(20);
+    expect(legacy.length).toBeGreaterThanOrEqual(15);
     expect(
       legacy.every(
         (scene) =>
@@ -143,16 +145,20 @@ describe("default scenes", () => {
   });
 
   it("pins some version 4 foreground or background controls to bass", () => {
-    const withLinks = variedBatch.filter(
-      (scene) => Array.isArray(scene.inputLinks) && scene.inputLinks.length > 0,
-    );
+    const withAlphaLinks = variedBatch
+      .map((scene) => ({
+        scene,
+        links: (scene.inputLinks || []).filter(
+          (link) => link.control === "alpha",
+        ),
+      }))
+      .filter((entry) => entry.links.length > 0);
 
-    expect(withLinks.length).toBeGreaterThanOrEqual(8);
+    expect(withAlphaLinks.length).toBeGreaterThanOrEqual(8);
 
-    for (const scene of withLinks) {
-      for (const link of scene.inputLinks) {
+    for (const { scene, links } of withAlphaLinks) {
+      for (const link of links) {
         expect(["Background", "Foreground"]).toContain(link.group);
-        expect(link.control).toBe("alpha");
         expect(typeof link.feature).toBe("string");
         expect(link.min).toBeLessThan(link.max);
 
@@ -545,7 +551,7 @@ describe("default scene migration", () => {
 
   it("rebuilds existing defaults that still use a removed module", () => {
     const scenes = [
-      cubeFloorScene("Neon Grid", "neon-id"),
+      cubeFloorScene("Smoke Tunnel", "smoke-tunnel-id"),
       cubeFloorScene("Roto Zoom Riot", "roto-id"),
       cubeFloorScene("Dither District", "dither-id"),
     ];
@@ -559,20 +565,20 @@ describe("default scene migration", () => {
     expect(result.additions).toEqual([]);
     expect(result.replacements.map((replacement) => replacement.name)).toEqual(
       expect.arrayContaining([
-        "Neon Grid",
+        "Smoke Tunnel",
         "Roto Zoom Riot",
         "Dither District",
       ]),
     );
 
-    const neon = result.replacements.find(
-      (replacement) => replacement.name === "Neon Grid",
+    const smokeTunnel = result.replacements.find(
+      (replacement) => replacement.name === "Smoke Tunnel",
     );
 
-    expect(neon.id).toBe("neon-id");
-    expect(neon.definition.name).toBe("Neon Grid");
+    expect(smokeTunnel.id).toBe("smoke-tunnel-id");
+    expect(smokeTunnel.definition.name).toBe("Smoke Tunnel");
     expect(
-      neon.definition.groups.flatMap((group) =>
+      smokeTunnel.definition.groups.flatMap((group) =>
         group.modules.map((module) => module.name),
       ),
     ).not.toContain(REMOVED_CUBE_FLOOR_MODULE);
@@ -589,8 +595,8 @@ describe("default scene migration", () => {
   it("preserves user edits when a scene no longer uses the removed module", () => {
     const scenes = [
       {
-        id: "neon-id",
-        name: "Neon Grid",
+        id: "smoke-tunnel-id",
+        name: "Smoke Tunnel",
         modules: {
           "module-id": { $moduleName: "Point10 Light Tunnel" },
         },
@@ -638,7 +644,7 @@ describe("default scene migration", () => {
   });
 
   it("does not migrate installs that are already on the new defaults version", () => {
-    const scenes = [cubeFloorScene("Neon Grid", "neon-id")];
+    const scenes = [cubeFloorScene("Smoke Tunnel", "smoke-tunnel-id")];
     const result = getDefaultScenesToReplace({
       defaultsVersion: DEFAULTS_VERSION,
       scenes,
@@ -646,6 +652,398 @@ describe("default scene migration", () => {
     });
 
     expect(result.replacements).toEqual([]);
+    expect(result.removals).toEqual([]);
+    expect(result.additions).toEqual([]);
+  });
+});
+
+describe("version 8 default scenes", () => {
+  it("removes the retired scenes", () => {
+    expect(REMOVED_DEFAULT_SCENES).toEqual([
+      "Ferrofluid Pulse",
+      "Kaleidoscope Cathedral",
+      "Slit Scan Horizon",
+      "Spiral Particles",
+      "Spectral Bloom",
+      "Fractured Kaleidoscope",
+      "Broken Mirror Ball",
+    ]);
+
+    const names = DEFAULT_SCENES.map((scene) => sceneKey(scene.name));
+
+    for (const removed of REMOVED_DEFAULT_SCENES) {
+      expect(names).not.toContain(sceneKey(removed));
+    }
+  });
+
+  it("renames Chromatic Sphere to Chromatic Waveform", () => {
+    expect(
+      DEFAULT_SCENES.some((scene) => scene.name === "Chromatic Sphere"),
+    ).toBe(false);
+
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Chromatic Waveform",
+    );
+
+    expect(scene).toBeTruthy();
+    expect(getModuleNames(scene)).toContain("Point10 Chromatic Wave");
+  });
+
+  it("renames and updates VHS Afterglow to Digital Black Hole", () => {
+    expect(DEFAULT_SCENES.some((scene) => scene.name === "VHS Afterglow")).toBe(
+      false,
+    );
+
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Digital Black Hole",
+    );
+
+    expect(scene).toBeTruthy();
+
+    const foreground = getGroup(scene, "Foreground");
+    const rain = foreground.modules.find(
+      (module) => module.name === "Singularity Rain",
+    );
+
+    expect(rain).toBeTruthy();
+    expect(rain.props.speed).toBe(0);
+    expect(rain.props.swirl).toBeCloseTo(0.5642799587694213, 10);
+    expect(rain.meta.alpha).toBeCloseTo(0.607261398057038, 10);
+    expect(
+      foreground.modules.some(
+        (module) => module.name === "Bar" && module.meta?.enabled === false,
+      ),
+    ).toBe(true);
+
+    const effects = getGroup(scene, "Effects");
+    const glitch = effects.modules.find(
+      (module) => module.name === "VHS Glitch",
+    );
+
+    expect(glitch.props.xScanlineSize).toBe(0);
+    expect(glitch.props.grainLevel).toBe(1.65);
+    expect(glitch.props.analogDistort).toBe(0.5);
+
+    const links = scene.inputLinks || [];
+    const alphaLink = links.find(
+      (link) => link.module === "Singularity Rain" && link.control === "alpha",
+    );
+
+    expect(alphaLink).toMatchObject({
+      group: "Foreground",
+      feature: "bass",
+      min: 0,
+      max: 1,
+    });
+
+    const midLink = links.find(
+      (link) => link.module === "Singularity Rain" && link.control === "glow",
+    );
+
+    expect(midLink).toMatchObject({
+      group: "Foreground",
+      feature: "mid",
+      min: 0,
+      max: 1,
+    });
+    expect(midLink.smoothing).toBeCloseTo(0.3486748374187093, 10);
+
+    const tweenLink = links.find(
+      (link) => link.module === "VHS Glitch" && link.control === "xScanline",
+    );
+
+    expect(tweenLink).toMatchObject({
+      group: "Effects",
+      source: "tween",
+      min: 0,
+      max: 1,
+      bpmDivision: 128,
+    });
+
+    const bleedLink = links.find(
+      (link) => link.module === "VHS Glitch" && link.control === "bleedAmount",
+    );
+
+    expect(bleedLink).toMatchObject({
+      group: "Effects",
+      feature: "bass",
+      min: 0.54,
+      max: 1.26,
+    });
+
+    expect(Number(scene.minSeconds)).toBe(8);
+    expect(Number(scene.maxSeconds)).toBe(24);
+  });
+
+  it("renames and updates It Comes At Night to It Twirls At Night", () => {
+    expect(
+      DEFAULT_SCENES.some((scene) => scene.name === "It Comes At Night"),
+    ).toBe(false);
+
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "It Twirls At Night",
+    );
+
+    expect(scene).toBeTruthy();
+
+    const background = getGroup(scene, "Background");
+    const itIsComing = background.modules.find(
+      (module) => module.name === "Point10 It Is Coming For You",
+    );
+
+    expect(itIsComing.meta.alpha).toBeCloseTo(0.7446732251408736, 10);
+    expect(itIsComing.props.smoothing).toBe(0);
+
+    const effects = getGroup(scene, "Effects");
+    const twirl = effects.modules.find((module) => module.name === "Twirl");
+
+    expect(twirl.meta.alpha).toBeCloseTo(0.616, 10);
+
+    const bloom = effects.modules.find((module) => module.name === "Bloom");
+
+    expect(bloom.props.blurAmount).toBeCloseTo(5.710711967387224, 10);
+
+    const links = scene.inputLinks || [];
+    const backgroundLink = links.find(
+      (link) =>
+        link.group === "Background" &&
+        link.module === "Point10 It Is Coming For You" &&
+        link.control === "alpha",
+    );
+
+    expect(backgroundLink).toMatchObject({
+      feature: "bass",
+      min: 0.25,
+      max: 1,
+    });
+
+    const tweenLink = links.find(
+      (link) => link.module === "Bloom" && link.control === "blurAmount",
+    );
+
+    expect(tweenLink.group).toBe("Effects");
+    expect(tweenLink.source).toBe("tween");
+    expect(tweenLink.min).toBeCloseTo(3.6, 5);
+    expect(tweenLink.max).toBeCloseTo(8.4, 5);
+
+    const bassLink = links.find(
+      (link) => link.module === "Bloom" && link.control === "intensity",
+    );
+
+    expect(bassLink).toMatchObject({
+      group: "Effects",
+      feature: "bass",
+      min: 0.3,
+      max: 0.7,
+    });
+  });
+
+  it("renames and updates Neon Grid to Smoke Tunnel", () => {
+    expect(DEFAULT_SCENES.some((scene) => scene.name === "Neon Grid")).toBe(
+      false,
+    );
+
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Smoke Tunnel",
+    );
+
+    expect(scene).toBeTruthy();
+    expect(getModulesInGroup(scene, "Foreground")).toContain(
+      "Point10 Smoke Room",
+    );
+
+    const effects = getGroup(scene, "Effects");
+    const neon = effects.modules.find((module) => module.name === "Neon");
+
+    expect(neon.props.intensity).toBeCloseTo(3.6, 5);
+    expect(neon.props.neonColor).toEqual([1, 0.4, 0.64, 1]);
+
+    const links = scene.inputLinks || [];
+    const intensityLink = links.find(
+      (link) => link.module === "Neon" && link.control === "intensity",
+    );
+
+    expect(intensityLink.group).toBe("Effects");
+    expect(intensityLink.feature).toBe("bass");
+    expect(intensityLink.min).toBeCloseTo(3.6, 5);
+    expect(intensityLink.max).toBeCloseTo(8.4, 5);
+
+    const gainLink = links.find(
+      (link) => link.module === "Neon" && link.control === "gain",
+    );
+
+    expect(gainLink.group).toBe("Effects");
+    expect(gainLink.source).toBe("tween");
+    expect(gainLink.min).toBeCloseTo(0.6, 5);
+    expect(gainLink.max).toBe(1);
+
+    expect(Number(scene.minSeconds)).toBe(8);
+    expect(Number(scene.maxSeconds)).toBe(24);
+  });
+
+  it("drops Twirl from Twirl Tunnel and renames it", () => {
+    expect(DEFAULT_SCENES.some((scene) => scene.name === "Twirl Tunnel")).toBe(
+      false,
+    );
+
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Golden Spiral Tunnel",
+    );
+
+    expect(scene).toBeTruthy();
+
+    const names = getModuleNames(scene);
+
+    expect(names).not.toContain("Twirl");
+    expect(names).toContain("LogTransWarpSpiral");
+    expect(names).toContain("Hue-Saturation");
+    expect(getModulesInGroup(scene, "Background")).toEqual([
+      "Point10 Geometric Tunnel",
+    ]);
+  });
+
+  it("adds a version 8 rave.exe preset", () => {
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Rave.exe",
+    );
+
+    expect(scene).toBeTruthy();
+    expect(scene.introducedVersion).toBe(8);
+    expect(getModulesInGroup(scene, "Background")).toContain("rave.exe");
+
+    const kickLink = (scene.inputLinks || []).find(
+      (link) => link.module === "rave.exe" && link.control === "kick",
+    );
+
+    expect(kickLink).toMatchObject({
+      group: "Background",
+      feature: "bass",
+      min: 0,
+      max: 1,
+    });
+
+    expect(Number(scene.minSeconds)).toBeLessThan(Number(scene.maxSeconds));
+  });
+
+  it("seeds the version 8 batch for installs on version 7", () => {
+    const selected = getScenesToSeed({
+      defaultsVersion: 7,
+      seededNames: getDefaultSceneNamesUpTo(7),
+      existingNames: [],
+    });
+    const newerBatch = DEFAULT_SCENES.filter(
+      (scene) => scene.introducedVersion > 7,
+    );
+
+    expect(selected.map((scene) => scene.name)).toEqual(
+      newerBatch.map((scene) => scene.name),
+    );
+  });
+
+  it("does not offer the removed scenes to fresh installs", () => {
+    const selected = getScenesToSeed({
+      defaultsVersion: 0,
+      seededNames: [],
+      existingNames: [],
+    });
+    const names = selected.map((scene) => scene.name);
+
+    for (const removed of REMOVED_DEFAULT_SCENES) {
+      expect(names).not.toContain(removed);
+    }
+  });
+});
+
+describe("default scene removal migration", () => {
+  const seededScene = (name, id = name) => ({ id, name, modules: {} });
+
+  it("removes seeded retired scenes for installs upgrading to version 8", () => {
+    const names = [
+      "Ferrofluid Pulse",
+      "Kaleidoscope Cathedral",
+      "Slit Scan Horizon",
+      "Spiral Particles",
+      "Spectral Bloom",
+      "Fractured Kaleidoscope",
+      "Broken Mirror Ball",
+    ];
+    const scenes = names.map((name, index) => seededScene(name, `id-${index}`));
+    const result = getDefaultScenesToRemove({
+      defaultsVersion: 7,
+      scenes,
+      seededNames: scenes.map((scene) => scene.name),
+    });
+
+    expect(result.map((removal) => removal.name)).toEqual(names);
+    expect(result.map((removal) => removal.id)).toEqual(
+      scenes.map((scene) => scene.id),
+    );
+  });
+
+  it("keeps user-created scenes that share a retired name but were not seeded", () => {
+    const scenes = [seededScene("Ferrofluid Pulse", "user-id")];
+    const result = getDefaultScenesToRemove({
+      defaultsVersion: 7,
+      scenes,
+      seededNames: ["Something Else"],
+    });
+
+    expect(result).toEqual([]);
+  });
+
+  it("does not remove anything for installs already on the new defaults version", () => {
+    const scenes = [seededScene("Ferrofluid Pulse", "user-id")];
+    const result = getDefaultScenesToRemove({
+      defaultsVersion: DEFAULTS_VERSION,
+      scenes,
+      seededNames: ["Ferrofluid Pulse"],
+    });
+
+    expect(result).toEqual([]);
+  });
+});
+
+describe("default scene rename migration", () => {
+  it("renames updated defaults that were not removed for a module", () => {
+    const scenes = [
+      { id: "vhs-id", name: "VHS Afterglow", modules: {} },
+      { id: "night-id", name: "It Comes At Night", modules: {} },
+      { id: "grid-id", name: "Neon Grid", modules: {} },
+      { id: "sphere-id", name: "Chromatic Sphere", modules: {} },
+      { id: "twirl-id", name: "Twirl Tunnel", modules: {} },
+    ];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 7,
+      scenes,
+      removedModuleNames: [REMOVED_CUBE_FLOOR_MODULE],
+      seededNames: scenes.map((scene) => scene.name),
+    });
+
+    expect(result.removals.map((removal) => removal.id)).toEqual([
+      "vhs-id",
+      "night-id",
+      "grid-id",
+      "sphere-id",
+      "twirl-id",
+    ]);
+    expect(result.additions.map((definition) => definition.name)).toEqual([
+      "Digital Black Hole",
+      "It Twirls At Night",
+      "Smoke Tunnel",
+      "Chromatic Waveform",
+      "Golden Spiral Tunnel",
+    ]);
+  });
+
+  it("keeps same-named scenes that were not seeded from the defaults", () => {
+    const scenes = [{ id: "mine", name: "VHS Afterglow", modules: {} }];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 7,
+      scenes,
+      removedModuleNames: [],
+      seededNames: [],
+    });
+
     expect(result.removals).toEqual([]);
     expect(result.additions).toEqual([]);
   });
