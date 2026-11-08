@@ -275,7 +275,13 @@ async function loop(delta, features, fftOutput) {
       );
     }
 
-    if (inherit) {
+    // The Gallery Group inherits the live composition only while an item is
+    // hovered: the hovered item's canvas receives the inherited frame as the
+    // backdrop its preview modules render over. With no hovered item the copy
+    // would land in the full-size Group canvas that nothing ever reads, and
+    // it forces a GPU sync when the inherited canvas holds freshly read-back
+    // GL content - so skip it.
+    if (inherit && !(isGalleryGroup && !aux)) {
       const inheritedGroup =
         inheritFrom === -1
           ? null

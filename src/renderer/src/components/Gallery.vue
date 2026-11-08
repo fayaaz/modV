@@ -176,11 +176,6 @@ export default {
       hidden: true,
       enabled: true,
       clearing: true,
-      // Gallery items draw into their own item canvases and never sample the
-      // Group canvas, so inheriting the previous row's full-size canvas every
-      // frame is pure waste (and forces a GPU sync when that canvas holds
-      // freshly read-back GL content).
-      inherit: false,
       reactToResize: false,
     });
 
