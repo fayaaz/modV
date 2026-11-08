@@ -1,5 +1,5 @@
-appId: gl.vcync.modv
-productName: modV
+appId: gl.vcync.vmodv
+productName: VmodV
 directories:
   buildResources: resources
 files:
@@ -20,7 +20,7 @@ asarUnpack:
   - node_modules/grandiose
   - node_modules/ffmpeg-fluent
 win:
-  executableName: modV
+  executableName: VmodV
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -45,7 +45,7 @@ linux:
   target:
     - AppImage
     - deb
-  maintainer: modv.vcync.gl
+  maintainer: VmodV <vmodv@users.noreply.github.com>
   category: Graphics
   electronLanguages:
     - en-US

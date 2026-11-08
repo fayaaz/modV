@@ -1,10 +1,10 @@
 {
-  "name": "modv-vite",
+  "name": "vmodv",
   "version": "1.0.0",
-  "description": "An Electron application with Vue",
+  "description": "VmodV — a modular audio visualisation environment built with Electron and Vue",
   "main": "./out/main/index.js",
-  "author": "example.com",
-  "homepage": "https://electron-vite.org",
+  "author": "fayaaz",
+  "homepage": "https://github.com/fayaaz/modV",
   "scripts": {
     "build": "electron-vite build",
     "build:linux": "yarn build && electron-builder --linux",
