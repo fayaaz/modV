@@ -263,7 +263,7 @@ const actions = {
 
       module.$status.push({
         type: "error",
-        message: `Module "${expectedModuleName}" is not registered. modV will skip this while rendering`,
+        message: `Module "${expectedModuleName}" is not registered. VmodV will skip this while rendering`,
       });
     }
 

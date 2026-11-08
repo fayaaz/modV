@@ -17,14 +17,14 @@ import { createWindow, windows } from "./windows";
 
 require("@electron/remote/main").initialize();
 
-// The package name is "modv-vite", which would otherwise make dev builds use
-// ~/.config/modv-vite. Packaged builds get "modV" from productName, so set it
-// explicitly here to share one userData directory (and its media tree).
-app.setName("modV");
+// Keep dev builds and packaged builds on one userData directory (and its
+// media tree) by setting the name explicitly rather than inheriting the
+// package name.
+app.setName("VmodV");
 
 const logger = createLogger("main");
 
-logger.info("modV starting", {
+logger.info("VmodV starting", {
   version: app.getVersion(),
   platform: process.platform,
   logDirectory: getLogDirectory(),

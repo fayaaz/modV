@@ -21,7 +21,7 @@ export async function setupGrandiose() {
         const store = await import("./worker/store/index");
         store.dispatch("errors/createMessage", {
           message:
-            "libndi is not installed, please see \"Ubuntu/Debian\" in the modV <ElectronLink to='https://github.com/vcync/modV#ubuntudebian'>README</ElectronLink>.",
+            "libndi is not installed, please see \"Ubuntu/Debian\" in the upstream modV <ElectronLink to='https://github.com/vcync/modV#ubuntudebian'>README</ElectronLink>.",
         });
       } else {
         console.error(error);
@@ -47,7 +47,7 @@ export async function getGrandioseSender() {
 
   if (!sender) {
     sender = await grandiose.send({
-      name: `modV`,
+      name: `VmodV`,
       clockVideo: false,
       clockAudio: false,
     });

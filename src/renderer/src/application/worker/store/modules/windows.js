@@ -7,7 +7,7 @@ const actions = {
     const win = {
       width: 300,
       height: 300,
-      title: "modV Output",
+      title: "VmodV Output",
       pixelRatio: 1,
       x: 0,
       y: 0,

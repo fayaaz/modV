@@ -75,7 +75,7 @@ export default function windowHandler() {
       if (win === null || typeof win === "undefined") {
         console.log(
           "Could not create Output Window",
-          "modV couldn't open an Output Window. Please check you've allowed pop-ups, then reload",
+          "VmodV couldn't open an Output Window. Please check you've allowed pop-ups, then reload",
         );
 
         return;

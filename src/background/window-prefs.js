@@ -52,7 +52,7 @@ const windowPrefs = {
       show: isDevelopment,
       webPreferences: {
         enableRemoteModule: true,
-        // electron 12 sets contextIsolation to true by default, this breaks modV
+        // electron 12 sets contextIsolation to true by default, this breaks VmodV
         contextIsolation: false,
         // Use pluginOptions.nodeIntegration, leave this alone
         // See nklayman.github.io/vue-cli-plugin-electron-builder/guide/security.html#node-integration for more info
@@ -181,7 +181,7 @@ const windowPrefs = {
           const { response } = await dialog.showMessageBox(window, {
             type: "question",
             buttons: ["Yes", "No"],
-            message: "modV",
+            message: "VmodV",
             detail: "Are you sure you want to quit?",
           });
 

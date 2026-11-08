@@ -4,7 +4,7 @@ import { setupGrandiose as getGrandiose } from "../../../setup-grandiose";
 
 const state = {
   outputEnabled: false,
-  outputName: "modV",
+  outputName: "VmodV",
   outputWidth: 1920,
   outputHeight: 1080,
   followModVOutputSize: true,
@@ -216,7 +216,7 @@ const mutations = {
     state.outputEnabled = enabled;
   },
 
-  SET_OUTPUT_NAME(state, name = "modV") {
+  SET_OUTPUT_NAME(state, name = "VmodV") {
     state.outputName = name;
   },
 

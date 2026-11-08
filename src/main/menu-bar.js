@@ -223,7 +223,7 @@ export function generateMenuTemplate() {
               {
                 type: "question",
                 buttons: ["Yes", "No"],
-                message: "modV",
+                message: "VmodV",
                 detail: "Are you sure you want to reset the current layout?",
               },
             );
@@ -255,17 +255,17 @@ export function generateMenuTemplate() {
       role: "help",
       submenu: [
         {
-          label: "Learn modV",
+          label: "Learn VmodV",
           click() {
             const { shell } = require("electron");
-            shell.openExternal("https://modv.js.org");
+            shell.openExternal("https://github.com/fayaaz/modV");
           },
         },
         {
           label: "Search or ask a question",
           click() {
             const { shell } = require("electron");
-            shell.openExternal("https://github.com/vcync/modV/discussions");
+            shell.openExternal("https://github.com/fayaaz/modV/discussions");
           },
         },
       ],

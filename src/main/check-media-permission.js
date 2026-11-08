@@ -41,9 +41,9 @@ export async function checkMediaPermission() {
   if (!hasPermission) {
     dialog.showMessageBox({
       type: "warning",
-      message: "modV requires access to your camera and microphone.",
+      message: "VmodV requires access to your camera and microphone.",
       detail:
-        "To enable media features, please grant access in your system's security settings. modV can still be used without these permissions, but some functionality will be limited.",
+        "To enable media features, please grant access in your system's security settings. VmodV can still be used without these permissions, but some functionality will be limited.",
     });
   }
 }

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { formatLogLine } from "../shared/logger-format.js";
 
-const LOG_FILE_PREFIX = "modv-";
+const LOG_FILE_PREFIX = "vmodv-";
 const LOG_FILE_SUFFIX = ".log";
 const MAX_LOG_FILES = 7;
 

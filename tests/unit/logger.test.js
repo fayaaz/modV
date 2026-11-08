@@ -160,7 +160,7 @@ describe("renderer createLogger", () => {
 
 describe("main createLogger", () => {
   it("writes the line to a daily file in the log directory", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "modv-logs-"));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-logs-"));
 
     const logger = createMainLogger("main:test", {
       directory,
@@ -172,7 +172,7 @@ describe("main createLogger", () => {
 
     const files = fs.readdirSync(directory);
 
-    expect(files).toEqual(["modv-2026-10-21.log"]);
+    expect(files).toEqual(["vmodv-2026-10-21.log"]);
 
     const contents = fs.readFileSync(path.join(directory, files[0]), "utf8");
 
@@ -184,7 +184,7 @@ describe("main createLogger", () => {
   });
 
   it("appends to the file instead of overwriting it", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "modv-logs-"));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-logs-"));
 
     const logger = createMainLogger("main:test", {
       directory,
@@ -196,7 +196,7 @@ describe("main createLogger", () => {
     logger.error("second");
 
     const contents = fs.readFileSync(
-      path.join(directory, "modv-2026-10-21.log"),
+      path.join(directory, "vmodv-2026-10-21.log"),
       "utf8",
     );
 
@@ -206,10 +206,10 @@ describe("main createLogger", () => {
   });
 
   it("keeps only the seven most recent daily files", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "modv-logs-"));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-logs-"));
 
     for (let day = 1; day <= 10; day += 1) {
-      const name = `modv-2020-01-${String(day).padStart(2, "0")}.log`;
+      const name = `vmodv-2020-01-${String(day).padStart(2, "0")}.log`;
       fs.writeFileSync(path.join(directory, name), "old\n");
     }
 
@@ -224,16 +224,16 @@ describe("main createLogger", () => {
     const files = fs.readdirSync(directory).sort();
 
     expect(files).toHaveLength(7);
-    expect(files).toContain("modv-2026-10-21.log");
-    expect(files).not.toContain("modv-2020-01-01.log");
-    expect(files).not.toContain("modv-2020-01-02.log");
-    expect(files).toContain("modv-2020-01-10.log");
+    expect(files).toContain("vmodv-2026-10-21.log");
+    expect(files).not.toContain("vmodv-2020-01-01.log");
+    expect(files).not.toContain("vmodv-2020-01-02.log");
+    expect(files).toContain("vmodv-2020-01-10.log");
 
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
   it("never throws when the log directory cannot be written to", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "modv-logs-"));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-logs-"));
     const blocker = path.join(directory, "blocker");
 
     fs.writeFileSync(blocker, "not a directory");
@@ -249,7 +249,7 @@ describe("main createLogger", () => {
   });
 
   it("names the log file after the date", () => {
-    expect(getLogFileName(new Date(2026, 9, 21))).toBe("modv-2026-10-21.log");
-    expect(getLogFileName(new Date(2026, 11, 5))).toBe("modv-2026-12-05.log");
+    expect(getLogFileName(new Date(2026, 9, 21))).toBe("vmodv-2026-10-21.log");
+    expect(getLogFileName(new Date(2026, 11, 5))).toBe("vmodv-2026-12-05.log");
   });
 });

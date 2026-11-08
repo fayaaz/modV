@@ -1,6 +1,6 @@
 export default {
   get GALLERY_GROUP_NAME() {
-    return "modV internal Gallery Group";
+    return "VmodV internal Gallery Group";
   },
 
   get LAYOUT_STATE_KEY() {

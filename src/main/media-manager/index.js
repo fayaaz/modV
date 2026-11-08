@@ -30,7 +30,7 @@ const mkdirp = promisify(mkdirpTop);
 
 export default class MediaManager {
   get dataPath() {
-    return path.join(ospath.data(), "modV");
+    return path.join(ospath.data(), "VmodV");
   }
 
   get mediaDirectoryPath() {

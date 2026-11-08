@@ -52,7 +52,7 @@ async function closeMainWindow(window) {
     const { response } = await dialog.showMessageBox(window, {
       type: "question",
       buttons: ["Yes", "No"],
-      message: "modV",
+      message: "VmodV",
       detail: "Are you sure you want to quit?",
     });
 
@@ -127,7 +127,7 @@ const windowPrefs = {
       webPreferences: {
         preload: join(__dirname, "../preload/index.js"),
         enableRemoteModule: true,
-        // electron 12 sets contextIsolation to true by default, this breaks modV
+        // electron 12 sets contextIsolation to true by default, this breaks VmodV
         contextIsolation: false,
         nodeIntegration: true,
         nodeIntegrationInWorker: true,
@@ -160,10 +160,10 @@ const windowPrefs = {
 
       window.setRepresentedFilename(os.homedir());
       window.setDocumentEdited(true);
-      window.setTitle("Untitled");
+      window.setTitle("VmodV");
 
       window.webContents.on("did-finish-load", () => {
-        window.setTitle("Untitled");
+        window.setTitle("VmodV");
       });
 
       // Configure child windows to open without a menubar (windows/linux)
