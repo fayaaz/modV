@@ -8,6 +8,7 @@ import { renderSceneTransition } from "./scene-transition";
 import { renderScenePreview } from "./scene-preview";
 import { renderRowFade } from "./row-transition";
 import { resolveInputLinkValue } from "./input-link-value";
+import { resolveInheritCanvas } from "./group-inherit";
 
 const meyda = { windowing: applyWindow };
 
@@ -208,7 +209,11 @@ async function loop(delta, features, fftOutput) {
     store.commit("scenePreview/SET_RENDERED");
   }
 
-  let lastCanvas = main.canvas;
+  // "Previous Group" means the previous Group in render order. There is no
+  // previous Group for the first one, so it must not inherit the stale root
+  // canvas left over from the last frame - doing so feeds the composite back
+  // into itself and makes transparent scenes (Point10) accumulate trails.
+  let lastCanvas = null;
   const renderedCanvasByGroupId = {};
   const rowTransitionCanvases = new Map();
 
@@ -286,13 +291,12 @@ async function loop(delta, features, fftOutput) {
         inheritFrom === -1
           ? null
           : groups.find((group) => group.id === inheritFrom);
-      const canvasToInherit =
-        inheritFrom === -1
-          ? lastCanvas
-          : inheritedGroup && inheritedGroup.context
-            ? renderedCanvasByGroupId[inheritedGroup.id] ||
-              inheritedGroup.context.context.canvas
-            : null;
+      const canvasToInherit = resolveInheritCanvas({
+        inheritFrom,
+        lastCanvas,
+        inheritedGroup,
+        renderedCanvasByGroupId,
+      });
 
       if (canvasToInherit) {
         drawTo.drawImage(
