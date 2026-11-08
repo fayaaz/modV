@@ -74,6 +74,62 @@ test("tunnel ISF modules compile and draw", async () => {
   }
 });
 
+test("the Plexus CC0 scene module compiles and draws", async () => {
+  const { outcomes, errors } = await modVApp.evaluateWorker(
+    async ({ names }) => {
+      const outcomes = {};
+      const errors = [];
+      const originalError = console.error;
+
+      console.error = (...args) => {
+        errors.push(args.map((arg) => String(arg)).join(" "));
+      };
+
+      try {
+        for (const name of names) {
+          const module = await self.store.dispatch("modules/makeActiveModule", {
+            moduleName: name,
+          });
+          const definition = self.store.state.modules.registered[name];
+
+          const canvas = new OffscreenCanvas(64, 64);
+          const context = canvas.getContext("2d");
+
+          try {
+            definition.draw({
+              moduleId: module.$id,
+              canvas,
+              context,
+              props: module.props,
+              isGallery: false,
+            });
+            outcomes[name] = "ok";
+          } catch (e) {
+            outcomes[name] = String(e);
+          }
+
+          await self.store.dispatch("modules/removeActiveModule", {
+            moduleId: module.$id,
+          });
+        }
+      } finally {
+        console.error = originalError;
+      }
+
+      return { outcomes, errors };
+    },
+    { names: ["Plexus"] },
+  );
+
+  for (const name of ["Plexus"]) {
+    expect(outcomes[name], name).toBe("ok");
+    expect(
+      errors.filter((error) => error.includes(name)),
+      name,
+    ).toEqual([]);
+  }
+});
+
 test("tunnel ISF modules render and animate", async () => {
   const size = 64;
   const results = await modVApp.evaluateWorker(
