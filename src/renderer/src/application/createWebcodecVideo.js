@@ -10,7 +10,6 @@ export function createWebcodecVideo({ id, url, textureDefinition }) {
       const stream = video.captureStream();
       const [track] = stream.getVideoTracks();
 
-      // eslint-disable-next-line
       const processor = new MediaStreamTrackProcessor(track);
       const frameStream = processor.readable;
 

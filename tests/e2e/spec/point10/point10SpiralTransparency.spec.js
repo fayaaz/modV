@@ -55,7 +55,9 @@ test("Point10 Spiral Particles renders on a transparent background", async () =>
           port2.postMessage(0);
         });
 
-      for (let i = 0; i < 10; i++) {
+      // The first frames can land before the particle material/texture has
+      // finished compiling, so draw enough frames for the scene to appear.
+      for (let i = 0; i < 60; i++) {
         draw();
         await nextFrame();
       }
@@ -68,7 +70,9 @@ test("Point10 Spiral Particles renders on a transparent background", async () =>
       for (let i = 0; i < pixels.length; i += 4) {
         if (pixels[i + 3] === 0) {
           transparent++;
-        } else if (pixels[i + 3] === 255) {
+        } else if (pixels[i + 3] >= 200) {
+          // The particle material renders at 0.9 opacity, so a single
+          // (unblended) particle peaks around 230 alpha rather than 255.
           opaque++;
         }
       }

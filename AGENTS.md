@@ -89,7 +89,7 @@ Gotchas:
 - WebGPU presentation uses `canvas.transferToImageBitmap()` with a `readRenderTargetPixelsAsync` fallback — full-frame readback costs ~9 ms/frame at 640×480, transfer ~0.3 ms.
 - `max-active-webgl-contexts` is **16** (`src/main/index.js`). The shared shader/gallery-shader/ISF/gallery-ISF/three renderers already hold five contexts; the old cap of 6 left no room for Point10 and force-lost the ISF contexts, so effects silently stopped applying. The adapter still disposes idle scenes (`MAX_LIVE_INSTANCES = 4`, idle > 3 s).
 - Textures: `import url from "../textures/foo.jpg?url"` then `loadTexture(url)` — `fetch()` in dev, `fs.readFileSync` for `file://` (asar) in the packaged worker.
-- `three` is `^0.185.1` everywhere: WebGL code imports `three`, WebGPU code imports `three/webgpu`, addons come from `three/addons/...`. The main process enables `Vulkan,WebGPU` + `enable-unsafe-webgpu`.
+- `three` is `^0.187.0` everywhere: WebGL code imports `three`, WebGPU code imports `three/webgpu`, addons come from `three/addons/...`. The main process enables `Vulkan,WebGPU` + `enable-unsafe-webgpu`.
 - Spectrum Bars, Ferrofluid and RingOfFire were removed; `point10-removed-effects.test.js` guards against reintroducing them and default Scenes must not reference them.
 - Renderer disposal is centralised in `application/renderers/disposal.js` (`disposeISFRenderer`, `disposePexCommand`, `createBoundedCache`). ISF modules share one WebGL context and one unit-quad vertex buffer, so `disposeISFRenderer` releases shaders/programs and image textures but must **never** delete the shared vertex buffer — doing so silently blanks every other live ISF layer.
 
@@ -140,14 +140,15 @@ Gotchas:
 - The worker runs with `nodeIntegrationInWorker: true` (`src/main/window-prefs.js`), so worker code may `require("fs")`/`require("path")`.
 - Native deps: `grandiose` (NDI) needs libndi on Linux; `grandiose` and `ffmpeg-fluent` are `asarUnpack`ed (see `electron-builder.yml`). The `Dockerfile` installs the NDI SDK and aliases the `libndi.so.5.6.1` soname to the `libndi.so.5.1.1` its `binding.gyp` pins. Windows needs the node-gyp toolchain — **WSL/WSL2 is unsupported**.
 - `patch-package` patches live in `patches/` (golden-layout, hapticjs, smooth-dnd). After `make yarn ARGS="remove <pkg>"`, run `make install` again to reapply patches (see issue #554).
+- `electron-builder.yml` sets `appImage.executableArgs: ["--no-sandbox"]`. An AppImage cannot install the setuid `chrome-sandbox` helper and some distros disable unprivileged user namespaces, so Electron would abort on launch; the `.deb` keeps the SUID sandbox configured by its post-install script.
 - electron-builder: `appId: gl.vcync.modv`, output directory `dist/`. `Dockerfile` is multi-stage (`deps` → `build` → `package` → `appimage`/`deb`/`artifacts`, plus a `toolchain` stage for the Dockerised yarn commands); `docker build --target artifacts --output type=local,dest=dist .` emits the installers, and `make build` is the supported local build. Do not run `electron-builder` locally.
 
 ### Vite / build toolchain
 
-- Version matrix (Vite 6 upgrade): `vite` `^6.4.4` (from `^5.0.12`), `electron-vite` `^3.1.0` (from `^2.0.0`, for Vite 6 support), `@vitejs/plugin-vue` `^5.2.4`, `vite-plugin-node-polyfills` `^0.24.0`, `vite-svg-loader` `^5.1.3`, `vitest` `^5.0.5` (from `^2.1.9`; removes the duplicate Vite 5 toolchain — Vitest 5 requires Vite >= 6.4). The unused `vite-plugin-electron-renderer` was removed.
+- Version matrix (Vite 8/Electron 45 upgrade): `electron` `^45.2.3`, `electron-builder` `^26.18.0`, `electron-vite` `^6.0.0`, `vite` `^8.3.7`, `vitest` `^5.1.0`, `@vitejs/plugin-vue` `^6.0.10`, `vue` `^3.5.45`, `vite-plugin-node-polyfills` `^0.28.0`, `vite-svg-loader` `^5.1.3`, `three` `^0.187.0`, `eslint` `^10.14.0` (flat config in `eslint.config.js`; the legacy `.eslintrc.cjs`/`.eslintignore` are gone), `eslint-plugin-vue` `^10.12.0`. Electron 39+ removed `ELECTRON_OZONE_PLATFORM_HINT`: Ozone now follows `XDG_SESSION_TYPE`.
 - In `electron.vite.config.mjs`, `nodePolyfills()` must run **before** `vue()`/`svgLoader()` — plugin order is sensitive.
-- Vite 6 enables `commonjsOptions.strictRequires` by default. Worker `require()` paths (`fs`, `path`, `grandiose`, `node-osc`) should be smoke-tested whenever build config changes.
-- Verified after the upgrade: the unit suite passes, `make lint` is clean, `make build` produces the AppImage and `.deb`, and the e2e smoke passes.
+- Vite 8 uses Rolldown; `build.rollupOptions`/`worker.rollupOptions` are deprecated aliases for `rolldownOptions` and `build.commonjsOptions` is a no-op. The renderer worker runs with `nodeIntegrationInWorker`, so its Node built-ins and native addons (`grandiose`) are externalized in `worker.rolldownOptions.external` with `esmExternalRequirePlugin` — without that, Vite replaces `require("fs")`/`require("path")` with empty browser externals and the worker breaks. Smoke-test worker `require()` paths whenever build config changes.
+- Verified after the upgrade: the unit suite passes, `make lint` is clean, `make appimage`/`make build` produce the installers, and the full e2e suite passes.
 
 ## Release
 
@@ -155,7 +156,7 @@ Nightly releases are produced by `.github/workflows/nightly.yml` (Docker build o
 
 ## Unit testing notes
 
-Vitest 5 (`^5.0.5`) runs on Vite 6 (`^6.4.4`) and is configured in `vitest.config.mjs` (`environment: "node"`, `include: ["tests/unit/**/*.test.js"]`, `@renderer` alias). Import modules with relative paths from `tests/unit/`. `tests/unit/` covers audio (`audio-bands`, `tempo-detector`, `phrase-detector`, `system-audio*`), video/media (`media-inputs`, `media-stream`, `video-capabilities`, `media-manager`), scenes (`scene-rows`, `scene-timing`, `scene-capture`, `scene-preview-data`, `scene-link-defaults`, `input-link-value`, `default-scenes`, `preset-serializer`), renderers/disposal (`renderer-disposal`, `disposal`), logging/shutdown (`logger`, `shutdown`), and the Point10 scenes/inputs/particle/audio-bridge modules. Keep unit tests free of Electron/WebGL so they run in plain Node; extract pure logic from Electron/WebGL code rather than reaching for e2e.
+Vitest 5 (`^5.1.0`) runs on Vite 8 (`^8.3.7`) and is configured in `vitest.config.mjs` (`environment: "node"`, `include: ["tests/unit/**/*.test.js"]`, `@renderer` alias). Import modules with relative paths from `tests/unit/`. `tests/unit/` covers audio (`audio-bands`, `tempo-detector`, `phrase-detector`, `system-audio*`), video/media (`media-inputs`, `media-stream`, `video-capabilities`, `media-manager`), scenes (`scene-rows`, `scene-timing`, `scene-capture`, `scene-preview-data`, `scene-link-defaults`, `input-link-value`, `default-scenes`, `preset-serializer`), renderers/disposal (`renderer-disposal`, `disposal`), logging/shutdown (`logger`, `shutdown`), and the Point10 scenes/inputs/particle/audio-bridge modules. Keep unit tests free of Electron/WebGL so they run in plain Node; extract pure logic from Electron/WebGL code rather than reaching for e2e.
 
 ## e2e testing notes
 

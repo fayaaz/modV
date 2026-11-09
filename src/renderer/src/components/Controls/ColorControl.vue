@@ -90,7 +90,7 @@
 <script>
 import CollapsibleControl from "./CollapsibleControl.vue";
 import RangeControl from "./RangeControl.vue";
-const { ipcRenderer } = require("electron");
+const { ipcRenderer } = window.electron;
 
 export default {
   components: {

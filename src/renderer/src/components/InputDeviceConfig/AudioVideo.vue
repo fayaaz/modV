@@ -49,9 +49,7 @@
           <grid columns="4">
             <c span="1">Logs</c>
             <c span="2">
-              <Button class="light" @click="openLogsFolder">
-                Open Logs
-              </Button>
+              <Button class="light" @click="openLogsFolder"> Open Logs </Button>
             </c>
             <c class="log-path">{{ logDirectory || "(unknown)" }}</c>
           </grid>
@@ -356,9 +354,8 @@ export default {
   methods: {
     async loadLogDirectory() {
       try {
-        this.logDirectory = await window.electron.ipcRenderer.invoke(
-          "get-logs-folder",
-        );
+        this.logDirectory =
+          await window.electron.ipcRenderer.invoke("get-logs-folder");
       } catch (e) {
         logger.warn("could not read the log directory", {
           message: e?.message,
@@ -368,9 +365,8 @@ export default {
 
     async openLogsFolder() {
       try {
-        const directory = await window.electron.ipcRenderer.invoke(
-          "open-logs-folder",
-        );
+        const directory =
+          await window.electron.ipcRenderer.invoke("open-logs-folder");
 
         this.logDirectory = directory;
       } catch (e) {
@@ -386,9 +382,7 @@ export default {
     },
 
     revertAudioSource(previous) {
-      if (
-        this.$modV.store.state.mediaStream.currentAudioSource !== previous
-      ) {
+      if (this.$modV.store.state.mediaStream.currentAudioSource !== previous) {
         this.$modV.store.commit("mediaStream/SET_CURRENT_AUDIO_SOURCE", {
           audioId: previous,
         });
@@ -439,7 +433,7 @@ export default {
       const frameRate =
         perDevice && perDevice.frameRate !== undefined
           ? perDevice.frameRate
-          : mediaStream.videoFrameRate ?? null;
+          : (mediaStream.videoFrameRate ?? null);
 
       return { resolution, frameRate };
     },
@@ -486,9 +480,7 @@ export default {
         }
       }
 
-      return options.sort(
-        (a, b) => a.width * a.height - b.width * b.height,
-      );
+      return options.sort((a, b) => a.width * a.height - b.width * b.height);
     },
 
     videoFrameRateOptions(deviceId) {
@@ -623,12 +615,9 @@ export default {
           this.$modV.store.commit("mediaStream/REMOVE_SELECTED_VIDEO_SOURCE", {
             videoId: deviceId,
           });
-          this.$modV._store.commit(
-            "mediaStream/REMOVE_SELECTED_VIDEO_SOURCE",
-            {
-              videoId: deviceId,
-            },
-          );
+          this.$modV._store.commit("mediaStream/REMOVE_SELECTED_VIDEO_SOURCE", {
+            videoId: deviceId,
+          });
         }
       } catch (e) {
         logger.error("the video input could not be changed", {
@@ -654,9 +643,7 @@ export default {
         deviceId,
         width: settings.width,
         height: settings.height,
-        frameRate: settings.frameRate
-          ? Math.round(settings.frameRate)
-          : null,
+        frameRate: settings.frameRate ? Math.round(settings.frameRate) : null,
       });
     },
 

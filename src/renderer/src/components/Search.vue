@@ -148,7 +148,6 @@ export default {
       const { focusElement, isGLElement, focusParent } = this.results[id];
 
       if (!focusElement && isGLElement) {
-        debugger;
         while (!vnode.glObject) {
           vnode = vnode.$parent;
         }

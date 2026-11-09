@@ -1,4 +1,3 @@
-/* eslint-env worker */
 import { reactive } from "vue";
 import store from "../";
 import constants, { GROUP_ENABLED } from "../../../constants";
@@ -2321,7 +2320,7 @@ const actions = {
     // Capturing its canvas instead (the old behaviour) froze the outgoing
     // visuals for the whole fade.
     const fade = !!(oldGroup && oldModuleIds.length > 0 && targetAlpha > 0);
-    const fromAlpha = oldGroup ? oldGroup.alpha ?? 1 : 0;
+    const fromAlpha = oldGroup ? (oldGroup.alpha ?? 1) : 0;
     let ghostGroup = null;
     let group;
 

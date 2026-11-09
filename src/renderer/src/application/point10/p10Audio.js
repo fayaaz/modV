@@ -76,7 +76,7 @@ export class P9Audio {
     const idx = Math.max(0, Math.min(2, Math.round(bandnr ?? 0)));
     const d = Math.max(0, Math.min(3, Math.round(damping ?? 0)));
 
-    return d > 0 ? this._smoo[d * 3 + idx] ?? 0 : this.bands[idx] ?? 0;
+    return d > 0 ? (this._smoo[d * 3 + idx] ?? 0) : (this.bands[idx] ?? 0);
   }
 
   beat(fallback) {

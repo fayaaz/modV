@@ -1,4 +1,3 @@
-/* global BigInt */
 /* env node worker */
 import { getGrandioseSender, setupGrandiose } from "../setup-grandiose";
 

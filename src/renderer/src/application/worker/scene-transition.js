@@ -1,4 +1,3 @@
-/* eslint-env worker */
 import {
   Renderer as ISFRenderer,
   Parser as ISFParser,

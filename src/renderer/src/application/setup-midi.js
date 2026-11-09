@@ -134,7 +134,6 @@ function handleInput(message) {
 function handleDevices(inputs) {
   // loop over all available inputs and listen for any MIDI input
   for (let input of inputs.values()) {
-    // eslint-disable-line
     // each time there is a midi message call the onMIDIMessage function
     input.removeEventListener("midimessage", handleInput);
     input.addEventListener("midimessage", handleInput);

@@ -9,10 +9,8 @@ let sender = undefined;
 
 export async function setupGrandiose() {
   if (grandiose === undefined) {
-    /* eslint-disable */
     // __dirname = `${__dirname}/node_modules/grandiose`;
     // __dirname = __dirname.replace("app.asar", "app.asar.unpacked");
-    /* eslint-enable */
 
     try {
       grandiose = require("grandiose");
@@ -28,7 +26,6 @@ export async function setupGrandiose() {
       }
     }
 
-    // eslint-disable-next-line
     // __dirname = __dirname.replace("/node_modules/grandiose", "");
   }
 

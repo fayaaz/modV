@@ -77,8 +77,8 @@ app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 // SwiftShader path Electron uses by default.
 //
 // The loopback features let getDisplayMedia({ audio: true }) return the
-// desktop audio on macOS. Electron 31 hides that behind feature flags and
-// has no working equivalent on Linux, where the desktop audio is captured
+// desktop audio on macOS. Electron hides that behind feature flags and has
+// no working equivalent on Linux, where the desktop audio is captured
 // from a PulseAudio/PipeWire monitor source instead.
 app.commandLine.appendSwitch(
   "enable-features",

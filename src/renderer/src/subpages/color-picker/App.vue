@@ -124,9 +124,10 @@ export default {
 body {
   margin: 0;
   -webkit-app-region: drag;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", "微軟雅黑", "Microsoft YaHei", "微軟正黑體",
-    "Microsoft JhengHei", Verdana, Arial, sans-serif !important;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    "微軟雅黑", "Microsoft YaHei", "微軟正黑體", "Microsoft JhengHei", Verdana,
+    Arial, sans-serif !important;
 }
 
 .vc-sketch > * {

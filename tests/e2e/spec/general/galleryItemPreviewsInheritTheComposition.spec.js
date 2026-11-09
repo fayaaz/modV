@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import constants, {
+  GROUP_DISABLED,
   GROUP_ENABLED,
 } from "../../../../src/renderer/src/application/constants";
 import { modVApp } from "../../pageObjectModel";
@@ -12,7 +13,7 @@ import { modVApp } from "../../pageObjectModel";
  */
 test("a gallery item preview renders over the inherited composition", async () => {
   const result = await modVApp.evaluateWorker(
-    async ({ galleryGroupName, enabled }) => {
+    async ({ galleryGroupName, enabled, disabled }) => {
       const size = 200;
 
       const liveGroup = await self.store.dispatch("groups/createGroup", {
@@ -108,11 +109,27 @@ test("a gallery item preview renders over the inherited composition", async () =
         groupId: liveGroup.id,
       });
 
+      // Leave the Gallery idle for later specs: no preview module and no
+      // stale draw target.
+      self.store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
+        id: module.$id,
+        metaKey: "enabled",
+        data: false,
+      });
+      self.store.commit("groups/UPDATE_GROUP", {
+        groupId: galleryGroup.id,
+        data: {
+          enabled: disabled,
+          drawToCanvasId: galleryGroup.context.id,
+        },
+      });
+
       return { nonBlack, total: size * size };
     },
     {
       galleryGroupName: constants.GALLERY_GROUP_NAME,
       enabled: GROUP_ENABLED,
+      disabled: GROUP_DISABLED,
     },
   );
 

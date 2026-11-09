@@ -16,7 +16,6 @@ export function SWAP(
     const swapIndexes = {};
 
     if (stateKeys.length) {
-      // eslint-disable-next-line
       stateKeys.forEach((key) => {
         const isArray = Array.isArray(state[key]);
 
@@ -24,7 +23,6 @@ export function SWAP(
           if (typeof sharedPropertyRestrictions[key] === "function") {
             const stateChildKeys = Object.keys(state[key]);
 
-            // eslint-disable-next-line
             if (isArray) {
               swapIndexes[key] = swap[key].length;
               swap[key].push(
@@ -39,7 +37,6 @@ export function SWAP(
                 state[key],
               );
 
-              // eslint-disable-next-line
               stateChildKeys.forEach((stateChildKey) => {
                 if (restrictedKeys.indexOf(stateChildKey) < 0) {
                   swap[key][stateChildKey] = state[key][stateChildKey];
@@ -60,7 +57,6 @@ export function SWAP(
     const swapKeys = Object.keys(swap);
 
     if (swapKeys.length) {
-      // eslint-disable-next-line
       swapKeys.forEach((key) => {
         const isArray = Array.isArray(swap[key]);
 
@@ -78,7 +74,6 @@ export function SWAP(
             } else {
               const restrictedKeys = sharedPropertyRestrictions[key](swap[key]);
 
-              // eslint-disable-next-line
               swapChildKeys.forEach((swapChildKey) => {
                 if (restrictedKeys.indexOf(swapChildKey) < 0) {
                   state[key][swapChildKey] = swap[key][swapChildKey];

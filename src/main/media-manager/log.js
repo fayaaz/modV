@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 const consoleLog = console.log;
 const consoleError = console.error;
 

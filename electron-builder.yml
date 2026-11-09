@@ -51,6 +51,12 @@ linux:
     - en-US
 appImage:
   artifactName: ${productName}-${version}.${ext}
+  # AppImages cannot install the setuid chrome-sandbox helper, and some distros
+  # disable unprivileged user namespaces, so Electron aborts on launch. Pass
+  # --no-sandbox by default for the AppImage only; the .deb keeps the SUID
+  # sandbox that its post-install script configures.
+  executableArgs:
+    - --no-sandbox
 deb:
   artifactName: ${productName}-${version}.${ext}
 npmRebuild: false

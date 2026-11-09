@@ -46,7 +46,9 @@ export const gallery = {
     await page.mouse.up();
 
     // Using expect.toHaveCount to wait for UI and subsequent state update
-    await expect(groupModules).toHaveCount(numberOfActiveModulesInGroup + 1);
+    await expect(groupModules.locator(".active-module")).toHaveCount(
+      numberOfActiveModulesInGroup + 1,
+    );
 
     const state = await modVApp.evaluateWorkerState();
     const group = state.groups.groups.find((group) => group.id === groupId);

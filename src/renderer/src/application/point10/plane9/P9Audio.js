@@ -130,7 +130,7 @@ export class P9Audio {
     const idx = Math.max(0, Math.min(2, Math.round(bandnr ?? 0)));
     const d = Math.max(0, Math.min(3, Math.round(damping ?? 0)));
     // damping 0 = raw per-frame band; 1..3 = low-passed lane of the same band.
-    return d > 0 ? this._smoo[d * 3 + idx] ?? 0 : this.bands[idx] ?? 0;
+    return d > 0 ? (this._smoo[d * 3 + idx] ?? 0) : (this.bands[idx] ?? 0);
   }
 
   // eslint-disable-next-line no-unused-vars

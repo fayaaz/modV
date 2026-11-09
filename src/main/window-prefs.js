@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain, screen, shell, BrowserWindow } from "electron";
+import { app, dialog, ipcMain, screen, shell } from "electron";
 import os from "node:os";
 import fs from "node:fs";
 import { join } from "path";
@@ -166,23 +166,30 @@ const windowPrefs = {
         window.setTitle("VmodV");
       });
 
-      // Configure child windows to open without a menubar (windows/linux)
-      window.webContents.on(
-        "new-window",
-        (event, url, frameName, disposition, options) => {
-          if (frameName === "modal") {
-            event.preventDefault();
-            event.newGuest = new BrowserWindow({
-              ...options,
-              autoHideMenuBar: true,
-              enableLargerThanScreen: true,
-              title: "",
-            });
+      // Configure child windows to open without a menubar (windows/linux).
+      // Electron 45 requires the child's sandbox/nodeIntegration state to
+      // match the opener, otherwise the relationship is dropped and
+      // window.open() returns null.
+      window.webContents.setWindowOpenHandler(({ frameName }) => {
+        if (frameName !== "modal") {
+          return { action: "deny" };
+        }
 
-            event.newGuest.removeMenu();
-          }
-        },
-      );
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            autoHideMenuBar: true,
+            enableLargerThanScreen: true,
+            title: "",
+            webPreferences: {
+              sandbox: false,
+              contextIsolation: false,
+              nodeIntegration: true,
+              nodeIntegrationInWorker: true,
+            },
+          },
+        };
+      });
 
       const mm = getMediaManager();
 

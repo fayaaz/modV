@@ -1,5 +1,3 @@
-/* eslint-env worker */
-
 /**
  * Dependency-free port of musicvis' phrase detector (src/shared/phraseColor.js).
  *

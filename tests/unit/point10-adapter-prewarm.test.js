@@ -87,12 +87,10 @@ class FakeOffscreenCanvas {
 
 vi.stubGlobal("OffscreenCanvas", FakeOffscreenCanvas);
 
-const { createPoint10Module, removeSceneInstance } = await import(
-  "../../src/renderer/src/application/point10/adapter.js"
-);
-const { clearWarmInstances } = await import(
-  "../../src/renderer/src/application/point10/warm-cache.js"
-);
+const { createPoint10Module, removeSceneInstance } =
+  await import("../../src/renderer/src/application/point10/adapter.js");
+const { clearWarmInstances } =
+  await import("../../src/renderer/src/application/point10/warm-cache.js");
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 

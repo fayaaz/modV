@@ -150,6 +150,7 @@ export default {
     StatusBar,
     InfoView,
     ModuleInspector,
+    // eslint-disable-next-line vue/no-reserved-component-names
     Search,
     FrameRateDialog,
     ScreenPickerDialog,
@@ -616,7 +617,8 @@ body {
 
 :root {
   --fontSize: 16px;
-  --sansFont: "Inter var", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  --sansFont:
+    "Inter var", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", "微軟雅黑", "Microsoft YaHei", "微軟正黑體",
     "Microsoft JhengHei", Verdana, Arial, sans-serif !important;
   --monoFont: "iaw-mono";

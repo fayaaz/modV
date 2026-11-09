@@ -70,8 +70,6 @@ export default function windowHandler() {
         "modal",
         `width=${width}, height=${height}, location=no, menubar=no, left=0`,
       );
-      win.document.title = title;
-
       if (win === null || typeof win === "undefined") {
         console.log(
           "Could not create Output Window",
@@ -80,6 +78,8 @@ export default function windowHandler() {
 
         return;
       }
+
+      win.document.title = title;
 
       windows[id] = win;
 

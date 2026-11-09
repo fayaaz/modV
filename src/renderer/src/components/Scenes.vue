@@ -153,6 +153,7 @@
         <div
           v-for="scene in scenes"
           :key="`header-${scene.id}`"
+          v-contextMenu="() => SceneHeaderContextMenu({ scene })"
           class="scenes__gridHeader"
           :data-scene-id="scene.id"
           :class="{
@@ -169,7 +170,6 @@
           @dragend="onSceneDragEnd"
           @dragover="onSceneDragOver(scene, $event)"
           @drop="onSceneDrop(scene, $event)"
-          v-contextMenu="() => SceneHeaderContextMenu({ scene })"
         >
           <TextInput
             v-if="editingSceneId === scene.id"
@@ -200,7 +200,9 @@
         <template v-for="row in rows" :key="`row-${row.index}`">
           <div
             class="scenes__gridRowLabel"
-            :class="{ 'scenes__gridRowLabel--dragging': dragRowIndex === row.index }"
+            :class="{
+              'scenes__gridRowLabel--dragging': dragRowIndex === row.index,
+            }"
             :draggable="editingRowIndex !== row.index"
             :title="row.label"
             @dragstart="onRowDragStart(row.index, $event)"
@@ -217,7 +219,10 @@
               @keydown.esc="cancelRowRename"
             />
             <template v-else>
-              <span class="scenes__gridRowLabelText" @dblclick="startRowRename(row.index)">
+              <span
+                class="scenes__gridRowLabelText"
+                @dblclick="startRowRename(row.index)"
+              >
                 {{ row.label }}
               </span>
               <button
@@ -232,6 +237,7 @@
           <div
             v-for="scene in scenes"
             :key="`cell-${scene.id}-${row.index}`"
+            v-contextMenu="() => sceneCellContextMenu(scene, row.index)"
             class="scenes__gridCell"
             :data-scene-id="scene.id"
             :data-row-index="row.index"
@@ -241,12 +247,11 @@
               'scenes__gridCell--transitioning': isRowTransitioning(scene, row),
               'scenes__gridCell--disabled': scene.enabled === false,
               'scenes__gridCell--paste':
-                this.cellDragTarget &&
-                this.cellDragTarget.sceneId === scene.id &&
-                this.cellDragTarget.rowIndex === row.index,
+                cellDragTarget &&
+                cellDragTarget.sceneId === scene.id &&
+                cellDragTarget.rowIndex === row.index,
             }"
             :draggable="true"
-            v-contextMenu="() => sceneCellContextMenu(scene, row.index)"
             @click="
               isRowCellEmpty(scene, row.index)
                 ? null
@@ -261,10 +266,17 @@
           >
             <template v-if="!isRowCellEmpty(scene, row.index)">
               <span class="scenes__gridCellCount">
-                {{ sceneGroupModuleCount(scene, sceneGroupForRow(scene, row.index)) }}
+                {{
+                  sceneGroupModuleCount(
+                    scene,
+                    sceneGroupForRow(scene, row.index),
+                  )
+                }}
                 module{{
-                  sceneGroupModuleCount(scene, sceneGroupForRow(scene, row.index)) ===
-                  1
+                  sceneGroupModuleCount(
+                    scene,
+                    sceneGroupForRow(scene, row.index),
+                  ) === 1
                     ? ""
                     : "s"
                 }}
@@ -308,11 +320,7 @@
       No Scenes yet. Save the current setup as a Scene to fill the grid.
     </p>
 
-    <Dialog
-      v-if="editGroupId"
-      :title="editTitle"
-      @close="closeSceneCellEditor"
-    >
+    <Dialog v-if="editGroupId" :title="editTitle" @close="closeSceneCellEditor">
       <div class="scenes__groupEditor">
         <div class="scenes__editorLayout">
           <div class="scenes__editorMain">
@@ -350,9 +358,7 @@
 
           <aside class="scenes__modulePanel">
             <div class="scenes__modulePanelTitle">Modules</div>
-            <p class="scenes__modulePanelHint">
-              Drag a module into the Group.
-            </p>
+            <p class="scenes__modulePanelHint">Drag a module into the Group.</p>
             <Container
               behaviour="copy"
               group-name="modules"
@@ -454,12 +460,8 @@
         <Button class="light" @click="saveCurrentAsScene">
           Save current as Scene
         </Button>
-        <Button class="light" @click="exportPlaylist">
-          Export Playlist
-        </Button>
-        <Button class="light" @click="importPlaylist">
-          Import Playlist
-        </Button>
+        <Button class="light" @click="exportPlaylist"> Export Playlist </Button>
+        <Button class="light" @click="importPlaylist"> Import Playlist </Button>
         <Button class="light" @click="loadFromDisk">Reload from disk</Button>
         <Button class="light" @click="nextScene">Next scene</Button>
       </c>
@@ -784,13 +786,10 @@ export default {
 
         groupId = created && created.groupId;
       } else if (!groupId) {
-        const result = await this.$modV.store.dispatch(
-          "scenes/applySceneRow",
-          {
-            sceneId: scene.id,
-            rowIndex,
-          },
-        );
+        const result = await this.$modV.store.dispatch("scenes/applySceneRow", {
+          sceneId: scene.id,
+          rowIndex,
+        });
 
         groupId = result && result.groupId;
       }
@@ -871,10 +870,10 @@ export default {
         return;
       }
 
-      const updated = await this.$modV.store.dispatch(
-        "scenes/clearSceneCell",
-        { sceneId: scene.id, rowIndex },
-      );
+      const updated = await this.$modV.store.dispatch("scenes/clearSceneCell", {
+        sceneId: scene.id,
+        rowIndex,
+      });
 
       if (updated) {
         this.persistScene(updated);
@@ -1162,7 +1161,9 @@ export default {
       const names = this.rowNames.slice();
       names[rowIndex] = name;
 
-      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+      await this.$modV.store.dispatch("scenes/setRowNames", {
+        rowNames: names,
+      });
     },
 
     async addColumn() {
@@ -1183,7 +1184,9 @@ export default {
 
     async addRow() {
       const names = this.rowNames.concat("");
-      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+      await this.$modV.store.dispatch("scenes/setRowNames", {
+        rowNames: names,
+      });
       this.startRowRename(names.length - 1);
     },
 
@@ -1191,7 +1194,9 @@ export default {
       const names = this.rowNames.slice();
 
       names.splice(rowIndex, 1);
-      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+      await this.$modV.store.dispatch("scenes/setRowNames", {
+        rowNames: names,
+      });
     },
 
     onRowDragStart(rowIndex, event) {
@@ -1223,7 +1228,9 @@ export default {
       const [moved] = names.splice(fromIndex, 1);
       names.splice(rowIndex, 0, moved);
 
-      await this.$modV.store.dispatch("scenes/setRowNames", { rowNames: names });
+      await this.$modV.store.dispatch("scenes/setRowNames", {
+        rowNames: names,
+      });
     },
 
     onCellDragStart(scene, rowIndex, event) {
@@ -1498,9 +1505,7 @@ export default {
     },
 
     async exportPlaylist() {
-      const playlist = await this.$modV.store.dispatch(
-        "scenes/exportPlaylist",
-      );
+      const playlist = await this.$modV.store.dispatch("scenes/exportPlaylist");
       const result = await ipcRenderer.invoke(
         "export-scenes-playlist",
         playlist,

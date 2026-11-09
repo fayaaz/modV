@@ -25,15 +25,15 @@ export default {
     StatusBarItem,
     FPSDisplay,
     BPMDisplay,
-    SizeDisplay
+    SizeDisplay,
   },
 
   data() {
     return {
       builtInItems: ["FPSDisplay", "BPMDisplay", "SizeDisplay"],
-      version: packageInfo.version
+      version: packageInfo.version,
     };
-  }
+  },
 };
 </script>
 

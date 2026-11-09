@@ -13,10 +13,73 @@ async function hoverGalleryItem(page, searchTerm, itemName) {
   const searchInput = page.locator("input.gallery-search");
   await searchInput.click();
   await searchInput.fill(searchTerm);
-  await page
+
+  // Let Vue apply the filter and the list reflow before hovering: the
+  // filtered items move under the pointer and a hover issued mid-refresh can
+  // be cancelled by the resulting mouseleave. Re-hover until the worker has
+  // actually enabled the preview module.
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+
+  const item = page
     .locator(".smooth-dnd-container .gallery-item", { hasText: itemName })
-    .first()
-    .hover();
+    .first();
+
+  // GalleryItem#mounted creates its preview module asynchronously; hovering
+  // before that finishes enables nothing. Wait for the module to exist in the
+  // gallery Group before touching the item.
+  await expect
+    .poll(() =>
+      modVApp.evaluateWorker(
+        async ({ name, galleryGroupName }) => {
+          const group = self.store.state.groups.groups.find(
+            (candidate) => candidate.name === galleryGroupName,
+          );
+
+          return Boolean(
+            group &&
+            group.modules
+              .map((id) => self.store.state.modules.active[id])
+              .some((module) => module && module.$moduleName === name),
+          );
+        },
+        { name: itemName, galleryGroupName: constants.GALLERY_GROUP_NAME },
+      ),
+    )
+    .toBe(true);
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await item.hover();
+
+    const enabled = await modVApp.evaluateWorker(
+      async ({ name, galleryGroupName }) => {
+        const group = self.store.state.groups.groups.find(
+          (candidate) => candidate.name === galleryGroupName,
+        );
+
+        return Boolean(
+          group &&
+          group.modules
+            .map((id) => self.store.state.modules.active[id])
+            .some(
+              (module) =>
+                module && module.$moduleName === name && module.meta.enabled,
+            ),
+        );
+      },
+      { name: itemName, galleryGroupName: constants.GALLERY_GROUP_NAME },
+    );
+
+    if (enabled) {
+      return;
+    }
+
+    await page.waitForTimeout(250);
+  }
 }
 
 async function sampleItemCanvas(itemName) {
@@ -30,6 +93,7 @@ async function sampleItemCanvas(itemName) {
 
       let galleryGroup = null;
       let enabledModules = [];
+      let result = { opaque: 0, nonBlack: 0, total: 0, enabledModules };
 
       while (Date.now() < deadline) {
         galleryGroup = self.store.state.groups.groups.find(
@@ -43,39 +107,51 @@ async function sampleItemCanvas(itemName) {
               .map((mod) => mod.$moduleName)
           : [];
 
-        if (enabledModules.includes(name)) {
-          break;
+        const aux = Object.values(self.store.state.outputs.auxillary).find(
+          (item) => item.name === `${name}-gallery`,
+        );
+
+        if (enabledModules.includes(name) && aux && aux.context) {
+          const context = aux.context;
+          const { width, height } = context.canvas;
+          const data = context.getImageData(0, 0, width, height).data;
+
+          let opaque = 0;
+          let nonBlack = 0;
+
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] > 0) {
+              opaque += 1;
+            }
+
+            if (data[i] + data[i + 1] + data[i + 2] > 12) {
+              nonBlack += 1;
+            }
+          }
+
+          result = { opaque, nonBlack, total: width * height, enabledModules };
+
+          // The preview renders a frame or two after the module is enabled;
+          // sample until the canvas has actually been painted.
+          if (opaque > 0 || nonBlack > 0) {
+            break;
+          }
         }
 
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
 
-      const aux = Object.values(self.store.state.outputs.auxillary).find(
-        (item) => item.name === `${name}-gallery`,
-      );
-
-      const context = aux.context;
-      const { width, height } = context.canvas;
-      const data = context.getImageData(0, 0, width, height).data;
-
-      let opaque = 0;
-      let nonBlack = 0;
-
-      for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] > 0) {
-          opaque += 1;
-        }
-
-        if (data[i] + data[i + 1] + data[i + 2] > 12) {
-          nonBlack += 1;
-        }
-      }
-
-      return { opaque, nonBlack, total: width * height, enabledModules };
+      return result;
     },
     { name: itemName, galleryGroupName: constants.GALLERY_GROUP_NAME },
   );
 }
+
+test.afterEach(async () => {
+  // Moving the pointer off the Gallery leaves no preview module enabled for
+  // later specs that share this app instance.
+  await modVApp.page.mouse.move(0, 0);
+});
 
 test("a hovered gallery item renders its module preview", async () => {
   const { page } = modVApp;

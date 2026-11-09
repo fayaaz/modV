@@ -1,4 +1,3 @@
-/* eslint-env worker */
 import { v4 as uuidv4 } from "uuid";
 import { createPreviewModule } from "./scene-preview-data";
 

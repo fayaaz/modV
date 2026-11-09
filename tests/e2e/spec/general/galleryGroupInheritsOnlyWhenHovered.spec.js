@@ -51,34 +51,33 @@ test("the idle Gallery group canvas is not repainted every frame", async () => {
       const nextFrame = () =>
         new Promise((resolve) => requestAnimationFrame(resolve));
 
-      for (let i = 0; i < 15; i++) {
-        await nextFrame();
-      }
-
       const galleryGroup = self.store.state.groups.groups.find(
         (group) => group.name === galleryGroupName,
       );
 
       const { width, height } = galleryGroup.context.context.canvas;
-      const sample = () =>
-        galleryGroup.context.context.getImageData(
-          Math.floor(width / 2),
-          Math.floor(height / 2),
-          1,
-          1,
-        ).data;
+      const sample = (context) =>
+        Array.from(
+          context.getImageData(
+            Math.floor(width / 2),
+            Math.floor(height / 2),
+            1,
+            1,
+          ).data,
+        );
 
-      const idle = Array.from(sample());
+      // Wait for the live composition to paint its first frame; under GPU
+      // load the first render can take longer than a fixed frame count.
+      let liveSample = sample(liveGroup.context.context);
+      const deadline = performance.now() + 5000;
 
-      // The inherited content exists: the live Group canvas is not empty.
-      const liveSample = Array.from(
-        liveGroup.context.context.getImageData(
-          Math.floor(width / 2),
-          Math.floor(height / 2),
-          1,
-          1,
-        ).data,
-      );
+      while (liveSample[3] === 0 && performance.now() < deadline) {
+        await nextFrame();
+        liveSample = sample(liveGroup.context.context);
+      }
+
+      // The Gallery group has no hovered item, so its canvas must stay clear.
+      const idle = sample(galleryGroup.context.context);
 
       await self.store.dispatch("groups/removeGroup", {
         groupId: liveGroup.id,

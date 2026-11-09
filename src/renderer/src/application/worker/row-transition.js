@@ -1,5 +1,3 @@
-/* eslint-env worker */
-
 const MAX_ROW_CANVASES = 16;
 const rowCanvases = new Map();
 

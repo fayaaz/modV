@@ -34,3 +34,7 @@ tmp
 
 # Local opencode configuration
 .opencode/
+
+# Crash dumps
+core
+core.*

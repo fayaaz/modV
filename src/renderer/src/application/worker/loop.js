@@ -1,4 +1,3 @@
-/* eslint-env worker */
 import get from "lodash.get";
 import store from "./store";
 import constants, { GROUP_DISABLED, GROUP_ENABLED } from "../constants";

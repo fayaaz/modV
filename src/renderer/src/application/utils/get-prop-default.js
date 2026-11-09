@@ -25,7 +25,7 @@ export default async function getPropDefault(
     }
 
     const propData = useExistingData
-      ? module.props[propName] ?? defaultValue
+      ? (module.props[propName] ?? defaultValue)
       : defaultValue;
 
     if (store.state.dataTypes[type].create) {
