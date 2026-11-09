@@ -1,7 +1,9 @@
-// Ready-to-go music reactive Scenes. Each Scene is composed of three Groups so
-// the visual is layered the same way musicvis builds a look: a Background
-// visual, a Foreground overlay and an Effects group that inherits the previous
-// Groups and runs a post effect over them.
+// Ready-to-go music reactive Scenes. Most are layered the same way musicvis
+// builds a look: a Background visual, a Foreground overlay and an Effects group
+// that inherits the previous Groups and runs a post effect over them. A Scene is
+// not required to have all three (or even more than one) Group, and a filter can
+// be chained in any Group - for example a Bloom or Chromatic Abberation inside
+// the Foreground group after its generator.
 //
 // `props` here are applied on top of each Module's registered defaults when the
 // Scene snapshot is generated on first run. `meta` is merged into the Module's
@@ -21,9 +23,13 @@
 // the removed Cube Floor visuals and adds Circular Mountain, and version 8
 // retires seven Scenes (see REMOVED_DEFAULT_SCENES), renames and updates
 // several Scenes from the author's live configuration, turns Twirl Tunnel
-// into Golden Spiral Tunnel and adds Rave.exe.
+// into Golden Spiral Tunnel and adds Rave.exe, and version 9 trims the busiest
+// effect stacks, keeps Twirl only in It Twirls At Night, drops RGB Halftone and
+// adds single-Group (Background-only, Foreground-only, Effects-only) Scenes.
+// Version 9 also rebuilds the trimmed Scenes in place (see
+// REFRESHED_DEFAULT_SCENES) for installs that seeded the version 8 set.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 8;
+export const DEFAULTS_VERSION = 9;
 
 // The Cube Floor module was removed in version 7. Existing installs may still
 // hold default Scenes that reference it, so the migration below rebuilds those
@@ -68,6 +74,74 @@ const RENAMED_DEFAULT_SCENES = [
     oldName: "Twirl Tunnel",
     newName: "Golden Spiral Tunnel",
   },
+  // Version 9 drops Twirl from every default except It Twirls At Night, so the
+  // Scenes that were built around it get names that describe their new look.
+  {
+    oldName: "Twirl Reactor",
+    newName: "Reactor Glow",
+  },
+  {
+    oldName: "Twirl Grid",
+    newName: "Polygon Grid",
+  },
+  {
+    oldName: "Twirled Feedback",
+    newName: "Feedback Bloom",
+  },
+];
+
+// Version 9 also trims existing Scenes. Installs that seeded the version 8 set
+// get these rebuilt in place (same id/name) so the refinement reaches existing
+// libraries, while older installs keep their historical versions.
+export const REFRESHED_DEFAULT_SCENES = [
+  "Mycelium Bloom",
+  "Chromatic Waveform",
+  "Geometric Tunnel",
+  "Burning Mycelium Circle",
+  "Chromatic Cascade",
+  "Smoke Tunnel",
+  "Digital Black Hole",
+  "Mirror Chamber",
+  "Solar Flare",
+  "Water Ripple Dreams",
+  "Waveform Drive",
+  "Rolling Fire Bloom",
+  "Strobe Riot",
+  "Prism Reliquary",
+  "Spiral Static",
+  "Ultimate Drift",
+  "Roto Zoom Riot",
+  "Glitch Bloom Cathedral",
+  "Hex Bloom",
+  "VHS Reliquary",
+  "It Is Coming",
+  "Around Plus Aurora",
+  "Around Water Garden",
+  "Attractor Bloom",
+  "Attractor Void",
+  "Boxy Boulevard",
+  "Boxy Arcade",
+  "DVD Afterglow",
+  "DVD Nightmare",
+  "Light Tunnel Runner",
+  "Light Tunnel Choir",
+  "Square Tunnel Signal",
+  "Wormhole Descent",
+  "Wormhole Cathedral",
+  "ASCII Sunbeam",
+  "Terminal Bloom",
+  "Halftone Harbor",
+  "Crosshatch Cipher",
+  "Dither District",
+  "Mosaic Meridian",
+  "Circuit Ritual",
+  "Hexagon Halo",
+  "Etched Aurora",
+  "Brickwork Beat",
+  "Digital Crystal Tunnel",
+  "MBOX Light Tunnel",
+  "Rave.exe",
+  "Quiet Bloom",
 ];
 
 const sceneKey = (name) =>
@@ -202,6 +276,7 @@ export function getDefaultScenesToReplace({
   scenes = [],
   removedModuleNames = REMOVED_DEFAULT_SCENE_MODULES,
   seededNames,
+  refreshNames = REFRESHED_DEFAULT_SCENES,
 } = {}) {
   const version = Number.isFinite(Number(defaultsVersion))
     ? Number(defaultsVersion)
@@ -261,28 +336,67 @@ export function getDefaultScenesToReplace({
     consumedKeys.add(key);
   }
 
-  if (!removed.size) {
-    return result;
+  if (removed.size) {
+    for (const definition of DEFAULT_SCENES) {
+      const key = sceneKey(definition.name);
+
+      if (consumedKeys.has(key)) {
+        continue;
+      }
+
+      const existing = existingByKey.get(key);
+
+      if (!existing || !sceneUsesRemovedModule(existing, removed)) {
+        continue;
+      }
+
+      result.replacements.push({
+        id: existing.id,
+        name: existing.name,
+        definition,
+      });
+    }
   }
 
-  for (const definition of DEFAULT_SCENES) {
-    const key = sceneKey(definition.name);
+  // Rebuild the Scenes whose definitions changed in this version. Only
+  // installs that seeded the immediately previous defaults set are refreshed,
+  // so a long-neglected library is not silently rewritten. Existing ids and
+  // names are kept, and removed-module/rename work already won.
+  const refresh = new Set((refreshNames || []).map(sceneKey));
 
-    if (consumedKeys.has(key)) {
-      continue;
+  if (version >= DEFAULTS_VERSION - 1 && refresh.size) {
+    const replacedKeys = new Set(
+      result.replacements.map((replacement) => sceneKey(replacement.name)),
+    );
+    const removedKeys = new Set(
+      result.removals.map((removal) => sceneKey(removal.name)),
+    );
+
+    for (const definition of DEFAULT_SCENES) {
+      const key = sceneKey(definition.name);
+
+      if (
+        !refresh.has(key) ||
+        replacedKeys.has(key) ||
+        removedKeys.has(key) ||
+        consumedKeys.has(key)
+      ) {
+        continue;
+      }
+
+      const existing = existingByKey.get(key);
+
+      if (!existing || !isSeeded(key)) {
+        continue;
+      }
+
+      result.replacements.push({
+        id: existing.id,
+        name: existing.name,
+        definition,
+      });
+      replacedKeys.add(key);
     }
-
-    const existing = existingByKey.get(key);
-
-    if (!existing || !sceneUsesRemovedModule(existing, removed)) {
-      continue;
-    }
-
-    result.replacements.push({
-      id: existing.id,
-      name: existing.name,
-      definition,
-    });
   }
 
   return result;
@@ -320,17 +434,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.2,
-              bassGain: 1.2,
-              smoothing: 0.08,
-            },
-            meta: { alpha: 0.85, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -380,16 +484,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.15,
-              midGain: 1.3,
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -501,16 +596,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.2,
-              midGain: 1.2,
-            },
-            meta: { alpha: 0.75, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -569,38 +655,7 @@ const DEFAULT_SCENES = [
           },
         ],
       },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.2,
-              smoothing: 0.08,
-              bassGain: 1.2,
-              midGain: 1,
-              trebleGain: 1,
-              useAgc: true,
-            },
-            meta: { enabled: false, compositeOperation: "screen" },
-          },
-          {
-            name: "Point10 Smoke Room",
-            props: {
-              gain: 1,
-              smoothing: 0,
-              bassGain: 1,
-              midGain: 1,
-              trebleGain: 1,
-              useAgc: true,
-            },
-          },
-        ],
-      },
+
       {
         name: "Effects",
         inherit: true,
@@ -645,24 +700,7 @@ const DEFAULT_SCENES = [
           },
         ],
       },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Chromatic Line",
-            props: {
-              gain: 1.15,
-              midGain: 1.35,
-              smoothing: 0.04,
-            },
-            meta: { alpha: 0.8, compositeOperation: "screen" },
-          },
-        ],
-      },
+
       {
         name: "Effects",
         inherit: true,
@@ -670,13 +708,6 @@ const DEFAULT_SCENES = [
         alpha: 1,
         compositeOperation: "normal",
         modules: [
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 5,
-              intensity: 0.45,
-            },
-          },
           {
             name: "Chromatic Abberation",
             props: {
@@ -727,31 +758,6 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Bar",
-            props: {
-              rotation: 45,
-              thickness: 18,
-              strobe: 0,
-              color1: {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 1,
-              },
-              color2: {
-                r: 1,
-                g: 1,
-                b: 1,
-                a: 1,
-              },
-            },
-            meta: {
-              compositeOperation: "screen",
-              alpha: 0.8,
-              enabled: false,
-            },
-          },
-          {
             name: "Point10 Smoke Room",
             props: {
               gain: 1,
@@ -766,24 +772,6 @@ const DEFAULT_SCENES = [
               fireLifespan: 1.3,
               simulationSpeed: 1.2,
               boxScale: 0.9,
-            },
-          },
-          {
-            name: "Cube",
-            props: {
-              rotation: [0, 0, 0],
-              scale: [1, 1, 1],
-              position: [0, 0, 0],
-              color: {
-                r: 1,
-                g: 1,
-                b: 1,
-                a: 1,
-              },
-              useMap: false,
-            },
-            meta: {
-              enabled: false,
             },
           },
         ],
@@ -801,13 +789,6 @@ const DEFAULT_SCENES = [
               intensity: 3.5999999999999996,
               gain: 0.9847759065022574,
               neonColor: [1, 0.4, 0.64, 1],
-            },
-          },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 22,
-              extension: 0.35,
             },
           },
         ],
@@ -871,31 +852,6 @@ const DEFAULT_SCENES = [
         compositeOperation: "screen",
         modules: [
           {
-            name: "Bar",
-            props: {
-              rotation: 0,
-              thickness: 26,
-              strobe: 0,
-              color1: {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 1,
-              },
-              color2: {
-                r: 1,
-                g: 1,
-                b: 1,
-                a: 1,
-              },
-            },
-            meta: {
-              compositeOperation: "screen",
-              alpha: 0.65,
-              enabled: false,
-            },
-          },
-          {
             name: "Singularity Rain",
             props: {
               speed: 0,
@@ -942,6 +898,8 @@ const DEFAULT_SCENES = [
               colorBleedR: [0.8, 0, 0.4, 1],
             },
           },
+          // A gentle motion blur rounds the VHS scanline jitter without adding
+          // a busy second look.
           {
             name: "VVMotionBlur 3.0",
             props: {
@@ -1019,17 +977,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.1,
-              midGain: 1.3,
-              trebleGain: 1.1,
-            },
-            meta: { alpha: 0.65, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -1043,13 +991,6 @@ const DEFAULT_SCENES = [
             props: {
               horizontal: true,
               vertical: true,
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 10,
-              intensity: 0.45,
             },
           },
         ],
@@ -1115,13 +1056,6 @@ const DEFAULT_SCENES = [
               powerCurve: 1.2,
               colorize: 0.2,
               inverse: true,
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 8,
-              intensity: 0.65,
             },
           },
         ],
@@ -1192,13 +1126,6 @@ const DEFAULT_SCENES = [
               mode: 0,
             },
           },
-          {
-            name: "Hue-Saturation",
-            props: {
-              hue: -0.08,
-              saturation: 0.25,
-            },
-          },
         ],
       },
     ],
@@ -1216,38 +1143,9 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              height: 1.6,
-              speed: 0.9,
-              opacity: 0.85,
-              gain: 1.3,
-              bassGain: 1.6,
-              smoothing: 0.05,
-            },
-          },
-        ],
+        modules: [],
       },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.2,
-              midGain: 1.25,
-              smoothing: 0.04,
-            },
-            meta: { alpha: 0.75, compositeOperation: "screen" },
-          },
-        ],
-      },
+
       {
         name: "Effects",
         inherit: true,
@@ -1263,13 +1161,6 @@ const DEFAULT_SCENES = [
               green_zoom: 1.02,
               blue_zoom: 1.03,
               center: [0.5, 0.5],
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.45,
             },
           },
         ],
@@ -1329,13 +1220,6 @@ const DEFAULT_SCENES = [
             props: {
               blurAmount: 10,
               intensity: 0.7,
-            },
-          },
-          {
-            name: "Posterize",
-            props: {
-              gamma: 1.1,
-              numColors: 10,
             },
           },
         ],
@@ -1439,17 +1323,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              gain: 1.2,
-              trebleGain: 1.4,
-              smoothing: 0.05,
-            },
-            meta: { alpha: 0.75, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -1461,22 +1335,28 @@ const DEFAULT_SCENES = [
           {
             name: "Strobe",
             props: {
-              strobeRate: 0.12,
+              // A beat-length flash at low alpha reads as a pulse instead of a
+              // hard flicker; the tween below keeps the period in time with
+              // the detected BPM so it flashes on the beat rather than at a
+              // fixed, unrelated rate.
+              strobeRate: 0.5,
               strobeMode: 0,
               strobeColor: [1, 1, 1, 1],
             },
-          },
-          {
-            name: "Dot Screen",
-            props: {
-              sharpness: 2,
-              angle: 0.25,
-              scale: 1.2,
-              colorize: 0.2,
-              center: [0.5, 0.5],
-            },
+            meta: { alpha: 0.16 },
           },
         ],
+      },
+    ],
+    inputLinks: [
+      {
+        group: "Effects",
+        module: "Strobe",
+        control: "strobeRate",
+        source: "tween",
+        min: 0.48,
+        max: 0.56,
+        bpmDivision: 16,
       },
     ],
   },
@@ -1532,20 +1412,13 @@ const DEFAULT_SCENES = [
               levels: 10,
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 5,
-              intensity: 0.45,
-            },
-          },
         ],
       },
     ],
   },
 
   {
-    name: "Twirl Reactor",
+    name: "Reactor Glow",
     introducedVersion: 3,
     minSeconds: 8,
     maxSeconds: 20,
@@ -1589,14 +1462,6 @@ const DEFAULT_SCENES = [
         alpha: 1,
         compositeOperation: "normal",
         modules: [
-          {
-            name: "Twirl",
-            props: {
-              radius: 0.9,
-              amount: 2.4,
-              center: [0.5, 0.5],
-            },
-          },
           {
             name: "Vignette",
             props: {
@@ -1663,13 +1528,6 @@ const DEFAULT_SCENES = [
             name: "Point10 Digital Glitch",
             props: {},
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 4,
-              intensity: 0.35,
-            },
-          },
         ],
       },
     ],
@@ -1731,13 +1589,6 @@ const DEFAULT_SCENES = [
             name: "Point10 RGB Shift",
             props: {},
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.4,
-            },
-          },
         ],
       },
     ],
@@ -1797,10 +1648,6 @@ const DEFAULT_SCENES = [
               zoomScale: 4,
               timeScale: 1.5,
             },
-          },
-          {
-            name: "Point10 Contrast",
-            props: {},
           },
         ],
       },
@@ -1862,20 +1709,13 @@ const DEFAULT_SCENES = [
               center: [0.5, 0.5],
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 8,
-              intensity: 0.55,
-            },
-          },
         ],
       },
     ],
   },
 
   {
-    name: "Twirl Grid",
+    name: "Polygon Grid",
     introducedVersion: 3,
     minSeconds: 8,
     maxSeconds: 20,
@@ -1926,14 +1766,6 @@ const DEFAULT_SCENES = [
         alpha: 1,
         compositeOperation: "normal",
         modules: [
-          {
-            name: "Twirl",
-            props: {
-              radius: 0.6,
-              amount: 1.8,
-              center: [0.5, 0.5],
-            },
-          },
           {
             name: "Point10 Color Distort",
             props: {},
@@ -2002,10 +1834,6 @@ const DEFAULT_SCENES = [
               preRotateAngle: -10,
             },
           },
-          {
-            name: "Point10 Color Distort",
-            props: {},
-          },
         ],
       },
     ],
@@ -2057,12 +1885,6 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "ASCII Art",
-            props: {
-              amount: 0.02,
-            },
-          },
-          {
             name: "VHS Glitch",
             props: {
               autoScan: true,
@@ -2084,7 +1906,7 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Twirled Feedback",
+    name: "Feedback Bloom",
     introducedVersion: 3,
     minSeconds: 11,
     maxSeconds: 27,
@@ -2137,14 +1959,6 @@ const DEFAULT_SCENES = [
               centerFeedback: 0,
               feedbackCenter: [0.5, 0.5],
               styleMode: 2,
-            },
-          },
-          {
-            name: "Twirl",
-            props: {
-              radius: 0.5,
-              amount: 1.2,
-              center: [0.5, 0.5],
             },
           },
         ],
@@ -2204,13 +2018,6 @@ const DEFAULT_SCENES = [
             props: {
               blurAmount: 7,
               intensity: 0.55,
-            },
-          },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 20,
-              extension: 0.32,
             },
           },
         ],
@@ -2395,13 +2202,6 @@ const DEFAULT_SCENES = [
               mode: 0,
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.45,
-            },
-          },
         ],
       },
     ],
@@ -2465,14 +2265,6 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Twirl",
-            props: {
-              radius: 0.8,
-              amount: 1.6,
-              center: [0.5, 0.5],
-            },
-          },
-          {
             name: "Hue-Saturation",
             props: {
               hue: 0.08,
@@ -2526,19 +2318,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              height: 1.4,
-              speed: 1.1,
-              opacity: 0.8,
-              gain: 1.2,
-              midGain: 1.3,
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -2554,26 +2334,10 @@ const DEFAULT_SCENES = [
               intensity: 0.55,
             },
           },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 18,
-              extension: 0.3,
-            },
-          },
         ],
       },
     ],
-    inputLinks: [
-      {
-        group: "Foreground",
-        module: "Point10 Waveform",
-        control: "alpha",
-        feature: "treble",
-        min: 0.2,
-        max: 0.8,
-      },
-    ],
+    inputLinks: [],
   },
 
   {
@@ -2632,14 +2396,6 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Twirl",
-            props: {
-              radius: 0.7,
-              amount: 2.2,
-              center: [0.5, 0.5],
-            },
-          },
-          {
             name: "Chromatic Abberation",
             props: {
               rOffset: 1.002,
@@ -2695,17 +2451,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              height: 2,
-              gain: 1.2,
-              bassGain: 1.2,
-            },
-            meta: { alpha: 0.65, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -2718,26 +2464,10 @@ const DEFAULT_SCENES = [
             name: "Point10 Crt",
             props: {},
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 5,
-              intensity: 0.4,
-            },
-          },
         ],
       },
     ],
-    inputLinks: [
-      {
-        group: "Foreground",
-        module: "Point10 Waveform",
-        control: "alpha",
-        feature: "bass",
-        min: 0.1,
-        max: 0.7,
-      },
-    ],
+    inputLinks: [],
   },
 
   {
@@ -2790,13 +2520,6 @@ const DEFAULT_SCENES = [
           {
             name: "Point10 Old Movie",
             props: {},
-          },
-          {
-            name: "Posterize",
-            props: {
-              gamma: 1.1,
-              numColors: 8,
-            },
           },
         ],
       },
@@ -2873,13 +2596,6 @@ const DEFAULT_SCENES = [
             props: {
               blurAmount: 8,
               intensity: 0.6,
-            },
-          },
-          {
-            name: "Hue-Saturation",
-            props: {
-              hue: 0.06,
-              saturation: 0.2,
             },
           },
         ],
@@ -2961,13 +2677,6 @@ const DEFAULT_SCENES = [
               bleedAmount: 1,
             },
           },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 22,
-              extension: 0.35,
-            },
-          },
         ],
       },
     ],
@@ -3046,13 +2755,6 @@ const DEFAULT_SCENES = [
               center: [0.5, 0.5],
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.5,
-            },
-          },
         ],
       },
     ],
@@ -3099,19 +2801,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              height: 1.6,
-              speed: 0.8,
-              opacity: 0.8,
-              gain: 1.2,
-              midGain: 1.2,
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -3127,26 +2817,10 @@ const DEFAULT_SCENES = [
               numColors: 7,
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 8,
-              intensity: 0.5,
-            },
-          },
         ],
       },
     ],
-    inputLinks: [
-      {
-        group: "Foreground",
-        module: "Point10 Waveform",
-        control: "alpha",
-        feature: "bass",
-        min: 0.2,
-        max: 0.85,
-      },
-    ],
+    inputLinks: [],
   },
 
   {
@@ -3180,18 +2854,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Waveform",
-            props: {
-              strokeWeight: 2,
-              maxHeight: 65,
-              maxWidth: 0.85,
-              windowing: "hanning",
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -3209,26 +2872,10 @@ const DEFAULT_SCENES = [
               shift: 0.45,
             },
           },
-          {
-            name: "Posterize",
-            props: {
-              gamma: 1.15,
-              numColors: 8,
-            },
-          },
         ],
       },
     ],
-    inputLinks: [
-      {
-        group: "Foreground",
-        module: "Waveform",
-        control: "alpha",
-        feature: "bass",
-        min: 0.15,
-        max: 0.8,
-      },
-    ],
+    inputLinks: [],
   },
 
   {
@@ -3283,14 +2930,6 @@ const DEFAULT_SCENES = [
         alpha: 1,
         compositeOperation: "normal",
         modules: [
-          {
-            name: "Twirl",
-            props: {
-              radius: 0.85,
-              amount: 2.1,
-              center: [0.5, 0.5],
-            },
-          },
           {
             name: "Bloom",
             props: {
@@ -3365,25 +3004,10 @@ const DEFAULT_SCENES = [
         compositeOperation: "normal",
         modules: [
           {
-            name: "Twirl",
-            props: {
-              radius: 1,
-              amount: 3.2,
-              center: [0.5, 0.5],
-            },
-          },
-          {
             name: "Mirror",
             props: {
               horizontal: true,
               vertical: false,
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 9,
-              intensity: 0.55,
             },
           },
         ],
@@ -3456,13 +3080,6 @@ const DEFAULT_SCENES = [
               amount: 0.35,
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.5,
-            },
-          },
         ],
       },
     ],
@@ -3508,16 +3125,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Bar",
-            props: {
-              thickness: 2,
-              strobe: 0,
-            },
-            meta: { alpha: 0.65, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -3530,13 +3138,6 @@ const DEFAULT_SCENES = [
             name: "ASCII Art",
             props: {
               amount: 0.5,
-            },
-          },
-          {
-            name: "Hue-Saturation",
-            props: {
-              hue: 0.08,
-              saturation: 0.3,
             },
           },
         ],
@@ -3583,18 +3184,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Waveform",
-            props: {
-              strokeWeight: 2,
-              maxHeight: 60,
-              maxWidth: 0.85,
-              windowing: "hanning",
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -3608,12 +3198,6 @@ const DEFAULT_SCENES = [
             props: {
               gridSize: 45,
               smoothing: 0.15,
-            },
-          },
-          {
-            name: "Pixellate",
-            props: {
-              cell_size: 0.05,
             },
           },
         ],
@@ -3678,13 +3262,6 @@ const DEFAULT_SCENES = [
               intensity: 40,
               threshold: 0.1,
               sobel: true,
-            },
-          },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 18,
-              extension: 0.3,
             },
           },
         ],
@@ -3761,13 +3338,6 @@ const DEFAULT_SCENES = [
               matrixMode: 2,
             },
           },
-          {
-            name: "Dot Screen",
-            props: {
-              angle: 0.3,
-              scale: 4,
-            },
-          },
         ],
       },
     ],
@@ -3837,13 +3407,6 @@ const DEFAULT_SCENES = [
               levels: 12,
             },
           },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 8,
-              intensity: 0.55,
-            },
-          },
         ],
       },
     ],
@@ -3908,13 +3471,6 @@ const DEFAULT_SCENES = [
               postRotateAngle: 0,
             },
           },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 20,
-              extension: 0.35,
-            },
-          },
         ],
       },
     ],
@@ -3961,19 +3517,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Waveform",
-            props: {
-              height: 1.5,
-              speed: 1,
-              opacity: 0.8,
-              gain: 1.2,
-              midGain: 1.25,
-            },
-            meta: { alpha: 0.7, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -3982,13 +3526,6 @@ const DEFAULT_SCENES = [
         alpha: 1,
         compositeOperation: "normal",
         modules: [
-          {
-            name: "RGB Halftone",
-            props: {
-              gridSize: 50,
-              smoothing: 0.12,
-            },
-          },
           {
             name: "Bloom",
             props: {
@@ -3999,16 +3536,7 @@ const DEFAULT_SCENES = [
         ],
       },
     ],
-    inputLinks: [
-      {
-        group: "Foreground",
-        module: "Point10 Waveform",
-        control: "alpha",
-        feature: "bass",
-        min: 0.15,
-        max: 0.8,
-      },
-    ],
+    inputLinks: [],
   },
 
   {
@@ -4067,13 +3595,6 @@ const DEFAULT_SCENES = [
               intensity: 2,
               colorize: 0.5,
               brightness: 0.5,
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.5,
             },
           },
         ],
@@ -4153,13 +3674,6 @@ const DEFAULT_SCENES = [
               spread: 5,
             },
           },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 16,
-              extension: 0.28,
-            },
-          },
         ],
       },
     ],
@@ -4227,13 +3741,6 @@ const DEFAULT_SCENES = [
               rOffset: 1,
               gOffset: 1.01,
               bOffset: 1.02,
-            },
-          },
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 5,
-              intensity: 0.45,
             },
           },
         ],
@@ -4317,13 +3824,6 @@ const DEFAULT_SCENES = [
         alpha: 1,
         compositeOperation: "normal",
         modules: [
-          {
-            name: "Bloom",
-            props: {
-              blurAmount: 6,
-              intensity: 0.5,
-            },
-          },
           {
             name: "Vignette",
             props: {
@@ -4532,13 +4032,6 @@ const DEFAULT_SCENES = [
               intensity: 0.4,
             },
           },
-          {
-            name: "Vignette",
-            props: {
-              intensity: 18,
-              extension: 0.3,
-            },
-          },
         ],
       },
     ],
@@ -4550,6 +4043,198 @@ const DEFAULT_SCENES = [
         feature: "bass",
         min: 0,
         max: 1,
+      },
+    ],
+  },
+
+  // Version 9 adds deliberately sparse Scenes. A Scene does not need a
+  // Background, Foreground and Effects layer stack - a single Group is just as
+  // valid, and an effect can live in any Group (a filter chained after a
+  // generator in the Foreground works exactly like it does in Effects).
+  {
+    name: "Still Water",
+    introducedVersion: 9,
+    minSeconds: 16,
+    maxSeconds: 34,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Water Ripple",
+            props: {
+              gain: 1.05,
+              bassGain: 1.1,
+              midGain: 0.9,
+              trebleGain: 0.8,
+              smoothing: 0.35,
+              useAgc: true,
+              speed: 0.55,
+              distortion: 0.5,
+              radius: 1,
+              brightness: 0.9,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Ember Drift",
+    introducedVersion: 9,
+    minSeconds: 14,
+    maxSeconds: 30,
+    groups: [
+      {
+        name: "Background",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            // Ball Of Fire and DVD Room are deliberately background-free, so
+            // they cannot be the only layer of a Background-only Scene.
+            // Mycelium paints its own opaque frame and reads as warm embers.
+            name: "Point10 Mycelium",
+            props: {
+              gain: 1.05,
+              bassGain: 1.15,
+              midGain: 0.95,
+              trebleGain: 0.8,
+              smoothing: 0.3,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Lone Chrome",
+    introducedVersion: 9,
+    minSeconds: 14,
+    maxSeconds: 30,
+    groups: [
+      {
+        name: "Foreground",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Chromatic Line",
+            props: {
+              gain: 1.05,
+              bassGain: 1.05,
+              midGain: 1.1,
+              trebleGain: 1,
+              smoothing: 0.22,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Silk Ribbon",
+    introducedVersion: 9,
+    minSeconds: 14,
+    maxSeconds: 30,
+    groups: [
+      {
+        name: "Foreground",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Point10 Chromatic Wave",
+            props: {
+              gain: 1.05,
+              midGain: 1.1,
+              trebleGain: 0.9,
+              smoothing: 0.28,
+            },
+          },
+          // An effect chained inside the Foreground group: the filter reads the
+          // generator drawn just before it.
+          {
+            name: "Chromatic Abberation",
+            props: {
+              rOffset: 1,
+              gOffset: 1.006,
+              bOffset: 1.012,
+            },
+            meta: { alpha: 0.8 },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Soft Bands",
+    introducedVersion: 9,
+    minSeconds: 12,
+    maxSeconds: 28,
+    groups: [
+      {
+        name: "Effects",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            name: "Bands",
+            props: {
+              u_ringWidth: 0.06,
+            },
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    name: "Quiet Bloom",
+    introducedVersion: 9,
+    minSeconds: 14,
+    maxSeconds: 30,
+    groups: [
+      {
+        name: "Effects",
+        inherit: false,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
+          {
+            // Bands lives in the Effects gallery and draws its own spectrum,
+            // so an Effects-only Scene needs no Background group. (Mesmer is
+            // a 2D Scene, not an effect, and does not belong in this row.)
+            name: "Bands",
+            props: {
+              u_ringWidth: 0.05,
+            },
+          },
+          {
+            name: "Bloom",
+            props: {
+              blurAmount: 6,
+              intensity: 0.35,
+            },
+          },
+        ],
       },
     ],
   },

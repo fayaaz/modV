@@ -74,4 +74,12 @@
 - [x] Remove Fractured Kaleidoscope (done in DEFAULTS_VERSION 8 retirement migration; see above)
 - [x] Remove Broken Mirror Ball (done in DEFAULTS_VERSION 8 retirement migration; see above)
 - [x] Add a preset with rave.exe (done in DEFAULTS_VERSION 8; new Rave.exe default Scene — rave.exe background with the kick mapped to bass, Point10 Digital Glitch foreground and Bloom/Vignette effects)
+- [x] A lot of presets are too busy or twitchy. Refine the default Scenes using the built AppImage (done in DEFAULTS_VERSION 9; redundant second effects and duplicate foreground layers removed across the defaults, e.g. 2-3 filter chains reduced to one effect, and Burning Mycelium Circle, Chromatic Cascade and Waveform Drive now use two Groups)
+- [x] Not every preset needs a Background, Foreground and Effects group. Add Scenes with only an Effect, only a Foreground or only a Background (done in DEFAULTS_VERSION 9; Still Water and Ember Drift are Background-only, Lone Chrome is Foreground-only, Soft Bands and Quiet Bloom are Effects-only)
+- [x] Effects need not go in the Effects group - chain an effect in a Foreground (done in DEFAULTS_VERSION 9; Silk Ribbon chains Chromatic Abberation after Point10 Chromatic Wave inside its Foreground group)
+- [x] Remove Twirl from all presets except It Twirls At Night (done in DEFAULTS_VERSION 9; Twirl Reactor/Twirl Grid/Twirled Feedback are renamed Reactor Glow/Polygon Grid/Feedback Bloom and keep non-twirl effects)
+- [x] Remove RGB Halftone from any preset effects (done in DEFAULTS_VERSION 9; Circuit Ritual now uses Bloom only)
+- [x] If Strobe is used as an effect it needs to be a lot more subtle and synced to the beat (done in DEFAULTS_VERSION 9; Strobe Riot runs Strobe at alpha 0.16 with a beat-length period driven by a BPM tween)
+- [x] Remove all waveforms and bars from the presets, leaving the rows empty rather than replacing them (done in DEFAULTS_VERSION 9; plain Waveform, Point10 Waveform and Bar are gone and their Groups stay as empty rows. Chromatic Wave is kept)
+- [x] Mesmer is a 2D Scene, not an effect - keep it out of Effects rows (done; Quiet Bloom's Effects row now uses Bands + Bloom, both Effects-gallery modules)
 - Add a preset

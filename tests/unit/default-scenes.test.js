@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import DEFAULT_SCENES, {
   DEFAULTS_VERSION,
+  REFRESHED_DEFAULT_SCENES,
   REMOVED_DEFAULT_SCENES,
   getDefaultSceneNamesUpTo,
   getDefaultScenesToRemove,
@@ -19,14 +20,13 @@ const AUDIO_GLITCH_MODULES = [
 
 const KALEIDOSCOPE_MODULES = ["Kaleidoscope", "Kaleidoscope Tile"];
 
-const TWIRL_MODULES = [
-  "Twirl",
-  "Spiral",
-  "UltimateSpiral",
-  "rotozoomer",
-  "Point10 Swirl Grid",
-  "Point10 Banded Swirl",
-  "Point10 Smooth Swirl Grid",
+const EFFECT_MODULES = [
+  "Bloom",
+  "Chromatic Abberation",
+  "Vignette",
+  "Mirror",
+  "VHS Glitch",
+  "RGB Halftone",
 ];
 
 const sceneKey = (name) =>
@@ -83,8 +83,8 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 8", () => {
-    expect(DEFAULTS_VERSION).toBe(8);
+  it("bumps the defaults version to 9", () => {
+    expect(DEFAULTS_VERSION).toBe(9);
   });
 
   it("ships at least 54 default scenes with unique names", () => {
@@ -300,9 +300,9 @@ describe("default scenes", () => {
     expect(
       DEFAULT_SCENES.some((candidate) => candidate.name === "Cube Floor Drive"),
     ).toBe(false);
-    expect(getModulesInGroup(scene, "Background")).toContain(
-      "Point10 Waveform",
-    );
+    // The background Waveform was removed in version 9 and the row is left
+    // empty rather than filled with a replacement.
+    expect(getModulesInGroup(scene, "Background")).toEqual([]);
   });
 
   it("adds the version 7 Circular Mountain scene", () => {
@@ -394,21 +394,59 @@ describe("default scenes", () => {
     expect(offenders.map((scene) => scene.name)).toEqual([]);
   });
 
-  it("gives every scene the three required groups with the right inherit flags", () => {
+  it("lets a Scene use any subset of the Group roles", () => {
     for (const scene of DEFAULT_SCENES) {
       const groupNames = scene.groups.map((group) => group.name);
 
-      expect(groupNames).toEqual(expect.arrayContaining(GROUP_NAMES));
+      expect(groupNames.length).toBeGreaterThanOrEqual(1);
+      expect(groupNames.length).toBeLessThanOrEqual(GROUP_NAMES.length);
+      expect(new Set(groupNames).size).toBe(groupNames.length);
 
-      for (const group of scene.groups) {
+      for (const name of groupNames) {
+        expect(GROUP_NAMES).toContain(name);
+      }
+
+      for (let i = 0; i < scene.groups.length; i++) {
+        const group = scene.groups[i];
+
         expect(Array.isArray(group.modules)).toBe(true);
-        expect(group.modules.length).toBeGreaterThan(0);
-        expect(group.inherit).toBe(group.name !== "Background");
+        // An intentionally empty Group is allowed - Scenes may leave a row
+        // blank instead of filling it with a replacement visual.
+        // The first Group is the base layer; later Groups inherit the frame
+        // produced by the row above.
+        expect(group.inherit).toBe(i > 0);
         expect(typeof group.clearing).toBe("boolean");
         expect(typeof group.alpha).toBe("number");
         expect(typeof group.compositeOperation).toBe("string");
       }
+
+      expect(getModuleNames(scene).length).toBeGreaterThan(0);
     }
+  });
+
+  it("does not use plain Waveform or Bar modules", () => {
+    const banned = ["Waveform", "Point10 Waveform", "Bar"];
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).some((name) => banned.includes(name)),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("leaves rows empty rather than replacing a removed waveform or bar", () => {
+    const emptyGroups = DEFAULT_SCENES.flatMap((scene) =>
+      scene.groups
+        .filter((group) => group.modules.length === 0)
+        .map((group) => `${scene.name}:${group.name}`),
+    );
+
+    expect(emptyGroups).toEqual(
+      expect.arrayContaining([
+        "Mycelium Bloom:Foreground",
+        "Waveform Drive:Background",
+        "Terminal Bloom:Foreground",
+      ]),
+    );
   });
 
   it("gives every scene a sensible duration", () => {
@@ -419,22 +457,65 @@ describe("default scenes", () => {
     }
   });
 
-  it("uses an audio reactive glitch effect in every new scene", () => {
-    for (const scene of newBatch) {
-      const names = getModuleNames(scene);
-
-      expect(names.some((name) => AUDIO_GLITCH_MODULES.includes(name))).toBe(
-        true,
-      );
-    }
-  });
-
-  it("uses a twirled geometric filter in the new batch", () => {
-    const twirlScenes = newBatch.filter((scene) =>
-      getModuleNames(scene).some((name) => TWIRL_MODULES.includes(name)),
+  it("uses an audio reactive glitch effect in most of the new batch", () => {
+    const withGlitch = newBatch.filter((scene) =>
+      getModuleNames(scene).some((name) => AUDIO_GLITCH_MODULES.includes(name)),
     );
 
-    expect(twirlScenes.length).toBeGreaterThanOrEqual(3);
+    // The batch is glitch-led, but not every Scene needs one on top of its
+    // other layers - the busy defaults were trimmed back in version 9.
+    expect(withGlitch.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("keeps Twirl only in It Twirls At Night", () => {
+    const twirlScenes = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Twirl"),
+    );
+
+    expect(twirlScenes.map((scene) => scene.name)).toEqual([
+      "It Twirls At Night",
+    ]);
+  });
+
+  it("does not use RGB Halftone in any default scene", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("RGB Halftone"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("does not put the Mesmer 2D Scene in an Effects group", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModulesInGroup(scene, "Effects").includes("Mesmer"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("keeps Strobe subtle and synced to the beat", () => {
+    const scene = DEFAULT_SCENES.find(
+      (candidate) => candidate.name === "Strobe Riot",
+    );
+
+    expect(scene).toBeTruthy();
+
+    const strobe = getGroup(scene, "Effects").modules.find(
+      (module) => module.name === "Strobe",
+    );
+
+    expect(strobe).toBeTruthy();
+    expect(strobe.meta.alpha).toBeLessThanOrEqual(0.25);
+    expect(Number(strobe.props.strobeRate)).toBeGreaterThanOrEqual(0.4);
+
+    const link = (scene.inputLinks || []).find(
+      (candidate) =>
+        candidate.module === "Strobe" && candidate.control === "strobeRate",
+    );
+
+    expect(link).toMatchObject({ group: "Effects", source: "tween" });
+    expect(link.min).toBeLessThan(link.max);
+    expect(link.bpmDivision).toBeGreaterThan(0);
   });
 
   it("keeps a glitch effect in the foreground group only in some scenes", () => {
@@ -709,11 +790,9 @@ describe("version 8 default scenes", () => {
     expect(rain.props.speed).toBe(0);
     expect(rain.props.swirl).toBeCloseTo(0.5642799587694213, 10);
     expect(rain.meta.alpha).toBeCloseTo(0.607261398057038, 10);
-    expect(
-      foreground.modules.some(
-        (module) => module.name === "Bar" && module.meta?.enabled === false,
-      ),
-    ).toBe(true);
+    expect(foreground.modules.some((module) => module.name === "Bar")).toBe(
+      false,
+    );
 
     const effects = getGroup(scene, "Effects");
     const glitch = effects.modules.find(
@@ -951,6 +1030,136 @@ describe("version 8 default scenes", () => {
     for (const removed of REMOVED_DEFAULT_SCENES) {
       expect(names).not.toContain(removed);
     }
+  });
+});
+
+describe("version 9 sparse default scenes", () => {
+  const sparseBatch = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 9,
+  );
+
+  it("adds Background-only, Foreground-only and Effects-only Scenes", () => {
+    expect(sparseBatch.length).toBeGreaterThanOrEqual(5);
+
+    const only = (groupName) =>
+      sparseBatch.filter(
+        (scene) =>
+          scene.groups.length === 1 && scene.groups[0].name === groupName,
+      );
+
+    expect(only("Background").length).toBeGreaterThanOrEqual(1);
+    expect(only("Foreground").length).toBeGreaterThanOrEqual(1);
+    expect(only("Effects").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("chains an effect inside a Foreground group", () => {
+    const chained = sparseBatch.filter((scene) => {
+      const foreground = scene.groups.find(
+        (group) => group.name === "Foreground",
+      );
+      const names = (foreground?.modules || []).map((module) => module.name);
+      const hasGenerator = names.some((name) => !EFFECT_MODULES.includes(name));
+
+      return (
+        hasGenerator && names.some((name) => EFFECT_MODULES.includes(name))
+      );
+    });
+
+    expect(chained.length).toBeGreaterThanOrEqual(1);
+    expect(
+      chained.some((scene) =>
+        scene.groups
+          .find((group) => group.name === "Foreground")
+          .modules.some((module) => module.name === "Chromatic Abberation"),
+      ),
+    ).toBe(true);
+  });
+
+  it("seeds the version 9 batch for installs on version 8", () => {
+    const selected = getScenesToSeed({
+      defaultsVersion: 8,
+      seededNames: getDefaultSceneNamesUpTo(8),
+      existingNames: [],
+    });
+    const newerBatch = DEFAULT_SCENES.filter(
+      (scene) => scene.introducedVersion > 8,
+    );
+
+    expect(selected.map((scene) => scene.name)).toEqual(
+      newerBatch.map((scene) => scene.name),
+    );
+  });
+});
+
+describe("version 9 default scene refresh", () => {
+  const seededScene = (name) => ({ id: `${name}-id`, name, modules: {} });
+
+  it("rebuilds the trimmed seeded defaults for installs on version 8", () => {
+    const scenes = [
+      seededScene("Circuit Ritual"),
+      seededScene("Burning Mycelium Circle"),
+    ];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 8,
+      scenes,
+      removedModuleNames: [],
+      seededNames: scenes.map((scene) => scene.name),
+    });
+    const names = result.replacements.map((replacement) => replacement.name);
+
+    expect(names).toEqual(
+      expect.arrayContaining(["Circuit Ritual", "Burning Mycelium Circle"]),
+    );
+
+    const circuit = result.replacements.find(
+      (replacement) => replacement.name === "Circuit Ritual",
+    );
+
+    expect(circuit.id).toBe("Circuit Ritual-id");
+    expect(
+      circuit.definition.groups.flatMap((group) =>
+        group.modules.map((module) => module.name),
+      ),
+    ).not.toContain("RGB Halftone");
+
+    const burning = result.replacements.find(
+      (replacement) => replacement.name === "Burning Mycelium Circle",
+    );
+
+    expect(burning.definition.groups.map((group) => group.name)).toEqual([
+      "Background",
+      "Effects",
+    ]);
+  });
+
+  it("lists the Scenes whose definitions changed", () => {
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Circuit Ritual");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Strobe Riot");
+    expect(REFRESHED_DEFAULT_SCENES).not.toContain("It Twirls At Night");
+  });
+
+  it("does not overwrite user Scenes that were not seeded", () => {
+    const scenes = [seededScene("Circuit Ritual")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 8,
+      scenes,
+      removedModuleNames: [],
+      seededNames: [],
+    });
+
+    expect(result.replacements).toEqual([]);
+  });
+
+  it("does not refresh installs already on version 9", () => {
+    const scenes = [seededScene("Circuit Ritual")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: DEFAULTS_VERSION,
+      scenes,
+      removedModuleNames: [],
+      seededNames: ["Circuit Ritual"],
+    });
+
+    expect(result.replacements).toEqual([]);
   });
 });
 

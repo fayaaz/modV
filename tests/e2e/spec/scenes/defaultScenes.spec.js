@@ -41,14 +41,13 @@ const FILTER_MODULES = [
   "RGB Halftone",
 ];
 
-const TWIRL_MODULES = [
-  "Twirl",
-  "Spiral",
-  "UltimateSpiral",
-  "rotozoomer",
-  "Point10 Swirl Grid",
-  "Point10 Banded Swirl",
-  "Point10 Smooth Swirl Grid",
+const EFFECT_MODULES = [
+  "Bloom",
+  "Chromatic Abberation",
+  "Vignette",
+  "Mirror",
+  "VHS Glitch",
+  "RGB Halftone",
 ];
 
 const sceneKey = (name) =>
@@ -89,15 +88,21 @@ test("every default scene references registered modules and valid groups", async
   const registeredNames = new Set(Object.keys(registered));
 
   for (const scene of DEFAULT_SCENES) {
-    expect(scene.groups.length).toBeGreaterThanOrEqual(GROUP_NAMES.length);
+    expect(scene.groups.length).toBeGreaterThanOrEqual(1);
+    expect(scene.groups.length).toBeLessThanOrEqual(GROUP_NAMES.length);
 
     const groupNames = scene.groups.map((group) => group.name);
-    expect(groupNames).toEqual(expect.arrayContaining(GROUP_NAMES));
+    expect(new Set(groupNames).size).toBe(groupNames.length);
 
-    for (const group of scene.groups) {
+    for (const name of groupNames) {
+      expect(GROUP_NAMES).toContain(name);
+    }
+
+    for (let i = 0; i < scene.groups.length; i++) {
+      const group = scene.groups[i];
+
       expect(Array.isArray(group.modules)).toBe(true);
-      expect(group.modules.length).toBeGreaterThan(0);
-      expect(group.inherit).toBe(group.name !== "Background");
+      expect(group.inherit).toBe(i > 0);
 
       for (const module of group.modules) {
         expect(typeof module.name).toBe("string");
@@ -108,6 +113,37 @@ test("every default scene references registered modules and valid groups", async
 
     expect(Number(scene.minSeconds)).toBeLessThan(Number(scene.maxSeconds));
   }
+});
+
+test("no default scene uses plain Waveform or Bar modules", () => {
+  const banned = ["Waveform", "Point10 Waveform", "Bar"];
+  const offenders = DEFAULT_SCENES.filter((scene) =>
+    getModuleNames(scene).some((name) => banned.includes(name)),
+  );
+
+  expect(offenders.map((scene) => scene.name)).toEqual([]);
+
+  const emptyGroups = DEFAULT_SCENES.flatMap((scene) =>
+    scene.groups
+      .filter((group) => (group.modules || []).length === 0)
+      .map((group) => `${scene.name}:${group.name}`),
+  );
+
+  expect(emptyGroups).toEqual(
+    expect.arrayContaining([
+      "Mycelium Bloom:Foreground",
+      "Waveform Drive:Background",
+      "Terminal Bloom:Foreground",
+    ]),
+  );
+});
+
+test("does not put the Mesmer 2D Scene in an Effects group", () => {
+  const offenders = DEFAULT_SCENES.filter((scene) =>
+    getEffectsModuleNames(scene).includes("Mesmer"),
+  );
+
+  expect(offenders.map((scene) => scene.name)).toEqual([]);
 });
 
 test("uses a spread of registered ISF filters in Effects groups", async () => {
@@ -143,13 +179,13 @@ test("uses a spread of registered ISF filters in Effects groups", async () => {
   ).toBe(true);
 });
 
-test("ships a version 3 batch of glitch and twirl scenes", async () => {
+test("ships a version 3 batch of glitch scenes", async () => {
   const registered = await modVApp.evaluateWorkerState("modules.registered");
   const newBatch = DEFAULT_SCENES.filter(
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(8);
+  expect(DEFAULTS_VERSION).toBe(9);
   expect(newBatch.length).toBeGreaterThanOrEqual(10);
 
   for (const scene of newBatch) {
@@ -158,11 +194,15 @@ test("ships a version 3 batch of glitch and twirl scenes", async () => {
     for (const name of names) {
       expect(registered[name]).toBeDefined();
     }
-
-    expect(names.some((name) => AUDIO_GLITCH_MODULES.includes(name))).toBe(
-      true,
-    );
   }
+
+  const withGlitch = newBatch.filter((scene) =>
+    getModuleNames(scene).some((name) => AUDIO_GLITCH_MODULES.includes(name)),
+  );
+
+  // Most of the batch is glitch-led, but a Scene does not need an extra effect
+  // stacked on top of its layers for the sake of it.
+  expect(withGlitch.length).toBeGreaterThanOrEqual(8);
 
   const audioReactive = AUDIO_GLITCH_MODULES.filter(
     (name) =>
@@ -172,11 +212,19 @@ test("ships a version 3 batch of glitch and twirl scenes", async () => {
 
   expect(audioReactive.length).toBe(AUDIO_GLITCH_MODULES.length);
 
-  const twirlScenes = newBatch.filter((scene) =>
-    getModuleNames(scene).some((name) => TWIRL_MODULES.includes(name)),
+  const twirlScenes = DEFAULT_SCENES.filter((scene) =>
+    getModuleNames(scene).includes("Twirl"),
   );
 
-  expect(twirlScenes.length).toBeGreaterThanOrEqual(3);
+  expect(twirlScenes.map((scene) => scene.name)).toEqual([
+    "It Twirls At Night",
+  ]);
+
+  const rgbHalftoneScenes = DEFAULT_SCENES.filter((scene) =>
+    getModuleNames(scene).includes("RGB Halftone"),
+  );
+
+  expect(rgbHalftoneScenes.map((scene) => scene.name)).toEqual([]);
 
   const foregroundOnly = newBatch.filter((scene) => {
     const foreground = getGroupModules(scene, "Foreground");
@@ -385,7 +433,7 @@ test("version 7 replaces Cube Floor and ships Circular Mountain", () => {
     (scene) => scene.name === "Circular Mountain",
   );
 
-  expect(DEFAULTS_VERSION).toBe(8);
+  expect(DEFAULTS_VERSION).toBe(9);
   expect(circularMountain).toBeTruthy();
   expect(getGroupModules(circularMountain, "Background")).toEqual([
     "fractal-mountain-tunnel",
@@ -405,6 +453,36 @@ test("version 7 replaces Cube Floor and ships Circular Mountain", () => {
   expect(DEFAULT_SCENES.some((scene) => scene.name === "Waveform Drive")).toBe(
     true,
   );
+});
+
+test("version 9 adds single-Group and foreground-chained Scenes", () => {
+  const sparse = DEFAULT_SCENES.filter(
+    (scene) => scene.introducedVersion === 9,
+  );
+
+  expect(sparse.length).toBeGreaterThanOrEqual(5);
+
+  const only = (groupName) =>
+    sparse.filter(
+      (scene) =>
+        scene.groups.length === 1 && scene.groups[0].name === groupName,
+    );
+
+  expect(only("Background").length).toBeGreaterThanOrEqual(1);
+  expect(only("Foreground").length).toBeGreaterThanOrEqual(1);
+  expect(only("Effects").length).toBeGreaterThanOrEqual(1);
+
+  const chained = sparse.filter((scene) => {
+    const foreground = scene.groups.find(
+      (group) => group.name === "Foreground",
+    );
+    const names = (foreground?.modules || []).map((module) => module.name);
+    const hasGenerator = names.some((name) => !EFFECT_MODULES.includes(name));
+
+    return hasGenerator && names.some((name) => EFFECT_MODULES.includes(name));
+  });
+
+  expect(chained.length).toBeGreaterThanOrEqual(1);
 });
 
 test("MBOX Light Tunnel seeds a BPM hue tween, bass scale and constant speed", async () => {
