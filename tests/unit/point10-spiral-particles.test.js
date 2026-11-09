@@ -1,27 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { AudioBands } from "../../src/renderer/src/application/audio-bands.js";
 import { Point10AudioBridge } from "../../src/renderer/src/application/point10/audioBridge.js";
-import { SpiralParticles } from "../../src/renderer/src/application/point10/scenes/SpiralParticles.js";
-
-// SpiralParticles builds a 32x32 sprite through createCanvas(). Node has no
-// OffscreenCanvas, so give the scene a canvas-shaped stub with the 2D calls it
-// makes; THREE.CanvasTexture only needs the image dimensions.
-class StubOffscreenCanvas {
-  constructor(width, height) {
-    this.width = width;
-    this.height = height;
-  }
-
-  getContext() {
-    return {
-      createRadialGradient: () => ({ addColorStop() {} }),
-      fillRect() {},
-      set fillStyle(value) {},
-    };
-  }
-}
-
-vi.stubGlobal("OffscreenCanvas", StubOffscreenCanvas);
+import {
+  CLEAR_ALPHA,
+  SpiralParticles,
+} from "../../src/renderer/src/application/point10/scenes/SpiralParticles.js";
 
 const levers = {
   gain: 1,
@@ -60,6 +43,22 @@ function snapshot(scene) {
     colors: Array.from(scene.geometry.attributes.color.array),
   };
 }
+
+describe("SpiralParticles transparency", () => {
+  it("clears to a fully transparent background", () => {
+    expect(CLEAR_ALPHA).toBe(0);
+
+    const renderer = { setClearColor: vi.fn() };
+    const scene = new SpiralParticles(renderer, null);
+
+    expect(renderer.setClearColor).toHaveBeenCalledWith(0x000000, 0);
+    expect(scene.material.transparent).toBe(true);
+    expect(scene.material.depthWrite).toBe(false);
+    // The sprite's transparent border is discarded instead of blended, so the
+    // point quads never leave a dark square against the transparent clear.
+    expect(scene.material.alphaTest).toBeGreaterThan(0);
+  });
+});
 
 describe("SpiralParticles", () => {
   it("uses the shared circular sprite map instead of a square point", () => {

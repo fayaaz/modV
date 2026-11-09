@@ -2,6 +2,10 @@ import { BaseScene } from "../BaseScene.js";
 import * as THREE from "three";
 import { createParticleTexture } from "../shared/particleSprite.js";
 
+// The spiral is a particle overlay: empty space stays fully transparent so it
+// composites over whatever is behind it instead of painting a black frame.
+export const CLEAR_ALPHA = 0;
+
 export class SpiralParticles extends BaseScene {
   constructor(renderer, camera) {
     super(renderer, camera);
@@ -58,11 +62,16 @@ export class SpiralParticles extends BaseScene {
       opacity: 0.9,
       sizeAttenuation: true,
       map: createParticleTexture(32),
+      alphaTest: 0.01,
       depthWrite: false,
     });
 
     this.points = new THREE.Points(this.geometry, this.material);
     this.group.add(this.points);
+
+    if (this.renderer) {
+      this.renderer.setClearColor(0x000000, CLEAR_ALPHA);
+    }
   }
 
   update(dt, audioData) {
