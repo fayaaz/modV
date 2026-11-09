@@ -66,6 +66,10 @@ RUN apt-get update \
       libnss3 \
       libasound2t64 \
       libgbm1 \
+      libegl1 \
+      libgles2 \
+      libvulkan1 \
+      mesa-vulkan-drivers \
       libxss1 \
       libxtst6 \
       libx11-xcb1 \

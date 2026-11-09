@@ -15,7 +15,7 @@ All yarn work is Dockerised. The host only needs Docker (with Buildx) and make �
 - `make lint` — Dockerised `yarn lint` (`eslint . --fix`, Prettier runs through ESLint).
 - `make format` — Dockerised `yarn format`.
 - `make test-unit` — Dockerised Vitest unit tests (`tests/unit/**/*.test.js`, Node environment). Single file: `make test-unit ARGS="tests/unit/<name>.test.js"`. Watch mode: `make yarn ARGS="test:unit:watch"`.
-- `make test-e2e` — Dockerised Playwright. Electron is launched with `--no-sandbox` and the Wayland/X11, PulseAudio and GPU forwarding above. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`. WebGPU Point10 scenes do not present in this container (see "Debugging the built app on a real GPU" below); use the host AppImage + CDP for those.
+- `make test-e2e` — Dockerised Playwright. Electron is launched with `--no-sandbox` and the X11, PulseAudio and GPU forwarding above. **Requires `make build` first**: the page object launches the built app from `./dist` via `findLatestBuild`, falling back to extracting the newest AppImage. Single spec: `make test-e2e ARGS="tests/e2e/spec/<name>.spec.js"`. The toolchain installs `mesa-vulkan-drivers`, so WebGPU Point10 scenes run in the container. (`--device /dev/dri` alone is not enough; the Vulkan ICD is required.) `make test-e2e-all` is an alias for the same full X11 pass.
 - `make yarn ARGS="<args>"` — any other yarn command, e.g. `make yarn ARGS="add three"`.
 - `make docker-reset` — delete the `modv-node-modules` volume; the next yarn target reseeds it from the toolchain image (use after dependency changes if `make install` is not enough).
 - `make shell` — interactive shell in the toolchain container with the repo bind-mounted.
@@ -175,11 +175,13 @@ Known flake: `performance mode dwell advances in real time` can still take the E
 
 Known flake: `scenes/performanceTransitions.spec.js` fails one of its four tests on a full-suite run, and it is a different test each time (the transition specs time out waiting for the shader to compile). It reproduces on an unmodified checkout, so it is a GPU-load artefact of the shared device rather than a regression. Re-run the spec on its own to confirm.
 
+`make test-e2e` always runs through XWayland. Chromium cannot initialise Vulkan on Ozone Wayland (`'--ozone-platform=wayland' is not compatible with Vulkan`) and the GPU process crashes when a WebGPU scene runs natively, so keeping the whole suite on X11 lets the WebGPU and non-WebGPU specs run together in one pass. `make dev` still auto-selects Wayland when available.
+
 Runs use **1 worker** (`MODV_E2E_WORKERS` overrides). Every worker launches its own Electron app, and the suite is GPU-bound: two concurrent apps over-subscribe the single GPU and Chromium aborts the renderer (`reason=crashed`, `exitCode=5`), failing whichever specs were running (reproducibly the ISF transition and performance-dwell specs). One worker is as fast as two and stable; use `--workers=2` only with GPU isolation.
 
 ## Debugging the built app on a real GPU (AppImage + CDP)
 
-The Dockerised e2e container cannot exercise WebGPU: the app exposes `navigator.gpu`, but Point10 WebGPU scenes fail while building their TSL pipeline (`THREE.NodeBuilder: Uniform "storageTexture" not implemented.`), so `scene.render()` never settles and no frame is presented. To debug rendering — including WebGPU Point10 scenes — run the built AppImage directly on the host with remote debugging and drive it over CDP with the `browser-harness` skill:
+The Dockerised e2e container can exercise WebGPU now that the toolchain installs `mesa-vulkan-drivers`: without a Vulkan ICD, `WebGPURenderer` silently falls back to its WebGL2 backend, where Point10's `storageTexture` compute passes fail with `THREE.NodeBuilder: Uniform "storageTexture" not implemented.` (`--device /dev/dri` alone only exposes the devices; it does not provide the Vulkan driver.) To debug rendering on the real desktop GPU, run the built AppImage directly with remote debugging and drive it over CDP with the `browser-harness` skill:
 
 ```bash
 make appimage

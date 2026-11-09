@@ -596,6 +596,8 @@ export default {
         return;
       }
 
+      logger.info("the video input was toggled", { deviceId, enabled });
+
       this.switchingVideo = true;
 
       try {
@@ -686,6 +688,11 @@ export default {
           try {
             await track.applyConstraints(constraints);
             this.recordAppliedVideoSettings(id, track);
+            logger.info("applied the video settings in place", {
+              deviceId: id,
+              resolution,
+              frameRate,
+            });
             continue;
           } catch (e) {
             logger.warn("could not apply the video settings in place", {
@@ -697,6 +704,13 @@ export default {
 
         // No live track (for example the camera was removed): fall back to a
         // fresh capture with the requested constraints.
+        logger.warn("restarting the video input for new settings", {
+          deviceId: id,
+          hadLiveTrack: !!track,
+          resolution,
+          frameRate,
+        });
+
         this.stopVideoDevice(id);
 
         await this.$modV.setupMedia({

@@ -2,7 +2,11 @@ import Meyda from "meyda";
 import constants from "./constants";
 import { createLogger } from "./logger";
 import { isSystemAudioSource } from "./system-audio";
-import { shouldReconnectVideoCapture } from "./media-inputs";
+import {
+  buildVideoConstraints,
+  describeCaptureError,
+  shouldReconnectVideoCapture,
+} from "./media-inputs";
 import { buildVideoOptions } from "./video-capabilities";
 
 const logger = createLogger("renderer:setup-media");
@@ -30,19 +34,11 @@ async function getMediaStream({
   }
 
   if (videoSourceId) {
-    const { width, height } = videoResolution || {};
-
-    videoConstraints.video = {
+    videoConstraints.video = buildVideoConstraints({
       deviceId: videoSourceId,
-      frameRate: {
-        ideal: videoFrameRate || 60,
-      },
-    };
-
-    if (width && height) {
-      videoConstraints.video.width = { ideal: width };
-      videoConstraints.video.height = { ideal: height };
-    }
+      resolution: videoResolution,
+      frameRate: videoFrameRate,
+    });
   }
 
   /* Ask for user media access */
@@ -63,6 +59,7 @@ async function setupMedia({
   videoResolution,
   videoFrameRate,
   audioStream,
+  allowMutedRestart = false,
 } = {}) {
   const { mediaDeviceManager } = this;
   const mediaStreamState = this._store.state.mediaStream;
@@ -126,7 +123,11 @@ async function setupMedia({
   if (videoId && this._imageCaptures && this._imageCaptures[videoSourceId]) {
     const existingCapture = this._imageCaptures[videoSourceId];
 
-    if (!shouldReconnectVideoCapture(existingCapture)) {
+    if (
+      !shouldReconnectVideoCapture(existingCapture, {
+        allowMuted: allowMutedRestart,
+      })
+    ) {
       mediaDeviceManager.selectVideoDevice(videoSourceId);
       return [undefined, undefined];
     }
@@ -182,7 +183,15 @@ async function setupMedia({
       videoFrameRate,
       audioStream,
     }),
-  );
+  ).catch((e) => {
+    logger.error("could not open the media input", {
+      audioSourceId,
+      videoSourceId,
+      error: e?.name ? `${e.name}: ${e.message}` : String(e),
+    });
+
+    throw e;
+  });
 
   // This video element is required to keep the camera alive for the ImageCapture API
   // (this._imageCapture, ./index.js)
@@ -198,26 +207,60 @@ async function setupMedia({
 
     const [track] = videoMediaStream.getVideoTracks();
     if (track) {
+      const settings =
+        typeof track.getSettings === "function" ? track.getSettings() : {};
+      const actualDeviceId = settings.deviceId;
+
+      if (actualDeviceId && actualDeviceId !== videoSourceId) {
+        logger.warn("the camera opened a different device than requested", {
+          requestedDeviceId: videoSourceId,
+          actualDeviceId,
+          label: track.label,
+        });
+      }
+
+      logger.info("opened the video input", {
+        deviceId: videoSourceId,
+        actualDeviceId,
+        label: track.label,
+        width: settings.width,
+        height: settings.height,
+        frameRate: settings.frameRate,
+      });
+
       // Store ImageCapture per device
       if (!this._imageCaptures) this._imageCaptures = {};
       this._imageCaptures[videoSourceId] = new ImageCapture(track);
 
-      // Re-open the camera if it is unplugged and plugged back in.
+      // Log the states that make a camera stop delivering frames (unplugged,
+      // or idle for long enough that Chromium mutes the track).
       try {
-        track.addEventListener("ended", () =>
-          this.scheduleVideoReconnect?.(videoSourceId),
-        );
+        for (const eventName of ["mute", "unmute", "ended"]) {
+          track.addEventListener(eventName, () => {
+            const data = {
+              deviceId: videoSourceId,
+              label: track.label,
+              readyState: track.readyState,
+              muted: track.muted,
+            };
+
+            if (eventName === "ended") {
+              logger.warn("the video track ended", data);
+              this.scheduleVideoReconnect?.(videoSourceId);
+            } else {
+              logger.info(`the video track ${eventName}`, data);
+            }
+          });
+        }
       } catch (e) {
         logger.warn("could not watch the camera for disconnects", {
           deviceId: videoSourceId,
-          message: e?.message,
+          error: describeCaptureError(e),
         });
       }
 
       // Report back what the device actually gave us
       if (typeof track.getSettings === "function") {
-        const settings = track.getSettings();
-
         // Ask the camera which modes it supports so the picker can offer
         // them instead of a hard-coded list.
         let capabilities = {};
@@ -314,7 +357,7 @@ async function setupMedia({
       newAudioStream.connect(newGainNode);
 
       // Set up Meyda
-      // eslint-disable-next-line new-cap
+
       newMeyda = new Meyda.createMeydaAnalyzer({
         audioContext: newContext,
         source: newGainNode,

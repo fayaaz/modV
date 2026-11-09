@@ -29,14 +29,16 @@ ifeq ($(DISPLAY_BACKEND),auto)
   endif
 endif
 
+# Electron 39+ removed ELECTRON_OZONE_PLATFORM_HINT and selects the Ozone
+# platform from XDG_SESSION_TYPE (defaulting to auto), so forward that instead.
 ifeq ($(DISPLAY_BACKEND),wayland)
   GUI_ENV := -e XDG_RUNTIME_DIR="$(XDG_RUNTIME_DIR)" \
 	-e WAYLAND_DISPLAY="$(WAYLAND_DISPLAY)" \
-	-e ELECTRON_OZONE_PLATFORM_HINT=wayland
+	-e XDG_SESSION_TYPE=wayland
   GUI_MOUNTS := -v "$(XDG_RUNTIME_DIR)":"$(XDG_RUNTIME_DIR)"
   GUI_AUDIO :=
 else
-  GUI_ENV := -e DISPLAY="$(DISPLAY)" -e ELECTRON_OZONE_PLATFORM_HINT=x11
+  GUI_ENV := -e DISPLAY="$(DISPLAY)" -e XDG_SESSION_TYPE=x11
   GUI_MOUNTS := -v /tmp/.X11-unix:/tmp/.X11-unix \
 	$(if $(wildcard $(XAUTHORITY)),-e XAUTHORITY=/tmp/.Xauthority -v "$(XAUTHORITY):/tmp/.Xauthority:ro")
   GUI_AUDIO := $(if $(wildcard $(PULSE_SOCKET)),-e PULSE_SERVER=unix:/tmp/pulse-native -v "$(PULSE_SOCKET):/tmp/pulse-native")
@@ -44,8 +46,18 @@ endif
 
 GUI_RUN_ARGS := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(GUI_ENV) $(GUI_MOUNTS) $(GUI_AUDIO)
 
+# E2E always runs through XWayland. Chromium cannot initialise Vulkan on Ozone
+# Wayland ("'--ozone-platform=wayland' is not compatible with Vulkan"), and the
+# GPU process crashes when a WebGPU scene runs under native Wayland. Running the
+# whole suite through X11 keeps the WebGPU and non-WebGPU specs in one pass.
+X11_GUI_ENV := -e DISPLAY="$(DISPLAY)" -e XDG_SESSION_TYPE=x11
+X11_GUI_MOUNTS := -v /tmp/.X11-unix:/tmp/.X11-unix \
+	$(if $(wildcard $(XAUTHORITY)),-e XAUTHORITY=/tmp/.Xauthority -v "$(XAUTHORITY):/tmp/.Xauthority:ro")
+X11_GUI_AUDIO := $(if $(wildcard $(PULSE_SOCKET)),-e PULSE_SERVER=unix:/tmp/pulse-native -v "$(PULSE_SOCKET):/tmp/pulse-native")
+GUI_RUN_ARGS_X11 := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(X11_GUI_ENV) $(X11_GUI_MOUNTS) $(X11_GUI_AUDIO)
+
 .DEFAULT_GOAL := build
-.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-unit yarn shell rave-reencode
+.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-e2e-all test-unit yarn shell rave-reencode
 
 build:
 	mkdir -p "$(DIST_DIR)"
@@ -121,9 +133,13 @@ lint: docker-node-modules
 format: docker-node-modules
 	$(call run-yarn,format)
 
-test-e2e: DOCKER_RUN_ARGS += $(GUI_RUN_ARGS) -e MODV_E2E_NO_SANDBOX=1
+test-e2e: DOCKER_RUN_ARGS += $(GUI_RUN_ARGS_X11) -e MODV_E2E_NO_SANDBOX=1
 test-e2e: docker-node-modules
 	$(call run-yarn,test:e2e $(ARGS))
+
+# Backwards-compatible alias: the WebGPU and non-WebGPU specs now run together
+# in the one X11 pass.
+test-e2e-all: test-e2e
 
 test-unit: docker-node-modules
 	$(call run-yarn,test:unit $(ARGS))

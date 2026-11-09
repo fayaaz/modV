@@ -1,4 +1,3 @@
-/* eslint-env worker */
 import constants from "../constants";
 import registerPromiseWorker from "promise-worker/register";
 import store from "./store";
@@ -7,6 +6,7 @@ import grabCanvasPlugin from "../plugins/grab-canvas";
 import get from "lodash.get";
 import { tick as frameTick } from "./frame-counter";
 import { getFeatures, setFeatures } from "./audio-features";
+import { drawBitmapAndClose } from "./frame-bitmap";
 import {
   createPresetData,
   isSceneDocument,
@@ -431,7 +431,7 @@ async function start() {
           }
         }
 
-        deviceContext.drawImage(bitmap, 0, 0);
+        drawBitmapAndClose(deviceContext, bitmap);
       }
 
       return;
@@ -470,7 +470,7 @@ async function start() {
           data: { name: label, disconnected: false }, // Always use the human-readable label
         });
       }
-      context.drawImage(bitmap, 0, 0);
+      drawBitmapAndClose(context, bitmap);
       return;
     }
 

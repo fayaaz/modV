@@ -20,6 +20,8 @@ import {
   isSystemAudioSource,
 } from "./system-audio";
 import {
+  describeCaptureError,
+  nextVideoCaptureAction,
   restoreAudioSource,
   restoreVideoSources,
   shouldReconnectVideoCapture,
@@ -34,6 +36,8 @@ import ModVWorker from "./worker/index.worker.js?worker";
 
 const logger = createLogger("renderer:app");
 
+const VIDEO_CAPTURE_RETRY_DELAY_MS = 250;
+
 if (typeof window !== "undefined") {
   window.addEventListener("error", (event) => {
     logger.error("uncaught error in the renderer", {
@@ -46,7 +50,19 @@ if (typeof window !== "undefined") {
   });
 
   window.addEventListener("unhandledrejection", (event) => {
-    logger.error("unhandled rejection in the renderer", event?.reason);
+    const reason = event?.reason;
+    const data =
+      reason instanceof Error
+        ? {
+            name: reason.name,
+            message: reason.message,
+            stack: reason.stack,
+          }
+        : reason === undefined
+          ? { reason: "undefined", promise: String(event?.promise) }
+          : { reason };
+
+    logger.error("unhandled rejection in the renderer", data);
   });
 }
 
@@ -100,6 +116,7 @@ class ModV {
     this._imageCaptures = {};
     this._captureState = {};
     this._videoReconnectTimers = {};
+    this._videoReconnectInFlight = {};
     this._shutdownStarted = false;
     this.$worker = new ModVWorker();
     this.$asyncWorker = new PromiseWorker(this.$worker);
@@ -323,13 +340,17 @@ class ModV {
       );
 
       for (const deviceId of selected) {
-        // setupMedia picks up the per-device resolution / frame rate itself
-        this.setupMedia({ videoId: deviceId }).catch((e) => {
+        // setupMedia picks up the per-device resolution / frame rate itself.
+        // Open the cameras one at a time so the video capture service is not
+        // asked to configure several devices at once.
+        try {
+          await this.setupMedia({ videoId: deviceId });
+        } catch (e) {
           logger.warn("could not open the saved camera", {
             deviceId,
             error: e?.message || String(e),
           });
-        });
+        }
       }
     } catch (e) {
       console.error(e);
@@ -444,6 +465,7 @@ class ModV {
     }
 
     this._videoReconnectTimers = {};
+    this._videoReconnectInFlight = {};
 
     for (const deviceId of Object.keys(this._captureState || {})) {
       this._captureState[deviceId].running = false;
@@ -639,29 +661,106 @@ class ModV {
 
   startCaptureForDevice(deviceId) {
     if (!this._captureState[deviceId]) {
-      this._captureState[deviceId] = { running: false };
+      this._captureState[deviceId] = { running: false, generation: 0 };
     }
+
     const state = this._captureState[deviceId];
-    if (state.running) return;
+
+    // Always start a fresh generation. A loop from a previous capture may
+    // still be waiting on a grabFrame promise; bumping the generation makes it
+    // exit instead of running a second loop against the same camera.
     state.running = true;
+    state.generation = (state.generation || 0) + 1;
+    state.failures = 0;
+    state.recreateAttempted = false;
+    state.mutedSince = null;
+    state.grabFailuresReported = false;
+
+    const generation = state.generation;
+
+    logger.info("starting the video capture loop", { deviceId, generation });
+
+    const isCurrent = () =>
+      state.running &&
+      state.generation === generation &&
+      this._captureState[deviceId] === state;
+
+    const schedule = (delay, fn) => {
+      if (delay > 0) {
+        setTimeout(() => {
+          if (isCurrent()) fn();
+        }, delay);
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        if (isCurrent()) fn();
+      });
+    };
 
     const captureNext = () => {
-      if (!state.running) return;
+      if (!isCurrent()) {
+        return;
+      }
+
       const capture = this._imageCaptures?.[deviceId];
-      if (
-        !capture ||
-        !capture.track ||
-        capture.track.readyState !== "live" ||
-        capture.track.muted
-      ) {
-        // The capture may be gone because the camera was unplugged. Ask for a
-        // reconnect before trying again on the next animation frame.
-        if (shouldReconnectVideoCapture(capture)) {
-          this.scheduleVideoReconnect?.(deviceId);
+      const track = capture?.track;
+
+      if (track?.muted) {
+        if (!state.mutedSince) {
+          state.mutedSince = Date.now();
+          logger.warn("the video track is muted", {
+            deviceId,
+            label: track.label,
+            readyState: track.readyState,
+          });
+        }
+      } else {
+        state.mutedSince = null;
+      }
+
+      const mutedForMs = state.mutedSince
+        ? Date.now() - state.mutedSince
+        : null;
+      const action = nextVideoCaptureAction({
+        capture,
+        consecutiveFailures: state.failures,
+        mutedForMs,
+        recreateAttempted: state.recreateAttempted,
+      });
+
+      if (action === "reconnect") {
+        if (!this._videoReconnectTimers[deviceId]) {
+          logger.warn("the video capture needs a reconnect", {
+            deviceId,
+            failures: state.failures,
+            mutedForMs,
+            readyState: track?.readyState,
+          });
         }
 
-        // Try again on the next animation frame while waiting for live track
-        requestAnimationFrame(captureNext);
+        this.scheduleVideoReconnect?.(deviceId, { allowMuted: true });
+        schedule(VIDEO_CAPTURE_RETRY_DELAY_MS, captureNext);
+        return;
+      }
+
+      if (action === "wait") {
+        schedule(VIDEO_CAPTURE_RETRY_DELAY_MS, captureNext);
+        return;
+      }
+
+      if (action === "recreate") {
+        const recreated = this.recreateImageCapture(deviceId);
+
+        state.recreateAttempted = true;
+        state.failures = 0;
+
+        logger.warn("recreated the image capture after grab failures", {
+          deviceId,
+          recreated: !!recreated,
+        });
+
+        schedule(VIDEO_CAPTURE_RETRY_DELAY_MS, captureNext);
         return;
       }
 
@@ -678,6 +777,11 @@ class ModV {
       capture
         .grabFrame()
         .then((bitmap) => {
+          state.failures = 0;
+          state.recreateAttempted = false;
+          state.mutedSince = null;
+          state.grabFailuresReported = false;
+
           if (bitmap && bitmap.width && bitmap.height) {
             this.$worker.postMessage(
               {
@@ -688,21 +792,68 @@ class ModV {
             );
           }
         })
-        .catch(() => {
-          // Ignore
+        .catch((error) => {
+          state.failures += 1;
+
+          if (!state.grabFailuresReported) {
+            state.grabFailuresReported = true;
+            logger.warn("could not grab a video frame", {
+              deviceId,
+              failures: state.failures,
+              error: describeCaptureError(error),
+              readyState: track?.readyState,
+              muted: track?.muted,
+            });
+          }
         })
         .finally(() => {
-          if (state.running) captureNext();
+          if (!isCurrent()) {
+            return;
+          }
+
+          // Back off after a failure; otherwise go straight to the next frame.
+          schedule(
+            state.failures > 0 ? VIDEO_CAPTURE_RETRY_DELAY_MS : 0,
+            captureNext,
+          );
         });
     };
 
     captureNext();
   }
 
+  recreateImageCapture(deviceId) {
+    const capture = this._imageCaptures?.[deviceId];
+    const track = capture?.track;
+
+    if (!track) {
+      return null;
+    }
+
+    try {
+      const recreated = new ImageCapture(track);
+      this._imageCaptures[deviceId] = recreated;
+      return recreated;
+    } catch (e) {
+      logger.warn("could not recreate the image capture", {
+        deviceId,
+        error: describeCaptureError(e),
+      });
+      return null;
+    }
+  }
+
   stopCaptureForDevice(deviceId) {
     const state = this._captureState[deviceId];
     if (!state) return;
+
     state.running = false;
+    state.generation = (state.generation || 0) + 1;
+
+    logger.info("stopped the video capture loop", {
+      deviceId,
+      generation: state.generation,
+    });
   }
 
   setSystemAudioState(payload) {
@@ -710,33 +861,50 @@ class ModV {
     this._store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
   }
 
-  scheduleVideoReconnect(deviceId) {
-    if (!deviceId || this._videoReconnectTimers[deviceId]) {
+  scheduleVideoReconnect(deviceId, { allowMuted = false } = {}) {
+    if (
+      !deviceId ||
+      this._videoReconnectTimers[deviceId] ||
+      this._videoReconnectInFlight[deviceId]
+    ) {
       return;
     }
 
+    logger.info("scheduling a video input reconnect", { deviceId });
+
     this._videoReconnectTimers[deviceId] = setTimeout(async () => {
       delete this._videoReconnectTimers[deviceId];
-
-      const selected = this._store.state.mediaStream.selectedVideoSources || [];
-
-      // The camera may have been disabled while the timer was pending.
-      if (!selected.includes(deviceId)) {
-        return;
-      }
-
-      if (!shouldReconnectVideoCapture(this._imageCaptures?.[deviceId])) {
-        return;
-      }
+      this._videoReconnectInFlight[deviceId] = true;
 
       try {
-        await this.setupMedia({ videoId: deviceId });
+        const selected =
+          this._store.state.mediaStream.selectedVideoSources || [];
+
+        // The camera may have been disabled while the timer was pending.
+        if (!selected.includes(deviceId)) {
+          return;
+        }
+
+        if (
+          !shouldReconnectVideoCapture(this._imageCaptures?.[deviceId], {
+            allowMuted,
+          })
+        ) {
+          return;
+        }
+
+        await this.setupMedia({
+          videoId: deviceId,
+          allowMutedRestart: allowMuted,
+        });
         logger.info("reconnected the video input", { deviceId });
       } catch (e) {
         logger.warn("could not reconnect the video input", {
           deviceId,
-          error: e?.message || String(e),
+          error: e?.name ? `${e.name}: ${e.message}` : String(e),
         });
+      } finally {
+        delete this._videoReconnectInFlight[deviceId];
       }
     }, 1500);
   }
@@ -751,9 +919,11 @@ class ModV {
     for (const deviceId of selected) {
       if (
         available.has(deviceId) &&
-        shouldReconnectVideoCapture(this._imageCaptures?.[deviceId])
+        shouldReconnectVideoCapture(this._imageCaptures?.[deviceId], {
+          allowMuted: true,
+        })
       ) {
-        this.scheduleVideoReconnect(deviceId);
+        this.scheduleVideoReconnect(deviceId, { allowMuted: true });
       }
     }
   }
