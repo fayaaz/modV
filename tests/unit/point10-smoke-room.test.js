@@ -104,7 +104,7 @@ describe("Smoke Room box scale", () => {
     expect(centreY + height / 2).toBeCloseTo(top, 6);
   });
 
-  it("keeps the cameras inside the default box so no glass rim is visible", () => {
+  it("keeps the default cameras outside the box so the scene is not zoomed", () => {
     const scale = SMOKE_ROOM_PROPS.boxScale.default;
     const { x: halfX, y: halfY, z: halfZ } = SmokeRoom.boxHalfExtents(scale);
     const cameras = [
@@ -117,22 +117,27 @@ describe("Smoke Room box scale", () => {
     ];
 
     for (const camera of cameras) {
-      expect(Math.abs(camera.position.x)).toBeLessThan(halfX);
-      expect(Math.abs(camera.position.y)).toBeLessThan(halfY);
-      expect(Math.abs(camera.position.z)).toBeLessThan(halfZ);
+      const inside =
+        Math.abs(camera.position.x) < halfX &&
+        Math.abs(camera.position.y) < halfY &&
+        Math.abs(camera.position.z) < halfZ;
+
+      expect(inside).toBe(false);
     }
   });
 
-  it("keeps the DVD Room's camera orbit within the default box", () => {
+  it("keeps the DVD Room's default camera orbit outside the box", () => {
     const scale = SMOKE_ROOM_PROPS.boxScale.default;
     const { x: halfX, y: halfY, z: halfZ } = DvdRoom.boxHalfExtents(scale);
 
     for (const yaw of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
       const camera = orbitCamera({ yaw });
+      const inside =
+        Math.abs(camera.position.x) < halfX &&
+        Math.abs(camera.position.y) < halfY &&
+        Math.abs(camera.position.z) < halfZ;
 
-      expect(Math.abs(camera.position.x)).toBeLessThan(halfX);
-      expect(Math.abs(camera.position.y)).toBeLessThan(halfY);
-      expect(Math.abs(camera.position.z)).toBeLessThan(halfZ);
+      expect(inside).toBe(false);
     }
   });
 });

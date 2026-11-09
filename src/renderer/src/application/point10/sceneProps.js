@@ -27,9 +27,10 @@ const SMOKE_FIRE = {
 
 export const SMOKE_ROOM_PROPS = {
   ...SMOKE_FIRE,
-  // Large enough that the camera sits inside the glass room, so the box
-  // fills the output instead of showing its rim.
-  boxScale: float("Box Scale", 2.8, 0.5, 5, 0.05),
+  // Defaults to the pre-boxScale size: the cameras sit outside the glass room
+  // and the room fills the frame. Scaling it up puts the cameras inside the
+  // room, which crops the scene ("zoomed in"), so that stays opt-in.
+  boxScale: float("Box Scale", 1, 0.5, 5, 0.05),
   // X/Y multiplier on top of Box Scale: widens/tallies the glass room and the
   // sim grid only. The orb (sphere, point light) and the sim's sphere radius
   // stay on Box Scale alone.

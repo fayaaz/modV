@@ -146,9 +146,12 @@ describe("Smoke scenes", () => {
     expect(SMOKE_ROOM_PROPS.smokeDensity.label).toBe("Smoke Density");
   });
 
-  it("scales the smoke box to fill the frame by default", () => {
+  it("keeps the legacy framing by default instead of zooming into the box", () => {
     expect(SMOKE_ROOM_PROPS.boxScale.label).toBe("Box Scale");
-    expect(SMOKE_ROOM_PROPS.boxScale.default).toBeGreaterThanOrEqual(2.7);
+    // Scaling the box up moves the fixed cameras inside the glass room, which
+    // crops everything ("zoomed in"). The default stays at the pre-boxScale
+    // size so the room is framed from outside; users can still zoom in.
+    expect(SMOKE_ROOM_PROPS.boxScale.default).toBe(1);
     expect(SMOKE_ROOM_PROPS.boxScale.min).toBeGreaterThan(0);
     expect(SMOKE_ROOM_PROPS.boxScale.max).toBeGreaterThan(
       SMOKE_ROOM_PROPS.boxScale.default,
