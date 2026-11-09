@@ -154,15 +154,40 @@
           v-for="scene in scenes"
           :key="`header-${scene.id}`"
           class="scenes__gridHeader"
+          :data-scene-id="scene.id"
           :class="{
             'scenes__gridHeader--active': sceneColumnActive(scene),
             'scenes__gridHeader--disabled': scene.enabled === false,
+            'scenes__gridHeader--dragging': dragSceneId === scene.id,
+            'scenes__gridHeader--drop':
+              dragSceneId !== null && sceneDropTargetId === scene.id,
           }"
-          :title="`Apply ${scene.name}. Right-click for more options.`"
-          @click="applyScene(scene)"
+          :draggable="editingSceneId !== scene.id"
+          :title="`Apply ${scene.name}. Double-click the name to rename. Drag to reorder. Right-click for more options.`"
+          @click="onSceneHeaderClick(scene, $event)"
+          @dragstart="onSceneDragStart(scene, $event)"
+          @dragend="onSceneDragEnd"
+          @dragover="onSceneDragOver(scene, $event)"
+          @drop="onSceneDrop(scene, $event)"
           v-contextMenu="() => SceneHeaderContextMenu({ scene })"
         >
-          <span class="scenes__gridHeaderName">{{ scene.name }}</span>
+          <TextInput
+            v-if="editingSceneId === scene.id"
+            ref="sceneNameInput"
+            v-model="localSceneName"
+            class="scenes__sceneNameInput"
+            @click.stop
+            @keypress.enter="commitSceneRename(scene)"
+            @blur="commitSceneRename(scene)"
+            @keydown.esc="cancelSceneRename"
+          />
+          <span
+            v-else
+            class="scenes__gridHeaderName"
+            @dblclick.stop="onSceneHeaderDblClick(scene)"
+          >
+            {{ scene.name }}
+          </span>
           <label class="scenes__gridHeaderEnabled" @click.stop>
             <Checkbox
               :model-value="scene.enabled !== false"
@@ -289,32 +314,59 @@
       @close="closeSceneCellEditor"
     >
       <div class="scenes__groupEditor">
-        <Group v-if="editGroup" :group-id="editGroupId" />
+        <div class="scenes__editorLayout">
+          <div class="scenes__editorMain">
+            <Group v-if="editGroup" :group-id="editGroupId" />
 
-        <grid columns="6" class="scenes__addModuleRow">
-          <c span="4">
-            <Select v-model="moduleToAdd">
-              <option value="">Add a module…</option>
-              <option v-for="name in moduleOptions" :key="name" :value="name">
-                {{ name }}
-              </option>
-            </Select>
-          </c>
-          <c span="2">
-            <Button
-              class="light"
-              :disabled="!moduleToAdd"
-              @click="addModuleToEditedGroup"
+            <grid columns="6" class="scenes__addModuleRow">
+              <c span="4">
+                <Select v-model="moduleToAdd">
+                  <option value="">Add a module…</option>
+                  <option
+                    v-for="name in moduleOptions"
+                    :key="name"
+                    :value="name"
+                  >
+                    {{ name }}
+                  </option>
+                </Select>
+              </c>
+              <c span="2">
+                <Button
+                  class="light"
+                  :disabled="!moduleToAdd"
+                  @click="addModuleToEditedGroup"
+                >
+                  Add module
+                </Button>
+              </c>
+            </grid>
+
+            <ModuleInspector
+              v-if="editFocusedModuleId"
+              :module-id="editFocusedModuleId"
+            />
+          </div>
+
+          <aside class="scenes__modulePanel">
+            <div class="scenes__modulePanelTitle">Modules</div>
+            <p class="scenes__modulePanelHint">
+              Drag a module into the Group.
+            </p>
+            <Container
+              behaviour="copy"
+              group-name="modules"
+              :get-child-payload="modulePanelPayload"
+              class="scenes__modulePanelList"
             >
-              Add module
-            </Button>
-          </c>
-        </grid>
-
-        <ModuleInspector
-          v-if="editFocusedModuleId"
-          :module-id="editFocusedModuleId"
-        />
+              <Draggable v-for="name in moduleOptions" :key="name">
+                <div class="scenes__modulePanelItem" :data-module-name="name">
+                  {{ name }}
+                </div>
+              </Draggable>
+            </Container>
+          </aside>
+        </div>
       </div>
     </Dialog>
 
@@ -428,6 +480,7 @@ import {
 } from "../application/worker/scene-rows";
 import { SceneHeaderContextMenu } from "../menus/context/sceneHeaderContextMenu.js";
 import { SceneCellContextMenu } from "../menus/context/sceneCellContextMenu.js";
+import { Container, Draggable } from "vue3-smooth-dnd";
 import Dialog from "./Dialog.vue";
 import Group from "./Group.vue";
 import ModuleInspector from "./ModuleInspector.vue";
@@ -436,6 +489,8 @@ const { ipcRenderer } = window.electron;
 
 export default {
   components: {
+    Container,
+    Draggable,
     // eslint-disable-next-line vue/no-reserved-component-names
     Dialog,
     Group,
@@ -453,6 +508,9 @@ export default {
       editingRowIndex: null,
       localRowName: "",
       dragRowIndex: null,
+      dragSceneId: null,
+      sceneDropTargetId: null,
+      sceneClickTimer: null,
       cellDragSource: null,
       cellDragTarget: null,
       editSceneId: null,
@@ -664,6 +722,7 @@ export default {
 
   beforeUnmount() {
     clearTimeout(this.sceneSaveTimer);
+    clearTimeout(this.sceneClickTimer);
     this.$modV.store.dispatch("scenePreview/dispose");
   },
 
@@ -701,7 +760,7 @@ export default {
         scene,
         rowIndex,
         group: this.sceneGroupForRow(scene, rowIndex),
-        editEnabled: !this.isRowCellEmpty(scene, rowIndex) && !this.performanceEnabled,
+        editEnabled: !this.performanceEnabled,
         clearEnabled: !this.isRowCellEmpty(scene, rowIndex),
         onEdit: () => this.openSceneCellEditor(scene, rowIndex),
         onClear: () => this.clearSceneCell(scene, rowIndex),
@@ -717,7 +776,14 @@ export default {
       let groupId =
         active && active.sceneId === scene.id ? active.groupId : null;
 
-      if (!groupId) {
+      if (!groupId && this.isRowCellEmpty(scene, rowIndex)) {
+        const created = await this.$modV.store.dispatch(
+          "scenes/createSceneCellGroup",
+          { sceneId: scene.id, rowIndex },
+        );
+
+        groupId = created && created.groupId;
+      } else if (!groupId) {
         const result = await this.$modV.store.dispatch(
           "scenes/applySceneRow",
           {
@@ -760,6 +826,13 @@ export default {
       if (updated) {
         this.persistScene(updated);
       }
+    },
+
+    modulePanelPayload(index) {
+      return {
+        moduleName: this.moduleOptions[index],
+        collection: "gallery",
+      };
     },
 
     async addModuleToEditedGroup() {
@@ -927,6 +1000,77 @@ export default {
       return this.rows.some((row) => this.isRowActive(scene, row));
     },
 
+    onSceneHeaderClick(scene, event) {
+      if (this.editingSceneId === scene.id || (event && event.detail > 1)) {
+        return;
+      }
+
+      clearTimeout(this.sceneClickTimer);
+      this.sceneClickTimer = setTimeout(() => {
+        this.sceneClickTimer = null;
+        this.applyScene(scene);
+      }, 220);
+    },
+
+    onSceneHeaderDblClick(scene) {
+      clearTimeout(this.sceneClickTimer);
+      this.sceneClickTimer = null;
+      this.startSceneRename(scene);
+    },
+
+    onSceneDragStart(scene, event) {
+      if (this.editingSceneId === scene.id) {
+        return;
+      }
+
+      clearTimeout(this.sceneClickTimer);
+      this.sceneClickTimer = null;
+      this.dragSceneId = scene.id;
+      this.sceneDropTargetId = null;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", `scene:${scene.id}`);
+    },
+
+    onSceneDragOver(scene, event) {
+      if (!this.dragSceneId || this.dragSceneId === scene.id) {
+        return;
+      }
+
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      this.sceneDropTargetId = scene.id;
+    },
+
+    async onSceneDrop(scene, event) {
+      const payload = event.dataTransfer.getData("text/plain");
+      const sceneId = payload.startsWith("scene:") ? payload.slice(6) : "";
+
+      this.dragSceneId = null;
+      this.sceneDropTargetId = null;
+
+      if (!sceneId || sceneId === scene.id) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const toIndex = this.scenes.findIndex((item) => item.id === scene.id);
+
+      if (toIndex === -1) {
+        return;
+      }
+
+      await this.$modV.store.dispatch("scenes/moveScene", {
+        sceneId,
+        toIndex,
+      });
+    },
+
+    onSceneDragEnd() {
+      this.dragSceneId = null;
+      this.sceneDropTargetId = null;
+    },
+
     sceneGroupForRow(scene, rowIndex) {
       return getRowGroup(scene, rowIndex, this.rowNames);
     },
@@ -1058,8 +1202,9 @@ export default {
 
     async onRowDrop(rowIndex, event) {
       // A cell copy carries an empty text/plain payload, which would read as
-      // row 0; ignore row reordering while a cell is being dragged.
-      if (this.cellDragSource) {
+      // row 0, and a Scene column carries "scene:<id>"; ignore row reordering
+      // while either kind of drag is in progress.
+      if (this.cellDragSource || this.dragSceneId !== null) {
         return;
       }
 
@@ -1469,6 +1614,15 @@ div.scenes__gridHeader--disabled {
   opacity: 0.45;
 }
 
+div.scenes__gridHeader--dragging {
+  opacity: 0.5;
+}
+
+div.scenes__gridHeader--drop {
+  background: #3f4a56;
+  box-shadow: inset 2px 0 0 #00c0ff;
+}
+
 span.scenes__gridHeaderName {
   flex: 1;
   min-width: 0;
@@ -1779,10 +1933,65 @@ span.scenes__status {
 }
 
 div.scenes__groupEditor {
-  min-width: 420px;
+  min-width: 680px;
   max-height: 70vh;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+div.scenes__editorLayout {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+div.scenes__editorMain {
+  flex: 1;
+  min-width: 0;
+}
+
+aside.scenes__modulePanel {
+  width: 180px;
+  flex: 0 0 180px;
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+}
+
+div.scenes__modulePanelTitle {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+p.scenes__modulePanelHint {
+  font-size: 11px;
+  opacity: 0.7;
+  margin: 0 0 6px;
+}
+
+div.scenes__modulePanelList {
+  overflow-y: auto;
+  min-height: 60px;
+}
+
+div.scenes__modulePanelItem {
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  background: #303030;
+  cursor: grab;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+div.scenes__modulePanelItem:hover {
+  background: #3a3a3a;
+}
+
+input.scenes__sceneNameInput {
+  width: 100%;
+  min-width: 0;
 }
 
 grid.scenes__addModuleRow {

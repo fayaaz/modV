@@ -126,6 +126,64 @@ async function setRowNames(rowNames) {
   );
 }
 
+async function openCellEditDialog(cell) {
+  const { page } = modVApp;
+
+  await page.evaluate(() => {
+    const { Menu } = window.remote;
+
+    window.__e2eMenuOriginal = Menu.buildFromTemplate;
+    window.__e2eMenuTemplate = null;
+    Menu.buildFromTemplate = (template) => {
+      window.__e2eMenuTemplate = template;
+      return { popup() {} };
+    };
+  });
+
+  try {
+    await cell.click({ button: "right" });
+
+    await expect
+      .poll(async () => page.evaluate(() => !!window.__e2eMenuTemplate))
+      .toBe(true);
+
+    await page.evaluate(async () => {
+      const item = window.__e2eMenuTemplate.find(
+        (entry) => entry.label === "Edit",
+      );
+
+      await item.click();
+    });
+  } finally {
+    await page.evaluate(() => {
+      if (window.__e2eMenuOriginal) {
+        window.remote.Menu.buildFromTemplate = window.__e2eMenuOriginal;
+      }
+
+      delete window.__e2eMenuOriginal;
+      delete window.__e2eMenuTemplate;
+    });
+  }
+
+  const dialog = page.locator("dialog[open]");
+  await expect(dialog).toBeVisible();
+
+  return dialog;
+}
+
+async function getSceneOrder(sceneIds) {
+  return modVApp.evaluateWorker(
+    async ({ ids }) => {
+      const scenes = self.store.state.scenes.scenes;
+
+      return Object.fromEntries(
+        ids.map((id) => [id, scenes.findIndex((scene) => scene.id === id)]),
+      );
+    },
+    { ids: sceneIds },
+  );
+}
+
 async function applyScene(sceneId) {
   await modVApp.evaluateWorker(
     async ({ sceneId }) => {
@@ -1299,6 +1357,272 @@ test("clearing a grid cell removes its modules after confirmation", async () => 
       delete window.__e2eConfirmCalls;
     });
   }
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("renaming a Scene column updates the grid and the Scene", async () => {
+  const prefix = uniqueName("E2E Column Rename");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const groupId = await createGroup(`${prefix} G`);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(`${prefix} Old`);
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const header = page.locator(
+    `.scenes__gridHeader[data-scene-id="${scene.id}"]`,
+  );
+  const newName = `${prefix} New`;
+
+  await header.locator(".scenes__gridHeaderName").dblclick();
+
+  const nameInput = header.locator("input.scenes__sceneNameInput");
+  await expect(nameInput).toBeVisible();
+  await nameInput.fill(newName);
+  await nameInput.press("Enter");
+
+  await expect(header.locator(".scenes__gridHeaderName")).toHaveText(newName);
+  await expect
+    .poll(() =>
+      modVApp.evaluateWorker(
+        ({ sceneId }) => {
+          const saved = self.store.state.scenes.scenes.find(
+            (item) => item.id === sceneId,
+          );
+
+          return saved ? saved.name : null;
+        },
+        { sceneId: scene.id },
+      ),
+    )
+    .toBe(newName);
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("dragging a Scene column reorders the Scenes", async () => {
+  await removeUserGroups();
+  await useNoTransition();
+
+  const sceneA = await modVApp.evaluateWorker(() =>
+    self.store.dispatch("scenes/addEmptyScene"),
+  );
+  const sceneB = await modVApp.evaluateWorker(() =>
+    self.store.dispatch("scenes/addEmptyScene"),
+  );
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const before = await getSceneOrder([sceneA.id, sceneB.id]);
+  expect(before[sceneA.id]).toBeLessThan(before[sceneB.id]);
+
+  const drag = await page.evaluate(
+    ({ fromId, toId }) => {
+      const from = document.querySelector(
+        `.scenes__gridHeader[data-scene-id="${fromId}"]`,
+      );
+      const to = document.querySelector(
+        `.scenes__gridHeader[data-scene-id="${toId}"]`,
+      );
+      const dataTransfer = new DataTransfer();
+      const dispatch = (element, type) =>
+        element.dispatchEvent(
+          new DragEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer,
+          }),
+        );
+
+      dispatch(from, "dragstart");
+
+      const overEvent = new DragEvent("dragover", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      });
+      to.dispatchEvent(overEvent);
+
+      dispatch(to, "drop");
+      dispatch(from, "dragend");
+
+      return {
+        dropAllowed: overEvent.defaultPrevented,
+        payload: dataTransfer.getData("text/plain"),
+      };
+    },
+    { fromId: sceneA.id, toId: sceneB.id },
+  );
+
+  expect(drag.dropAllowed).toBe(true);
+  expect(drag.payload).toBe(`scene:${sceneA.id}`);
+
+  await expect
+    .poll(async () => {
+      const after = await getSceneOrder([sceneA.id, sceneB.id]);
+
+      return after[sceneB.id] < after[sceneA.id];
+    })
+    .toBe(true);
+
+  await removeScene(sceneA.id);
+  await removeScene(sceneB.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("editing an empty Scene cell creates a Group and saves its modules", async () => {
+  await removeUserGroups();
+  await useNoTransition();
+
+  const scene = await modVApp.evaluateWorker(() =>
+    self.store.dispatch("scenes/addEmptyScene"),
+  );
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const cell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="0"]`,
+  );
+  await expect(cell).toHaveClass(/scenes__gridCell--empty/);
+
+  const dialog = await openCellEditDialog(cell);
+
+  await expect(dialog.locator(".scenes__groupEditor .group")).toBeVisible();
+  await expect(dialog.locator(".active-module")).toHaveCount(0);
+
+  await dialog.locator(".scenes__addModuleRow select").selectOption("Bands");
+  await dialog.getByRole("button", { name: "Add module" }).click();
+  await expect(dialog.locator(".active-module")).toHaveCount(1);
+
+  await dialog.locator("header button.close").click();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+
+  await expect
+    .poll(() =>
+      modVApp.evaluateWorker(
+        ({ sceneId }) => {
+          const saved = self.store.state.scenes.scenes.find(
+            (item) => item.id === sceneId,
+          );
+          const group = saved && saved.groups[0];
+
+          if (!group) {
+            return null;
+          }
+
+          return {
+            groupCount: saved.groups.filter(Boolean).length,
+            moduleNames: group.modules.map(
+              (moduleId) =>
+                saved.modules[moduleId] && saved.modules[moduleId].$moduleName,
+            ),
+          };
+        },
+        { sceneId: scene.id },
+      ),
+    )
+    .toMatchObject({ groupCount: 1, moduleNames: ["Bands"] });
+
+  await removeScene(scene.id);
+  await removeUserGroups();
+  await ensureUserGroup();
+});
+
+test("the cell editor can drag a module from its panel into the Group", async () => {
+  const prefix = uniqueName("E2E Cell Module Drag");
+
+  await removeUserGroups();
+  await useNoTransition();
+
+  const groupId = await createGroup(`${prefix} G`);
+  await addModuleToGroup(groupId, "Ball");
+  const scene = await saveScene(`${prefix} Scene`);
+
+  await applyScene(scene.id);
+
+  const { page } = modVApp;
+  await page.locator('.lm_tab[title="Scenes"]').click();
+  await expect(page.locator(".scenes__grid")).toBeVisible();
+
+  const cell = page.locator(
+    `.scenes__gridCell[data-scene-id="${scene.id}"][data-row-index="0"]`,
+  );
+  const dialog = await openCellEditDialog(cell);
+
+  await expect(dialog.locator(".active-module")).toHaveCount(1);
+
+  const source = dialog.locator(
+    '.scenes__modulePanelItem[data-module-name="Bands"]',
+  );
+  const target = dialog.locator(".group__modules");
+
+  await expect(source).toBeVisible();
+  await source.scrollIntoViewIfNeeded();
+  await target.scrollIntoViewIfNeeded();
+
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  expect(sourceBox).toBeTruthy();
+  expect(targetBox).toBeTruthy();
+
+  await page.mouse.move(
+    sourceBox.x + sourceBox.width / 2,
+    sourceBox.y + sourceBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    targetBox.x + targetBox.width / 2,
+    targetBox.y + targetBox.height / 2,
+    { steps: 12 },
+  );
+  await page.mouse.move(
+    targetBox.x + targetBox.width / 2,
+    targetBox.y + targetBox.height / 2,
+  );
+  await page.mouse.up();
+
+  await expect(dialog.locator(".active-module")).toHaveCount(2);
+
+  await dialog.locator("header button.close").click();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+
+  await expect
+    .poll(() =>
+      modVApp.evaluateWorker(
+        ({ sceneId }) => {
+          const saved = self.store.state.scenes.scenes.find(
+            (item) => item.id === sceneId,
+          );
+          const group = saved && saved.groups[0];
+
+          if (!group) {
+            return null;
+          }
+
+          return group.modules.map(
+            (moduleId) =>
+              saved.modules[moduleId] && saved.modules[moduleId].$moduleName,
+          );
+        },
+        { sceneId: scene.id },
+      ),
+    )
+    .toEqual(["Ball", "Bands"]);
 
   await removeScene(scene.id);
   await removeUserGroups();

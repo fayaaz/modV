@@ -1,4 +1,4 @@
-import { getRowGroup } from "./scene-rows";
+import { getRowGroup, getRowNameIndex } from "./scene-rows";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -117,8 +117,17 @@ export function mergeSceneCell(scene, rowIndex, rowNames, cell = {}) {
 
   if (index > -1) {
     groups[index] = group;
-  } else {
+  } else if (getRowNameIndex(rowNames, rowIndex)) {
+    // Named rows look their Group up by name, so it can live anywhere.
     groups.push(group);
+  } else {
+    // Unnamed rows are positional: keep the cell on its row by padding any
+    // missing rows with holes, exactly like a Ctrl+drag copy does.
+    while (groups.length < rowIndex) {
+      groups.push(null);
+    }
+
+    groups[rowIndex] = group;
   }
 
   const modules = {

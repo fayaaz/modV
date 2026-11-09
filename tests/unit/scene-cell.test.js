@@ -105,6 +105,26 @@ describe("mergeSceneCell", () => {
     expect(result.groups[1].id).toBe("live");
   });
 
+  it("pads positional rows when the new cell is below the saved groups", () => {
+    const result = mergeSceneCell(scene(), 3, [], cell);
+
+    expect(result.groups).toHaveLength(4);
+    expect(result.groups[0].id).toBe("g0");
+    expect(result.groups[1].id).toBe("g1");
+    expect(result.groups[2]).toBeNull();
+    expect(result.groups[3].id).toBe("live");
+  });
+
+  it("appends a named-row cell without padding", () => {
+    const result = mergeSceneCell(scene(), 5, ["", "", "", "", "", "Webcam"], {
+      ...cell,
+      group: group("live", "Webcam", ["m3"]),
+    });
+
+    expect(result.groups[2].id).toBe("live");
+    expect(result.groups).toHaveLength(3);
+  });
+
   it("merges module snapshots and prunes unreferenced ones", () => {
     const result = mergeSceneCell(scene(), 1, [], cell);
 

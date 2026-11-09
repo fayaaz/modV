@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createEmptyScene,
+  moveSceneToIndex,
   nextSceneName,
 } from "../../src/renderer/src/application/worker/scene-columns.js";
 import { isSceneDocument } from "../../src/renderer/src/application/worker/preset-serializer.js";
@@ -71,5 +72,45 @@ describe("createEmptyScene", () => {
     expect(scene.expressions).toEqual({ assignments: {} });
     expect(scene.tweens).toEqual([]);
     expect(scene.midi).toEqual({});
+  });
+});
+
+describe("moveSceneToIndex", () => {
+  const scenes = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  it("moves a Scene later in the list", () => {
+    expect(moveSceneToIndex(scenes, "a", 2).map((scene) => scene.id)).toEqual([
+      "b",
+      "c",
+      "a",
+    ]);
+  });
+
+  it("moves a Scene earlier in the list", () => {
+    expect(moveSceneToIndex(scenes, "c", 0).map((scene) => scene.id)).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+  });
+
+  it("does not mutate the input list", () => {
+    const original = scenes.slice();
+
+    moveSceneToIndex(scenes, "a", 2);
+
+    expect(scenes).toEqual(original);
+  });
+
+  it("returns the same list for a no-op move", () => {
+    expect(moveSceneToIndex(scenes, "b", 1)).toBe(scenes);
+  });
+
+  it("ignores unknown Scenes and invalid target indexes", () => {
+    expect(moveSceneToIndex(scenes, "missing", 1)).toBe(scenes);
+    expect(moveSceneToIndex(scenes, "a", -1)).toBe(scenes);
+    expect(moveSceneToIndex(scenes, "a", 3)).toBe(scenes);
+    expect(moveSceneToIndex(scenes, "a", 1.5)).toBe(scenes);
+    expect(moveSceneToIndex(null, "a", 0)).toBe(null);
   });
 });

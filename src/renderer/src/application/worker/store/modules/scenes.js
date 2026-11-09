@@ -53,7 +53,7 @@ import {
 import { prewarmSceneModules } from "../../point10-prewarm";
 import { clearWarmInstances } from "../../../point10/warm-cache.js";
 import { collectSceneGroups } from "../../scene-capture";
-import { createEmptyScene } from "../../scene-columns";
+import { createEmptyScene, moveSceneToIndex } from "../../scene-columns";
 import { clearSceneCellModules, mergeSceneCell } from "../../scene-cell";
 import {
   DEFAULT_SCENE_BPM_TWEEN,
@@ -1905,6 +1905,23 @@ const actions = {
   },
 
   /**
+   * Moves a Scene column to a new position in the grid. The Scene list is the
+   * performance order, so this also changes which Scene runs next in order.
+   */
+  async moveScene({ commit, dispatch, state }, { sceneId, toIndex } = {}) {
+    const reordered = moveSceneToIndex(state.scenes, sceneId, toIndex);
+
+    if (reordered === state.scenes) {
+      return false;
+    }
+
+    commit("REPLACE_SCENES", reordered);
+    await dispatch("persistScenes");
+
+    return true;
+  },
+
+  /**
    * Snapshots the whole preset-aware store using the same serializer as a
    * preset, then adds Scene metadata.
    */
@@ -3405,6 +3422,61 @@ const actions = {
     await dispatch("persistScenes");
 
     return JSON.parse(JSON.stringify(scene));
+  },
+
+  /**
+   * Creates the live Group for an empty Scene cell so it can be edited. The
+   * Group is stamped with the Scene id and row, but the Scene document is only
+   * updated when the editor closes and captures the row.
+   */
+  async createSceneCellGroup({ commit, state }, { sceneId, rowIndex } = {}) {
+    const scene = state.scenes.find((item) => item.id === sceneId);
+    const row = Number(rowIndex);
+
+    if (
+      !scene ||
+      state.performance.enabled ||
+      !Number.isInteger(row) ||
+      row < 0
+    ) {
+      return null;
+    }
+
+    await completeTransition(commit);
+    await completeRowTransition(row);
+    assignMissingSceneRows();
+
+    const oldGroup = findLiveRowGroup(row);
+
+    if (oldGroup) {
+      await store.dispatch("groups/removeGroup", { groupId: oldGroup.id });
+    }
+
+    const group = await store.dispatch("groups/createGroup", {
+      name: getRowLabel(state.scenes, row, state.performance.rowNames),
+      enabled: GROUP_ENABLED,
+      sceneId: scene.id,
+      sceneRow: row,
+    });
+
+    activeRows[row] = { sceneId: scene.id, groupId: group.id };
+    commit("SET_ACTIVE_ROW", {
+      rowIndex: row,
+      sceneId: scene.id,
+      groupId: group.id,
+    });
+
+    if (row === 0) {
+      commit("UPDATE_PERFORMANCE", { currentSceneId: scene.id });
+    }
+
+    const orderedGroups = orderRowGroups();
+
+    await store.dispatch("groups/orderByIds", {
+      ids: orderedGroups.map((item) => item.id),
+    });
+
+    return { groupId: group.id };
   },
 
   /**
