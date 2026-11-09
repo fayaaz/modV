@@ -9,6 +9,16 @@ const IMPACT_COUNT = 8;
 const clamp01 = (value) =>
   Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 
+// The ripple is a circular overlay: everything outside the pattern stays
+// transparent so it composites over the layers beneath instead of painting a
+// near-black frame.
+export const CLEAR_ALPHA = 0;
+
+export function applyWaterRippleClear(renderer) {
+  if (renderer) renderer.setClearColor(0x000000, CLEAR_ALPHA);
+  return renderer;
+}
+
 export function waterRippleDrive(bass = 0, pulse = 0) {
   const b = clamp01(bass);
   const p = clamp01(pulse);
@@ -104,10 +114,15 @@ void main() {
   color += rim * rimColor * (1.05 + audioInfluence * 0.3);
   color += impactInfluence * gradientColor * (0.018 + uBass * 0.025);
 
-  vec3 background = vec3(0.02, 0.02, 0.05);
-  gl_FragColor = vec4(mix(background, color, inCircle), 1.0);
+  // The circular pattern is the artwork; outside it the alpha fades to zero
+  // (inCircle is already a soft edge) so the scene composites transparently.
+  gl_FragColor = vec4(color, inCircle);
 }
 `;
+
+export function buildWaterRippleFragmentShader() {
+  return FRAG;
+}
 
 export class WaterRipple extends BaseScene {
   _init() {
@@ -169,12 +184,15 @@ export class WaterRipple extends BaseScene {
         vertexShader: VERT,
         fragmentShader: FRAG,
         uniforms: this.uniforms,
+        transparent: true,
         depthTest: false,
         depthWrite: false,
       }),
     );
     this.mesh.frustumCulled = false;
     this.group.add(this.mesh);
+
+    applyWaterRippleClear(this.renderer);
   }
 
   _applyPhraseColor() {

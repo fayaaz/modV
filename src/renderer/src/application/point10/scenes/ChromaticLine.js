@@ -54,7 +54,12 @@ void main() {
   float g = glow.g / abs(p.y + waveAt(gx * xScale.g) * amp.g);
   float b = glow.b / abs(p.y + waveAt(bx * xScale.b) * amp.b);
 
-  gl_FragColor = vec4(r, g, b, 1.0);
+  // The line is the artwork, not a full-frame fill. The glow tail below 0.5
+  // is the background veil, so fade alpha out there and keep the bright line
+  // opaque; the empty frame then composites over the layers below.
+  float intensity = max(r, max(g, b));
+  float alpha = smoothstep(0.5, 1.0, intensity);
+  gl_FragColor = vec4(r, g, b, alpha);
 }
 `;
 

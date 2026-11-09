@@ -23,6 +23,7 @@
 
 import * as THREE from "three";
 import { BaseScene } from "../BaseScene.js";
+import { preserveBloomAlpha } from "./Boxy.js";
 import { P9Audio } from "../plane9/P9Audio.js";
 import { COMMON_PREAMBLE } from "../plane9/P9Glsl.js";
 import { seededRand } from "../shared/random.js";
@@ -41,6 +42,15 @@ export const SPEED = 0.5;
 // The preset's Bloom1 port. UnrealBloomPass normalises radius to 0..1, hence
 // ~0.85 for Plane9's Radius 5.
 export const BLOOM = { strength: 0.1, radius: 0.85, threshold: 0 };
+
+// The wormhole is a sparse additive point cloud, so empty space stays fully
+// transparent and the scene composites over the layers beneath.
+export const CLEAR_ALPHA = 0;
+
+export function applyWormholeClear(renderer) {
+  if (renderer) renderer.setClearColor(0x000000, CLEAR_ALPHA);
+  return renderer;
+}
 
 // Screen1: CamPos 0 0 0, lookAt 0 0 -1, fov 60, near 0.01, far 50.
 export const CAMERA = { fov: 60, near: 0.01, far: 50 };
@@ -119,9 +129,12 @@ varying vec4 vDiffuse;
 ${COMMON_PREAMBLE}
 void main() {
   vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float mask = smoothstep(1.0, 0.9, length(p));
+  // Keep the additive colour, but carry the point's own alpha through so the
+  // empty space around the points stays transparent instead of an opaque frame.
   gl_FragColor = vec4(
-    saturate(smoothstep(1.0, 0.9, length(p)) * vDiffuse.rgb) * vDiffuse.a,
-    1.0
+    saturate(mask * vDiffuse.rgb) * vDiffuse.a,
+    saturate(mask * vDiffuse.a)
   );
 }
 `;
@@ -165,17 +178,24 @@ export class Wormhole extends BaseScene {
     if (this.renderer) {
       this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
       this.renderer.toneMappingExposure = 1;
-      this.renderer.setClearColor(0x000000, 1);
+      applyWormholeClear(this.renderer);
 
       const size = this.renderer.getSize(new THREE.Vector2());
       this.composer = new EffectComposer(this.renderer);
       this.composer.setPixelRatio(this.renderer.getPixelRatio());
-      this.composer.addPass(new RenderPass(this.group, this.camera));
-      this._bloomPass = new UnrealBloomPass(
-        size,
-        BLOOM.strength,
-        BLOOM.radius,
-        BLOOM.threshold,
+      this.composer.addPass(
+        new RenderPass(this.group, this.camera, null, null, CLEAR_ALPHA),
+      );
+      // Bloom threshold 0 means every pixel receives bloom; without
+      // preserveBloomAlpha the bloom RGB would also add into the destination
+      // alpha and turn the transparent clear into an opaque veil.
+      this._bloomPass = preserveBloomAlpha(
+        new UnrealBloomPass(
+          size,
+          BLOOM.strength,
+          BLOOM.radius,
+          BLOOM.threshold,
+        ),
       );
       this.composer.addPass(this._bloomPass);
       this.composer.addPass(new OutputPass());

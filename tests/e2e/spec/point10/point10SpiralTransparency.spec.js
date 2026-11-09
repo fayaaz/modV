@@ -41,8 +41,19 @@ test("Point10 Spiral Particles renders on a transparent background", async () =>
         });
       };
 
+      // MessageChannel yields a macrotask without timers, so scene draws still
+      // settle async loads when the e2e window is occluded (which throttles
+      // requestAnimationFrame).
       const nextFrame = () =>
-        new Promise((resolve) => requestAnimationFrame(resolve));
+        new Promise((resolve) => {
+          const { port1, port2 } = new MessageChannel();
+          port1.onmessage = () => {
+            port1.close();
+            port2.close();
+            resolve();
+          };
+          port2.postMessage(0);
+        });
 
       for (let i = 0; i < 10; i++) {
         draw();

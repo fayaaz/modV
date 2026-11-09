@@ -250,6 +250,68 @@ describe("Attractor Particles inputs", () => {
   });
 });
 
+describe("Recently imported scene inputs", () => {
+  const cases = [
+    [
+      "Point10 Mirror Cube",
+      { spinSpeed: 2, brightness: 1.5 },
+      { spinScale: 2, brightnessScale: 1.5 },
+    ],
+    [
+      "Point10 Sound Cube",
+      { spinSpeed: 2, pulse: 1.5, trail: 0.5, brightness: 2 },
+      { spinScale: 2, pulseScale: 1.5, trailScale: 0.5, brightnessScale: 2 },
+    ],
+    [
+      "Point10 Hollow Cube",
+      { spinSpeed: 2, explode: 1.5, color: 0.5, bloom: 2 },
+      { spinScale: 2, explodeScale: 1.5, colorScale: 0.5, bloomScale: 2 },
+    ],
+    [
+      "Point10 Color Cube",
+      { spinSpeed: 2, turbulence: 1.5, bloom: 0.5, brightness: 2 },
+      {
+        spinScale: 2,
+        turbulenceScale: 1.5,
+        bloomScale: 0.5,
+        brightnessScale: 2,
+      },
+    ],
+    [
+      "Point10 Latent Backrooms",
+      { speed: 2, bloom: 1.5, trail: 0.5, brightness: 2 },
+      { speedScale: 2, bloomScale: 1.5, trailScale: 0.5, brightnessScale: 2 },
+    ],
+    [
+      "Point10 Ultra HDR",
+      { spinSpeed: 2, pulse: 1.5, brightness: 0.5 },
+      { spinScale: 2, pulseScale: 1.5, brightnessScale: 0.5 },
+    ],
+    [
+      "Point10 Glass Lens",
+      { spinSpeed: 2, pulse: 1.5, brightness: 0.5 },
+      { spinScale: 2, pulseScale: 1.5, brightnessScale: 0.5 },
+    ],
+  ];
+
+  it.each(cases)("%s exposes and binds its levers", (name, props, fields) => {
+    const config = scenePropsFor(name);
+    const scene = {};
+
+    expect(Object.keys(config.props).sort()).toEqual(Object.keys(props).sort());
+
+    const values = config.apply(scene, props);
+
+    for (const [key, value] of Object.entries(props)) {
+      expect(values[key]).toBe(value);
+    }
+
+    for (const [field, value] of Object.entries(fields)) {
+      expect(scene[field]).toBe(value);
+    }
+  });
+});
+
 describe("Scene-specific bindings", () => {
   it("wires the Smoke Room's box XY scale onto the scene", () => {
     const config = SCENE_PROP_CONFIGS["Point10 Smoke Room"];

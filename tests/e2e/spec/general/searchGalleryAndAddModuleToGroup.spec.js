@@ -9,11 +9,12 @@ test("search gallery and add module to group", async () => {
 
   await searchInput.fill("ball");
 
-  // Double click c:nth-child(2) > .smooth-dnd-container > div > .gallery-item > canvas >> nth=0
+  // Match the exact "Ball" module title: other Point10 scenes also contain the
+  // word "Ball" (e.g. Ball Of Fire), so a substring match would pick the wrong
+  // gallery item.
   await page
-    .locator("c:nth-child(2) > .smooth-dnd-container > div > .gallery-item ", {
-      hasText: "Ball",
-    })
+    .locator(".gallery-item")
+    .filter({ has: page.locator(".title", { hasText: /^Ball$/ }) })
     .first()
     .dblclick({
       position: {

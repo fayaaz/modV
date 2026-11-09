@@ -1268,7 +1268,7 @@ export class SmokeRoom extends BaseSceneWebGPU {
     bloomPass.strength.value = BLOOM_BASE;
 
     // alpha = max(rgb) keeps empty pixels transparent so the background
-    // layer shows through when Smoke Room is a foreground layer (SunFire trick)
+    // layer shows through when Smoke Room is a foreground layer.
     const outColor = scenePassColor.add(bloomPass);
     renderPipeline.outputNode = vec4(
       outColor.rgb,

@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { audioUniforms } from "../../src/renderer/src/application/point10/scenes/AttractorParticles.js";
+import {
+  SCENE_BACKGROUND,
+  applySceneBackground,
+  audioUniforms,
+} from "../../src/renderer/src/application/point10/scenes/AttractorParticles.js";
 
 // The scene's pure audio -> GPU-uniform mapping. The scene itself needs WebGPU
 // to render, but the drive curve is plain arithmetic and is what the music
 // actually controls, so it is tested in isolation.
+describe("AttractorParticles transparency", () => {
+  it("leaves the scene background unset so it composites", () => {
+    expect(SCENE_BACKGROUND).toBe(null);
+
+    const scene = {};
+    expect(applySceneBackground(scene)).toBe(scene);
+    expect(scene.background).toBe(null);
+  });
+});
+
 describe("AttractorParticles audioUniforms", () => {
   it("uses the example's silence defaults", () => {
     expect(audioUniforms(0, 0, 0, 0)).toEqual({

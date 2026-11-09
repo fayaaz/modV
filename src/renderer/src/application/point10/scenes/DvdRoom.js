@@ -389,7 +389,7 @@ export class DvdRoom extends SmokeRoom {
       (treble - this.smTreble) *
       Math.min(1, dt * (treble > this.smTreble ? 16 : 5));
 
-    // Kick attack (RocketLeague pattern): sharp jump of the bass envelope.
+    // Kick attack: sharp jump of the bass envelope.
     this.bassAvg = this.bassAvg * 0.95 + bass * 0.05;
     if (
       bass > 0.07 &&

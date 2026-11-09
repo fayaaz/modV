@@ -1,12 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   BLOOM,
   CAMERA,
+  CLEAR_ALPHA,
   PERMRAND,
   POINT_COUNT,
   POINT_DIST,
   POINT_SIZE,
   SPEED,
+  applyWormholeClear,
   buildWormholeFragmentShader,
   buildWormholeVertexShader,
   makePerm,
@@ -77,6 +79,29 @@ describe("Wormhole preset constants", () => {
   it("uses the preset bloom and camera settings", () => {
     expect(BLOOM).toEqual({ strength: 0.1, radius: 0.85, threshold: 0 });
     expect(CAMERA).toEqual({ fov: 60, near: 0.01, far: 50 });
+  });
+});
+
+describe("Wormhole transparency", () => {
+  it("clears to a fully transparent background", () => {
+    expect(CLEAR_ALPHA).toBe(0);
+
+    const renderer = { setClearColor: vi.fn() };
+
+    expect(applyWormholeClear(renderer)).toBe(renderer);
+    expect(renderer.setClearColor).toHaveBeenCalledWith(0x000000, 0);
+    expect(applyWormholeClear(null)).toBe(null);
+  });
+
+  it("outputs each point's own alpha instead of an opaque frame", () => {
+    const fragment = buildWormholeFragmentShader();
+
+    expect(fragment).toContain("float mask = smoothstep(1.0, 0.9, length(p))");
+    expect(fragment).toContain("saturate(mask * vDiffuse.a)");
+    // The old shader forced the point alpha to 1.0.
+    expect(fragment).not.toMatch(
+      /gl_FragColor\s*=\s*vec4\([\s\S]*?,\s*1\.0\s*\)/,
+    );
   });
 });
 

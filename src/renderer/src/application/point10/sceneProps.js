@@ -142,6 +142,51 @@ export const WORMHOLE_PROPS = {
   bloom: float("Bloom", 1, 0, 3),
 };
 
+export const MIRROR_CUBE_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
+export const SOUND_CUBE_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  pulse: float("Pulse", 1, 0, 4),
+  trail: float("Trail", 1, 0, 3),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
+export const HOLLOW_CUBE_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  explode: float("Explosion", 1, 0, 3),
+  color: float("Color", 1, 0, 3),
+  bloom: float("Bloom", 1, 0, 3),
+};
+
+export const COLOR_CUBE_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  turbulence: float("Turbulence", 1, 0, 3),
+  bloom: float("Bloom", 1, 0, 3),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
+export const LATENT_BACKROOMS_PROPS = {
+  speed: float("Camera Speed", 1, 0, 4),
+  bloom: float("Bloom", 1, 0, 3),
+  trail: float("Afterimage Trail", 1, 0, 3),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
+export const ULTRA_HDR_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  pulse: float("Kick Pulse", 1, 0, 3),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
+export const GLASS_LENS_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  pulse: float("Kick Pulse", 1, 0, 3),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
 const UNIFORM_BINDINGS = {
   smokeDensity: "_uEmitDensity",
   fireIntensity: "_uFireIntensity",
@@ -226,6 +271,47 @@ export function applySmokeRoomProps(
 }
 
 export const SCENE_PROP_CONFIGS = {
+  "Point10 Mirror Cube": defineScene(MIRROR_CUBE_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.brightnessScale = v.brightness;
+  }),
+  "Point10 Sound Cube": defineScene(SOUND_CUBE_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.pulseScale = v.pulse;
+    scene.trailScale = v.trail;
+    scene.brightnessScale = v.brightness;
+  }),
+  "Point10 Hollow Cube": defineScene(HOLLOW_CUBE_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.explodeScale = v.explode;
+    scene.colorScale = v.color;
+    scene.bloomScale = v.bloom;
+  }),
+  "Point10 Color Cube": defineScene(COLOR_CUBE_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.turbulenceScale = v.turbulence;
+    scene.bloomScale = v.bloom;
+    scene.brightnessScale = v.brightness;
+  }),
+  "Point10 Latent Backrooms": defineScene(
+    LATENT_BACKROOMS_PROPS,
+    (scene, v) => {
+      scene.speedScale = v.speed;
+      scene.bloomScale = v.bloom;
+      scene.trailScale = v.trail;
+      scene.brightnessScale = v.brightness;
+    },
+  ),
+  "Point10 Ultra HDR": defineScene(ULTRA_HDR_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.pulseScale = v.pulse;
+    scene.brightnessScale = v.brightness;
+  }),
+  "Point10 Glass Lens": defineScene(GLASS_LENS_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.pulseScale = v.pulse;
+    scene.brightnessScale = v.brightness;
+  }),
   "Point10 Around Plus": defineScene(AROUND_PLUS_PROPS, (scene, v) => {
     scene.spinSpeed = v.spinSpeed;
     scene.ringBrightness = v.ringBrightness;

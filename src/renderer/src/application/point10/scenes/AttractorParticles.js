@@ -78,6 +78,16 @@ const SEED_BALLS = [3, 4, 5]; // the three lava balls' ROYGBIV drop-pulse seeds
 // Distinct STARTING hues so the three balls are never all-red at once (red, yellow, indigo).
 const BALL_START_HUES = [ROYGBIV_HUES[0], ROYGBIV_HUES[2], ROYGBIV_HUES[5]];
 
+// The particle field is an overlay, not a full-frame artwork: leave the scene
+// background unset so the adapter's alpha:true WebGPU renderer keeps the empty
+// space transparent instead of painting an opaque black frame.
+export const SCENE_BACKGROUND = null;
+
+export function applySceneBackground(scene) {
+  scene.background = SCENE_BACKGROUND;
+  return scene;
+}
+
 // Pure audio -> uniform mapping (checked in scripts/ap-audio-check.mjs): bass drives
 // maxSpeed up and spinningStrength hard, snare/hi-hat percussion nudges the
 // attractorMassExponent (6..8) modestly with a little bass assist, overall energy drives
@@ -279,7 +289,7 @@ export class AttractorParticles extends BaseSceneWebGPU {
     this.canvas = renderer.domElement;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000000);
+    applySceneBackground(scene);
     this.scene = scene;
 
     const camera = new THREE.PerspectiveCamera(25, width / height, 0.1, 100);
