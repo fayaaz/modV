@@ -12,6 +12,7 @@ import {
   getByteTimeDomainData,
 } from "./setup-media";
 import { AudioBands, isBandFeature } from "./audio-bands";
+import { reduceByteFrequencyData } from "./byte-frequency-data";
 import { createLogger } from "./logger";
 import MediaDeviceManager from "./media-device-manager";
 import {
@@ -619,7 +620,14 @@ class ModV {
 
     if (features) {
       const timeDomain = getByteTimeDomainData();
-      const byteFrequencyData = getByteFrequencyData();
+      // The analyser hands over 1024 bins (fftSize 2048) but the ISF audioFFT
+      // inputs, the worker FFT aux canvas and Meyda are all built for 512.
+      // Reduce to 512 uniform segments here so every consumer sees the same
+      // data and the full spectrum instead of a clipped/aliased half.
+      const byteFrequencyData = reduceByteFrequencyData(
+        getByteFrequencyData(),
+        constants.AUDIO_BUFFER_SIZE,
+      );
       const bands = this.audioBands.update({
         floatFrequencyData: getFloatFrequencyData(),
         byteTimeDomainData: timeDomain,

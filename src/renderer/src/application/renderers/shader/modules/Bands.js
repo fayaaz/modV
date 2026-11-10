@@ -4,6 +4,7 @@ export default {
     author: "modV",
     version: 0.1,
     type: "shader",
+    category: "2d-scenes",
     audioFeatures: ["bass", "mid", "treble"],
   },
   fragmentShader: `

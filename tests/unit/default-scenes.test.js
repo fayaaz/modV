@@ -67,7 +67,6 @@ const FILTER_MODULES = [
   "Edges",
   "Emboss",
   "Pixellate",
-  "Radial Replicate",
   "RGB Halftone",
 ];
 
@@ -83,8 +82,8 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 9", () => {
-    expect(DEFAULTS_VERSION).toBe(9);
+  it("bumps the defaults version to 11", () => {
+    expect(DEFAULTS_VERSION).toBe(11);
   });
 
   it("ships at least 54 default scenes with unique names", () => {
@@ -110,8 +109,8 @@ describe("default scenes", () => {
     ).toBe(true);
   });
 
-  it("adds at least 10 scenes in the version 3 batch", () => {
-    expect(newBatch.length).toBeGreaterThanOrEqual(10);
+  it("adds at least 9 scenes in the version 3 batch", () => {
+    expect(newBatch.length).toBeGreaterThanOrEqual(9);
   });
 
   it("adds at least 12 varied Point10 scenes in the version 4 batch", () => {
@@ -144,7 +143,7 @@ describe("default scenes", () => {
     expect(offenders.map((scene) => scene.name)).toEqual([]);
   });
 
-  it("pins some version 4 foreground or background controls to bass", () => {
+  it("pins some version 4 alpha controls to bass", () => {
     const withAlphaLinks = variedBatch
       .map((scene) => ({
         scene,
@@ -158,7 +157,7 @@ describe("default scenes", () => {
 
     for (const { scene, links } of withAlphaLinks) {
       for (const link of links) {
-        expect(["Background", "Foreground"]).toContain(link.group);
+        expect(GROUP_NAMES).toContain(link.group);
         expect(typeof link.feature).toBe("string");
         expect(link.min).toBeLessThan(link.max);
 
@@ -367,6 +366,31 @@ describe("default scenes", () => {
     expect(offenders.map((scene) => scene.name)).toEqual([]);
   });
 
+  it("does not use the Radial Replicate filter in any default scene", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Radial Replicate"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
+  it("leaves Effects rows empty when Radial Replicate was the only effect", () => {
+    for (const name of ["Hex Bloom", "Hexagon Halo"]) {
+      const scene = DEFAULT_SCENES.find((candidate) => candidate.name === name);
+
+      expect(scene, name).toBeTruthy();
+      expect(getModulesInGroup(scene, "Effects"), name).toEqual([]);
+    }
+  });
+
+  it("does not ship Roto Zoom Riot and retires it from existing installs", () => {
+    expect(
+      DEFAULT_SCENES.some((scene) => scene.name === "Roto Zoom Riot"),
+    ).toBe(false);
+    expect(REMOVED_DEFAULT_SCENES).toContain("Roto Zoom Riot");
+    expect(REFRESHED_DEFAULT_SCENES).not.toContain("Roto Zoom Riot");
+  });
+
   it("uses circular screen, posterize and ASCII Art filters in Effects groups", () => {
     const effectsModules = DEFAULT_SCENES.map((scene) =>
       getModulesInGroup(scene, "Effects"),
@@ -493,6 +517,14 @@ describe("default scenes", () => {
     expect(offenders.map((scene) => scene.name)).toEqual([]);
   });
 
+  it("does not put the Bands 2D shape in an Effects group", () => {
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModulesInGroup(scene, "Effects").includes("Bands"),
+    );
+
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+  });
+
   it("keeps Strobe subtle and synced to the beat", () => {
     const scene = DEFAULT_SCENES.find(
       (candidate) => candidate.name === "Strobe Riot",
@@ -518,20 +550,68 @@ describe("default scenes", () => {
     expect(link.bpmDivision).toBeGreaterThan(0);
   });
 
-  it("keeps a glitch effect in the foreground group only in some scenes", () => {
-    const foregroundOnly = newBatch.filter((scene) => {
-      const foreground = getModulesInGroup(scene, "Foreground");
-      const elsewhere = scene.groups
-        .filter((group) => group.name !== "Foreground")
-        .flatMap((group) => (group.modules || []).map((module) => module.name));
+  it("keeps RGB Shift and Digital Glitch in Effects groups", () => {
+    const glitchEffects = ["Point10 RGB Shift", "Point10 Digital Glitch"];
+    const offenders = DEFAULT_SCENES.filter((scene) =>
+      getModulesInGroup(scene, "Foreground").some((name) =>
+        glitchEffects.includes(name),
+      ),
+    );
 
-      return foreground.some(
-        (name) =>
-          AUDIO_GLITCH_MODULES.includes(name) && !elsewhere.includes(name),
+    expect(offenders.map((scene) => scene.name)).toEqual([]);
+
+    const scenesWithEffects = DEFAULT_SCENES.filter((scene) =>
+      getModulesInGroup(scene, "Effects").some((name) =>
+        glitchEffects.includes(name),
+      ),
+    ).map((scene) => scene.name);
+
+    expect(scenesWithEffects).toEqual(
+      expect.arrayContaining([
+        "Prism Reliquary",
+        "Glitch Bloom Cathedral",
+        "VHS Reliquary",
+        "It Is Coming",
+        "It Twirls At Night",
+        "Boxy Arcade",
+        "DVD Nightmare",
+        "Rave.exe",
+      ]),
+    );
+  });
+
+  it("moves the background into Foreground when the glitch effect was the only foreground layer", () => {
+    const names = [
+      "Prism Reliquary",
+      "Glitch Bloom Cathedral",
+      "VHS Reliquary",
+      "It Is Coming",
+      "It Twirls At Night",
+      "Boxy Arcade",
+      "DVD Nightmare",
+      "Rave.exe",
+    ];
+
+    for (const name of names) {
+      const scene = DEFAULT_SCENES.find((candidate) => candidate.name === name);
+
+      expect(scene, name).toBeTruthy();
+      expect(
+        scene.groups.map((group) => group.name),
+        name,
+      ).toEqual(["Foreground", "Effects"]);
+      expect(
+        getModulesInGroup(scene, "Foreground").length,
+        name,
+      ).toBeGreaterThan(0);
+      expect(getModulesInGroup(scene, "Effects").length, name).toBeGreaterThan(
+        1,
       );
-    });
-
-    expect(foregroundOnly.length).toBeGreaterThanOrEqual(3);
+      expect(
+        (scene.inputLinks || []).some((link) => link.group === "Background"),
+        name,
+      ).toBe(false);
+    }
   });
 
   it("does not use Dirty Lens in any default scene", () => {
@@ -633,7 +713,7 @@ describe("default scene migration", () => {
   it("rebuilds existing defaults that still use a removed module", () => {
     const scenes = [
       cubeFloorScene("Smoke Tunnel", "smoke-tunnel-id"),
-      cubeFloorScene("Roto Zoom Riot", "roto-id"),
+      cubeFloorScene("Mycelium Bloom", "mycelium-id"),
       cubeFloorScene("Dither District", "dither-id"),
     ];
     const result = getDefaultScenesToReplace({
@@ -647,7 +727,7 @@ describe("default scene migration", () => {
     expect(result.replacements.map((replacement) => replacement.name)).toEqual(
       expect.arrayContaining([
         "Smoke Tunnel",
-        "Roto Zoom Riot",
+        "Mycelium Bloom",
         "Dither District",
       ]),
     );
@@ -748,6 +828,7 @@ describe("version 8 default scenes", () => {
       "Spectral Bloom",
       "Fractured Kaleidoscope",
       "Broken Mirror Ball",
+      "Roto Zoom Riot",
     ]);
 
     const names = DEFAULT_SCENES.map((scene) => sceneKey(scene.name));
@@ -865,8 +946,8 @@ describe("version 8 default scenes", () => {
 
     expect(scene).toBeTruthy();
 
-    const background = getGroup(scene, "Background");
-    const itIsComing = background.modules.find(
+    const foreground = getGroup(scene, "Foreground");
+    const itIsComing = foreground.modules.find(
       (module) => module.name === "Point10 It Is Coming For You",
     );
 
@@ -883,14 +964,14 @@ describe("version 8 default scenes", () => {
     expect(bloom.props.blurAmount).toBeCloseTo(5.710711967387224, 10);
 
     const links = scene.inputLinks || [];
-    const backgroundLink = links.find(
+    const foregroundLink = links.find(
       (link) =>
-        link.group === "Background" &&
+        link.group === "Foreground" &&
         link.module === "Point10 It Is Coming For You" &&
         link.control === "alpha",
     );
 
-    expect(backgroundLink).toMatchObject({
+    expect(foregroundLink).toMatchObject({
       feature: "bass",
       min: 0.25,
       max: 1,
@@ -988,14 +1069,14 @@ describe("version 8 default scenes", () => {
 
     expect(scene).toBeTruthy();
     expect(scene.introducedVersion).toBe(8);
-    expect(getModulesInGroup(scene, "Background")).toContain("rave.exe");
+    expect(getModulesInGroup(scene, "Foreground")).toContain("rave.exe");
 
     const kickLink = (scene.inputLinks || []).find(
       (link) => link.module === "rave.exe" && link.control === "kick",
     );
 
     expect(kickLink).toMatchObject({
-      group: "Background",
+      group: "Foreground",
       feature: "bass",
       min: 0,
       max: 1,
@@ -1038,7 +1119,7 @@ describe("version 9 sparse default scenes", () => {
     (scene) => scene.introducedVersion === 9,
   );
 
-  it("adds Background-only, Foreground-only and Effects-only Scenes", () => {
+  it("adds Background-only and Foreground-only Scenes", () => {
     expect(sparseBatch.length).toBeGreaterThanOrEqual(5);
 
     const only = (groupName) =>
@@ -1047,9 +1128,28 @@ describe("version 9 sparse default scenes", () => {
           scene.groups.length === 1 && scene.groups[0].name === groupName,
       );
 
-    expect(only("Background").length).toBeGreaterThanOrEqual(1);
+    expect(only("Background").length).toBeGreaterThanOrEqual(2);
     expect(only("Foreground").length).toBeGreaterThanOrEqual(1);
-    expect(only("Effects").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps Bands in a Background group because it is a 2D shape", () => {
+    const softBands = DEFAULT_SCENES.find(
+      (scene) => scene.name === "Soft Bands",
+    );
+
+    expect(softBands.groups.map((group) => group.name)).toEqual(["Background"]);
+    expect(getModulesInGroup(softBands, "Background")).toEqual(["Bands"]);
+
+    const quietBloom = DEFAULT_SCENES.find(
+      (scene) => scene.name === "Quiet Bloom",
+    );
+
+    expect(quietBloom.groups.map((group) => group.name)).toEqual([
+      "Background",
+      "Effects",
+    ]);
+    expect(getModulesInGroup(quietBloom, "Background")).toEqual(["Bands"]);
+    expect(getModulesInGroup(quietBloom, "Effects")).toEqual(["Bloom"]);
   });
 
   it("chains an effect inside a Foreground group", () => {
@@ -1091,16 +1191,18 @@ describe("version 9 sparse default scenes", () => {
   });
 });
 
-describe("version 9 default scene refresh", () => {
+describe("version 10 default scene refresh", () => {
   const seededScene = (name) => ({ id: `${name}-id`, name, modules: {} });
 
-  it("rebuilds the trimmed seeded defaults for installs on version 8", () => {
+  it("rebuilds the trimmed seeded defaults for installs on version 10", () => {
     const scenes = [
       seededScene("Circuit Ritual"),
       seededScene("Burning Mycelium Circle"),
+      seededScene("Soft Bands"),
+      seededScene("Quiet Bloom"),
     ];
     const result = getDefaultScenesToReplace({
-      defaultsVersion: 8,
+      defaultsVersion: 10,
       scenes,
       removedModuleNames: [],
       seededNames: scenes.map((scene) => scene.name),
@@ -1108,7 +1210,12 @@ describe("version 9 default scene refresh", () => {
     const names = result.replacements.map((replacement) => replacement.name);
 
     expect(names).toEqual(
-      expect.arrayContaining(["Circuit Ritual", "Burning Mycelium Circle"]),
+      expect.arrayContaining([
+        "Circuit Ritual",
+        "Burning Mycelium Circle",
+        "Soft Bands",
+        "Quiet Bloom",
+      ]),
     );
 
     const circuit = result.replacements.find(
@@ -1130,18 +1237,45 @@ describe("version 9 default scene refresh", () => {
       "Background",
       "Effects",
     ]);
+
+    const softBands = result.replacements.find(
+      (replacement) => replacement.name === "Soft Bands",
+    );
+
+    expect(softBands.id).toBe("Soft Bands-id");
+    expect(softBands.definition.groups.map((group) => group.name)).toEqual([
+      "Background",
+    ]);
+
+    const quietBloom = result.replacements.find(
+      (replacement) => replacement.name === "Quiet Bloom",
+    );
+
+    expect(quietBloom.id).toBe("Quiet Bloom-id");
+    expect(quietBloom.definition.groups.map((group) => group.name)).toEqual([
+      "Background",
+      "Effects",
+    ]);
+    expect(
+      quietBloom.definition.groups
+        .find((group) => group.name === "Effects")
+        .modules.map((module) => module.name),
+    ).toEqual(["Bloom"]);
   });
 
   it("lists the Scenes whose definitions changed", () => {
     expect(REFRESHED_DEFAULT_SCENES).toContain("Circuit Ritual");
     expect(REFRESHED_DEFAULT_SCENES).toContain("Strobe Riot");
-    expect(REFRESHED_DEFAULT_SCENES).not.toContain("It Twirls At Night");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Soft Bands");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Quiet Bloom");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("It Twirls At Night");
+    expect(REFRESHED_DEFAULT_SCENES).not.toContain("It Comes At Night");
   });
 
   it("does not overwrite user Scenes that were not seeded", () => {
     const scenes = [seededScene("Circuit Ritual")];
     const result = getDefaultScenesToReplace({
-      defaultsVersion: 8,
+      defaultsVersion: 10,
       scenes,
       removedModuleNames: [],
       seededNames: [],
@@ -1150,7 +1284,7 @@ describe("version 9 default scene refresh", () => {
     expect(result.replacements).toEqual([]);
   });
 
-  it("does not refresh installs already on version 9", () => {
+  it("does not refresh installs already on the latest version", () => {
     const scenes = [seededScene("Circuit Ritual")];
     const result = getDefaultScenesToReplace({
       defaultsVersion: DEFAULTS_VERSION,
@@ -1187,6 +1321,17 @@ describe("default scene removal migration", () => {
     expect(result.map((removal) => removal.id)).toEqual(
       scenes.map((scene) => scene.id),
     );
+  });
+
+  it("removes Roto Zoom Riot from installs upgrading to version 11", () => {
+    const scenes = [seededScene("Roto Zoom Riot", "roto-id")];
+    const result = getDefaultScenesToRemove({
+      defaultsVersion: 10,
+      scenes,
+      seededNames: ["Roto Zoom Riot"],
+    });
+
+    expect(result).toEqual([{ id: "roto-id", name: "Roto Zoom Riot" }]);
   });
 
   it("keeps user-created scenes that share a retired name but were not seeded", () => {

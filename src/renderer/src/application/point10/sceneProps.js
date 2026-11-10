@@ -142,6 +142,21 @@ export const WORMHOLE_PROPS = {
   bloom: float("Bloom", 1, 0, 3),
 };
 
+export const EARTH_PROPS = {
+  spinSpeed: float("Spin Speed", 1, 0, 4),
+  sunSpeed: float("Sun Orbit", 1, 0, 4),
+  nightLights: float("Night Lights", 1, 0, 3),
+  atmosphere: float("Atmosphere", 1, 0, 3),
+  brightness: float("Brightness", 1, 0, 3),
+};
+
+export const SUN_PROPS = {
+  surfaceSpeed: float("Surface Speed", 1, 0, 4),
+  brightness: float("Brightness", 1, 0, 3),
+  corona: float("Corona", 1, 0, 3),
+  rays: float("God Rays", 1, 0, 3),
+};
+
 export const MIRROR_CUBE_PROPS = {
   spinSpeed: float("Spin Speed", 1, 0, 4),
   brightness: float("Brightness", 1, 0, 3),
@@ -271,6 +286,19 @@ export function applySmokeRoomProps(
 }
 
 export const SCENE_PROP_CONFIGS = {
+  "Point10 Earth": defineScene(EARTH_PROPS, (scene, v) => {
+    scene.spinScale = v.spinSpeed;
+    scene.sunScale = v.sunSpeed;
+    scene.lightsScale = v.nightLights;
+    scene.atmosphereScale = v.atmosphere;
+    scene.brightnessScale = v.brightness;
+  }),
+  "Point10 Sun": defineScene(SUN_PROPS, (scene, v) => {
+    scene.surfaceSpeed = v.surfaceSpeed;
+    scene.brightnessScale = v.brightness;
+    scene.coronaScale = v.corona;
+    scene.raysScale = v.rays;
+  }),
   "Point10 Mirror Cube": defineScene(MIRROR_CUBE_PROPS, (scene, v) => {
     scene.spinScale = v.spinSpeed;
     scene.brightnessScale = v.brightness;

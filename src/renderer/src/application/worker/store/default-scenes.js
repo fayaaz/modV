@@ -27,17 +27,22 @@
 // effect stacks, keeps Twirl only in It Twirls At Night, drops RGB Halftone and
 // adds single-Group (Background-only, Foreground-only, Effects-only) Scenes.
 // Version 9 also rebuilds the trimmed Scenes in place (see
-// REFRESHED_DEFAULT_SCENES) for installs that seeded the version 8 set.
+// REFRESHED_DEFAULT_SCENES) for installs that seeded the version 8 set, and
+// version 10 treats Bands as a 2D shape, moves it out of Effects rows, removes
+// Radial Replicate, moves RGB Shift/Digital Glitch into Effects and retires
+// Roto Zoom Riot. Version 11 rebuilds those version 10 edits in place for
+// installs that already saved the version 10 defaults before the edits landed.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 9;
+export const DEFAULTS_VERSION = 11;
 
 // The Cube Floor module was removed in version 7. Existing installs may still
 // hold default Scenes that reference it, so the migration below rebuilds those
 // Scenes from their current definitions (or replaces the old name entirely).
 export const REMOVED_DEFAULT_SCENE_MODULES = ["Point10 Cube Floor"];
 
-// Default Scenes retired in version 8. Installs upgrading to version 8 drop
-// these Scenes, but only when they were seeded from the defaults.
+// Default Scenes retired without a replacement. Installs upgrading drop these
+// Scenes, but only when they were seeded from the defaults. Version 8 retires
+// the first seven; version 10 retires Roto Zoom Riot (reapplied in version 11).
 export const REMOVED_DEFAULT_SCENES = [
   "Ferrofluid Pulse",
   "Kaleidoscope Cathedral",
@@ -46,6 +51,7 @@ export const REMOVED_DEFAULT_SCENES = [
   "Spectral Bloom",
   "Fractured Kaleidoscope",
   "Broken Mirror Ball",
+  "Roto Zoom Riot",
 ];
 
 const RENAMED_DEFAULT_SCENES = [
@@ -90,9 +96,12 @@ const RENAMED_DEFAULT_SCENES = [
   },
 ];
 
-// Version 9 also trims existing Scenes. Installs that seeded the version 8 set
-// get these rebuilt in place (same id/name) so the refinement reaches existing
-// libraries, while older installs keep their historical versions.
+// Version 9 also trims existing Scenes and version 10 moves Bands out of the
+// Effects rows, removes Radial Replicate and moves RGB Shift/Digital Glitch
+// into Effects. Installs that seeded the previous defaults set get these
+// rebuilt in place (same id/name) so the refinement reaches existing libraries,
+// while older installs keep their historical versions. Version 11 re-runs this
+// refresh for libraries that saved version 10 before those edits landed.
 export const REFRESHED_DEFAULT_SCENES = [
   "Mycelium Bloom",
   "Chromatic Waveform",
@@ -110,11 +119,11 @@ export const REFRESHED_DEFAULT_SCENES = [
   "Prism Reliquary",
   "Spiral Static",
   "Ultimate Drift",
-  "Roto Zoom Riot",
   "Glitch Bloom Cathedral",
   "Hex Bloom",
   "VHS Reliquary",
   "It Is Coming",
+  "It Twirls At Night",
   "Around Plus Aurora",
   "Around Water Garden",
   "Attractor Bloom",
@@ -141,6 +150,7 @@ export const REFRESHED_DEFAULT_SCENES = [
   "Digital Crystal Tunnel",
   "MBOX Light Tunnel",
   "Rave.exe",
+  "Soft Bands",
   "Quiet Bloom",
 ];
 
@@ -1368,7 +1378,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 22,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -1386,20 +1396,6 @@ const DEFAULT_SCENES = [
         ],
       },
       {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 RGB Shift",
-            props: {},
-            meta: { alpha: 0.75, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
         name: "Effects",
         inherit: true,
         clearing: true,
@@ -1411,6 +1407,11 @@ const DEFAULT_SCENES = [
             props: {
               levels: 10,
             },
+          },
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+            meta: { alpha: 0.75, compositeOperation: "screen" },
           },
         ],
       },
@@ -1595,73 +1596,13 @@ const DEFAULT_SCENES = [
   },
 
   {
-    name: "Roto Zoom Riot",
-    introducedVersion: 3,
-    minSeconds: 6,
-    maxSeconds: 15,
-    groups: [
-      {
-        name: "Background",
-        inherit: false,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "Point10 Spiral Particles",
-            props: {
-              spinSpeed: 1.2,
-              particleSize: 1.1,
-              turbulence: 0.25,
-              gain: 1.3,
-              bassGain: 1.55,
-              smoothing: 0.05,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.65, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
-        name: "Effects",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "normal",
-        modules: [
-          {
-            name: "rotozoomer",
-            props: {
-              rotationSpeed: 55,
-              zoomScale: 4,
-              timeScale: 1.5,
-            },
-          },
-        ],
-      },
-    ],
-  },
-
-  {
     name: "Glitch Bloom Cathedral",
     introducedVersion: 3,
     minSeconds: 9,
     maxSeconds: 23,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -1675,20 +1616,6 @@ const DEFAULT_SCENES = [
               midGain: 1.1,
               smoothing: 0.15,
             },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 RGB Shift",
-            props: {},
-            meta: { alpha: 0.7, compositeOperation: "screen" },
           },
         ],
       },
@@ -1708,6 +1635,11 @@ const DEFAULT_SCENES = [
               colorize: 0.55,
               center: [0.5, 0.5],
             },
+          },
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+            meta: { alpha: 0.7, compositeOperation: "screen" },
           },
         ],
       },
@@ -1825,16 +1757,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
-        modules: [
-          {
-            name: "Radial Replicate",
-            props: {
-              numberOfDivisions: 6,
-              postRotateAngle: 15,
-              preRotateAngle: -10,
-            },
-          },
-        ],
+        modules: [],
       },
     ],
   },
@@ -1846,7 +1769,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 18,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -1860,20 +1783,6 @@ const DEFAULT_SCENES = [
               trebleGain: 1.4,
               smoothing: 0.06,
             },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.6, compositeOperation: "screen" },
           },
         ],
       },
@@ -1899,6 +1808,11 @@ const DEFAULT_SCENES = [
               analogDistort: 1.4,
               bleedAmount: 0.9,
             },
+          },
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.6, compositeOperation: "screen" },
           },
         ],
       },
@@ -1973,7 +1887,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 26,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -1993,20 +1907,6 @@ const DEFAULT_SCENES = [
         ],
       },
       {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 RGB Shift",
-            props: {},
-            meta: { alpha: 0.6, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
         name: "Effects",
         inherit: true,
         clearing: true,
@@ -2020,12 +1920,17 @@ const DEFAULT_SCENES = [
               intensity: 0.55,
             },
           },
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
         ],
       },
     ],
     inputLinks: [
       {
-        group: "Foreground",
+        group: "Effects",
         module: "Point10 RGB Shift",
         control: "alpha",
         feature: "bass",
@@ -2042,7 +1947,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 24,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -2063,22 +1968,6 @@ const DEFAULT_SCENES = [
             },
             meta: {
               alpha: 0.7446732251408736,
-            },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            meta: {
-              compositeOperation: "screen",
-              alpha: 0.65,
             },
           },
         ],
@@ -2108,12 +1997,19 @@ const DEFAULT_SCENES = [
               intensity: 0.5638257200751327,
             },
           },
+          {
+            name: "Point10 Digital Glitch",
+            meta: {
+              compositeOperation: "screen",
+              alpha: 0.65,
+            },
+          },
         ],
       },
     ],
     inputLinks: [
       {
-        group: "Background",
+        group: "Foreground",
         module: "Point10 It Is Coming For You",
         control: "alpha",
         feature: "bass",
@@ -2477,7 +2373,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 20,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -2497,20 +2393,6 @@ const DEFAULT_SCENES = [
         ],
       },
       {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.6, compositeOperation: "screen" },
-          },
-        ],
-      },
-      {
         name: "Effects",
         inherit: true,
         clearing: true,
@@ -2521,12 +2403,17 @@ const DEFAULT_SCENES = [
             name: "Point10 Old Movie",
             props: {},
           },
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.6, compositeOperation: "screen" },
+          },
         ],
       },
     ],
     inputLinks: [
       {
-        group: "Foreground",
+        group: "Effects",
         module: "Point10 Digital Glitch",
         control: "alpha",
         feature: "bass",
@@ -2620,7 +2507,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 24,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -2637,20 +2524,6 @@ const DEFAULT_SCENES = [
               gain: 1.2,
               bassGain: 1.45,
             },
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 RGB Shift",
-            props: {},
-            meta: { alpha: 0.65, compositeOperation: "screen" },
           },
         ],
       },
@@ -2677,12 +2550,17 @@ const DEFAULT_SCENES = [
               bleedAmount: 1,
             },
           },
+          {
+            name: "Point10 RGB Shift",
+            props: {},
+            meta: { alpha: 0.65, compositeOperation: "screen" },
+          },
         ],
       },
     ],
     inputLinks: [
       {
-        group: "Foreground",
+        group: "Effects",
         module: "Point10 RGB Shift",
         control: "alpha",
         feature: "bass",
@@ -3463,15 +3341,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
-        modules: [
-          {
-            name: "Radial Replicate",
-            props: {
-              numberOfDivisions: 12,
-              postRotateAngle: 0,
-            },
-          },
-        ],
+        modules: [],
       },
     ],
     inputLinks: [
@@ -3992,7 +3862,7 @@ const DEFAULT_SCENES = [
     maxSeconds: 24,
     groups: [
       {
-        name: "Background",
+        name: "Foreground",
         inherit: false,
         clearing: true,
         alpha: 1,
@@ -4001,20 +3871,6 @@ const DEFAULT_SCENES = [
           {
             name: "rave.exe",
             props: {},
-          },
-        ],
-      },
-      {
-        name: "Foreground",
-        inherit: true,
-        clearing: true,
-        alpha: 1,
-        compositeOperation: "screen",
-        modules: [
-          {
-            name: "Point10 Digital Glitch",
-            props: {},
-            meta: { alpha: 0.5, compositeOperation: "screen" },
           },
         ],
       },
@@ -4032,12 +3888,17 @@ const DEFAULT_SCENES = [
               intensity: 0.4,
             },
           },
+          {
+            name: "Point10 Digital Glitch",
+            props: {},
+            meta: { alpha: 0.5, compositeOperation: "screen" },
+          },
         ],
       },
     ],
     inputLinks: [
       {
-        group: "Background",
+        group: "Foreground",
         module: "rave.exe",
         control: "kick",
         feature: "bass",
@@ -4188,13 +4049,15 @@ const DEFAULT_SCENES = [
     maxSeconds: 28,
     groups: [
       {
-        name: "Effects",
+        name: "Background",
         inherit: false,
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
         modules: [
           {
+            // Bands is a 2D shape and draws its own spectrum, so it belongs in
+            // the Background row rather than the Effects row.
             name: "Bands",
             props: {
               u_ringWidth: 0.06,
@@ -4212,21 +4075,27 @@ const DEFAULT_SCENES = [
     maxSeconds: 30,
     groups: [
       {
-        name: "Effects",
+        name: "Background",
         inherit: false,
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
         modules: [
           {
-            // Bands lives in the Effects gallery and draws its own spectrum,
-            // so an Effects-only Scene needs no Background group. (Mesmer is
-            // a 2D Scene, not an effect, and does not belong in this row.)
             name: "Bands",
             props: {
               u_ringWidth: 0.05,
             },
           },
+        ],
+      },
+      {
+        name: "Effects",
+        inherit: true,
+        clearing: true,
+        alpha: 1,
+        compositeOperation: "normal",
+        modules: [
           {
             name: "Bloom",
             props: {

@@ -10,6 +10,8 @@ const MODULE_NAMES = [
   "Point10 Latent Backrooms",
   "Point10 Glass Lens",
   "Point10 Ultra HDR",
+  "Point10 Earth",
+  "Point10 Sun",
 ];
 
 test.describe.configure({ mode: "serial" });

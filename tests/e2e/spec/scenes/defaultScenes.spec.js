@@ -37,7 +37,6 @@ const FILTER_MODULES = [
   "Edges",
   "Emboss",
   "Pixellate",
-  "Radial Replicate",
   "RGB Halftone",
 ];
 
@@ -146,6 +145,14 @@ test("does not put the Mesmer 2D Scene in an Effects group", () => {
   expect(offenders.map((scene) => scene.name)).toEqual([]);
 });
 
+test("does not put the Bands 2D shape in an Effects group", () => {
+  const offenders = DEFAULT_SCENES.filter((scene) =>
+    getEffectsModuleNames(scene).includes("Bands"),
+  );
+
+  expect(offenders.map((scene) => scene.name)).toEqual([]);
+});
+
 test("uses a spread of registered ISF filters in Effects groups", async () => {
   const registered = await modVApp.evaluateWorkerState("modules.registered");
   const isfNames = new Set(
@@ -185,8 +192,8 @@ test("ships a version 3 batch of glitch scenes", async () => {
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(9);
-  expect(newBatch.length).toBeGreaterThanOrEqual(10);
+  expect(DEFAULTS_VERSION).toBe(11);
+  expect(newBatch.length).toBeGreaterThanOrEqual(9);
 
   for (const scene of newBatch) {
     const names = getModuleNames(scene);
@@ -226,19 +233,20 @@ test("ships a version 3 batch of glitch scenes", async () => {
 
   expect(rgbHalftoneScenes.map((scene) => scene.name)).toEqual([]);
 
-  const foregroundOnly = newBatch.filter((scene) => {
-    const foreground = getGroupModules(scene, "Foreground");
-    const elsewhere = scene.groups
-      .filter((group) => group.name !== "Foreground")
-      .flatMap((group) => (group.modules || []).map((module) => module.name));
+  const glitchEffects = ["Point10 RGB Shift", "Point10 Digital Glitch"];
+  const misplaced = DEFAULT_SCENES.filter((scene) =>
+    getGroupModules(scene, "Foreground").some((name) =>
+      glitchEffects.includes(name),
+    ),
+  );
 
-    return foreground.some(
-      (name) =>
-        AUDIO_GLITCH_MODULES.includes(name) && !elsewhere.includes(name),
-    );
-  });
+  expect(misplaced.map((scene) => scene.name)).toEqual([]);
 
-  expect(foregroundOnly.length).toBeGreaterThanOrEqual(3);
+  const chained = DEFAULT_SCENES.filter((scene) =>
+    getEffectsModuleNames(scene).some((name) => glitchEffects.includes(name)),
+  );
+
+  expect(chained.length).toBeGreaterThanOrEqual(9);
 });
 
 test("seeds the version 3 scenes with every module intact", async () => {
@@ -255,7 +263,7 @@ test("seeds the version 3 scenes with every module intact", async () => {
     const groupNames = scene.groups.map((group) => group.name);
 
     expect(groupNames).toEqual(
-      expect.arrayContaining(["Background", "Foreground", "Effects"]),
+      expect.arrayContaining(["Foreground", "Effects"]),
     );
 
     for (const group of scene.groups) {
@@ -433,7 +441,7 @@ test("version 7 replaces Cube Floor and ships Circular Mountain", () => {
     (scene) => scene.name === "Circular Mountain",
   );
 
-  expect(DEFAULTS_VERSION).toBe(9);
+  expect(DEFAULTS_VERSION).toBe(11);
   expect(circularMountain).toBeTruthy();
   expect(getGroupModules(circularMountain, "Background")).toEqual([
     "fractal-mountain-tunnel",
@@ -468,9 +476,8 @@ test("version 9 adds single-Group and foreground-chained Scenes", () => {
         scene.groups.length === 1 && scene.groups[0].name === groupName,
     );
 
-  expect(only("Background").length).toBeGreaterThanOrEqual(1);
+  expect(only("Background").length).toBeGreaterThanOrEqual(2);
   expect(only("Foreground").length).toBeGreaterThanOrEqual(1);
-  expect(only("Effects").length).toBeGreaterThanOrEqual(1);
 
   const chained = sparse.filter((scene) => {
     const foreground = scene.groups.find(
