@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain, screen, shell } from "electron";
+import { app, dialog, ipcMain, shell } from "electron";
 import os from "node:os";
 import fs from "node:fs";
 import { join } from "path";
@@ -12,6 +12,13 @@ import { closeWindow, createWindow, windows } from "./windows";
 import { updateMenu } from "./menu-bar";
 import { getMediaManager } from "./media-manager";
 import { isQuitting, markQuitting, runCleanup, withTimeout } from "./shutdown";
+import {
+  getNextOutputWindowPlacement,
+  placeMainWindow,
+  prepareMainWindowPlacement,
+  trackMainWindow,
+  trackOutputWindow,
+} from "./window-state";
 
 const isDevelopment = !app.isPackaged;
 const isTest = process.env.CI === "e2e";
@@ -138,16 +145,23 @@ const windowPrefs = {
     unique: true,
 
     beforeCreate() {
-      const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+      const { bounds, restored } = prepareMainWindowPlacement();
 
       modVReady = false;
 
-      return {
-        options: {
-          width,
-          height,
-        },
+      const options = {
+        width: bounds.width,
+        height: bounds.height,
       };
+
+      // Seed the constructor position too so the window does not appear in
+      // the window manager's default spot before the exact bounds are applied.
+      if (restored) {
+        options.x = bounds.x;
+        options.y = bounds.y;
+      }
+
+      return { options };
     },
 
     /**
@@ -175,12 +189,19 @@ const windowPrefs = {
           return { action: "deny" };
         }
 
+        // Output windows remember where they were (which screen and which
+        // resolution) between restarts. Seeding the options avoids the window
+        // painting at the default position before did-create-window can move
+        // it.
+        const placement = getNextOutputWindowPlacement();
+
         return {
           action: "allow",
           overrideBrowserWindowOptions: {
             autoHideMenuBar: true,
             enableLargerThanScreen: true,
             title: "",
+            ...(placement.savedBounds || {}),
             webPreferences: {
               sandbox: false,
               contextIsolation: false,
@@ -190,6 +211,15 @@ const windowPrefs = {
           },
         };
       });
+
+      // Attach the placement bookkeeping once the child window exists. The
+      // saved bounds are applied again here because window.open()'s feature
+      // string (width/height/left) can win over the override options above.
+      window.webContents.on("did-create-window", (childWindow) => {
+        trackOutputWindow(childWindow);
+      });
+
+      trackMainWindow(window);
 
       const mm = getMediaManager();
 
@@ -425,7 +455,8 @@ const windowPrefs = {
         } catch (e) {
           console.error(e);
         }
-        windows["mainWindow"].maximize();
+
+        placeMainWindow(windows["mainWindow"]);
       });
     },
   },

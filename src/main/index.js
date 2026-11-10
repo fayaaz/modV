@@ -14,6 +14,7 @@ import { getExistingMediaManager } from "./media-manager";
 import { markQuitting, registerShutdownHandlers, runCleanup } from "./shutdown";
 import { registerSystemAudioIpc, stopActive } from "./system-audio";
 import { createWindow, windows } from "./windows";
+import { flushWindowState } from "./window-state";
 
 require("@electron/remote/main").initialize();
 
@@ -146,6 +147,12 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+// Persist the latest window placement even when the app is quit without the
+// debounced save having run.
+app.on("before-quit", () => {
+  flushWindowState();
 });
 
 app.on("activate", async () => {
