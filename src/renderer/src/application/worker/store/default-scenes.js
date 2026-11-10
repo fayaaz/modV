@@ -32,8 +32,11 @@
 // Radial Replicate, moves RGB Shift/Digital Glitch into Effects and retires
 // Roto Zoom Riot. Version 11 rebuilds those version 10 edits in place for
 // installs that already saved the version 10 defaults before the edits landed.
+// Version 12 removes the Bands module from every default Scene, leaving the
+// rows empty where it was the only module, and rebuilds the affected Scenes in
+// place for installs that saved the version 11 defaults.
 export const LEGACY_DEFAULTS_VERSION = 1;
-export const DEFAULTS_VERSION = 11;
+export const DEFAULTS_VERSION = 12;
 
 // The Cube Floor module was removed in version 7. Existing installs may still
 // hold default Scenes that reference it, so the migration below rebuilds those
@@ -102,6 +105,7 @@ const RENAMED_DEFAULT_SCENES = [
 // rebuilt in place (same id/name) so the refinement reaches existing libraries,
 // while older installs keep their historical versions. Version 11 re-runs this
 // refresh for libraries that saved version 10 before those edits landed.
+// Version 12 re-runs it again for the Bands removal.
 export const REFRESHED_DEFAULT_SCENES = [
   "Mycelium Bloom",
   "Chromatic Waveform",
@@ -1208,15 +1212,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Bands",
-            props: {
-              u_ringWidth: 0.03,
-            },
-            meta: { alpha: 0.5, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -2143,15 +2139,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Bands",
-            props: {
-              u_ringWidth: 0.04,
-            },
-            meta: { alpha: 0.5, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -2170,16 +2158,7 @@ const DEFAULT_SCENES = [
         ],
       },
     ],
-    inputLinks: [
-      {
-        group: "Foreground",
-        module: "Bands",
-        control: "alpha",
-        feature: "bass",
-        min: 0.1,
-        max: 0.65,
-      },
-    ],
+    inputLinks: [],
   },
 
   {
@@ -3262,15 +3241,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "screen",
-        modules: [
-          {
-            name: "Bands",
-            props: {
-              u_ringWidth: 0.05,
-            },
-            meta: { alpha: 0.65, compositeOperation: "screen" },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",
@@ -4054,16 +4025,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
-        modules: [
-          {
-            // Bands is a 2D shape and draws its own spectrum, so it belongs in
-            // the Background row rather than the Effects row.
-            name: "Bands",
-            props: {
-              u_ringWidth: 0.06,
-            },
-          },
-        ],
+        modules: [],
       },
     ],
   },
@@ -4080,14 +4042,7 @@ const DEFAULT_SCENES = [
         clearing: true,
         alpha: 1,
         compositeOperation: "normal",
-        modules: [
-          {
-            name: "Bands",
-            props: {
-              u_ringWidth: 0.05,
-            },
-          },
-        ],
+        modules: [],
       },
       {
         name: "Effects",

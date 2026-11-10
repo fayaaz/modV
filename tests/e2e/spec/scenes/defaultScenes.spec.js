@@ -133,6 +133,11 @@ test("no default scene uses plain Waveform or Bar modules", () => {
       "Mycelium Bloom:Foreground",
       "Waveform Drive:Background",
       "Terminal Bloom:Foreground",
+      "Rolling Fire Bloom:Foreground",
+      "Around Water Garden:Foreground",
+      "Mosaic Meridian:Foreground",
+      "Soft Bands:Background",
+      "Quiet Bloom:Background",
     ]),
   );
 });
@@ -145,9 +150,9 @@ test("does not put the Mesmer 2D Scene in an Effects group", () => {
   expect(offenders.map((scene) => scene.name)).toEqual([]);
 });
 
-test("does not put the Bands 2D shape in an Effects group", () => {
+test("does not use the Bands module in any default scene", () => {
   const offenders = DEFAULT_SCENES.filter((scene) =>
-    getEffectsModuleNames(scene).includes("Bands"),
+    getModuleNames(scene).includes("Bands"),
   );
 
   expect(offenders.map((scene) => scene.name)).toEqual([]);
@@ -183,7 +188,7 @@ test("uses a spread of registered ISF filters in Effects groups", async () => {
 
   expect(
     DEFAULT_SCENES.some((scene) => getModuleNames(scene).includes("Bands")),
-  ).toBe(true);
+  ).toBe(false);
 });
 
 test("ships a version 3 batch of glitch scenes", async () => {
@@ -192,7 +197,7 @@ test("ships a version 3 batch of glitch scenes", async () => {
     (scene) => scene.introducedVersion === 3,
   );
 
-  expect(DEFAULTS_VERSION).toBe(11);
+  expect(DEFAULTS_VERSION).toBe(12);
   expect(newBatch.length).toBeGreaterThanOrEqual(9);
 
   for (const scene of newBatch) {
@@ -441,7 +446,7 @@ test("version 7 replaces Cube Floor and ships Circular Mountain", () => {
     (scene) => scene.name === "Circular Mountain",
   );
 
-  expect(DEFAULTS_VERSION).toBe(11);
+  expect(DEFAULTS_VERSION).toBe(12);
   expect(circularMountain).toBeTruthy();
   expect(getGroupModules(circularMountain, "Background")).toEqual([
     "fractal-mountain-tunnel",
@@ -569,6 +574,13 @@ test("default scenes chain controls to bass and a BPM tween", async () => {
   expect(seededDefaults.length).toBeGreaterThanOrEqual(18);
 
   for (const scene of seededDefaults) {
+    // An intentionally blank Scene (Soft Bands) has no Modules and no
+    // control to pin to music, so it is exempt from the autopilot-link
+    // contract. The app leaves its rows empty rather than inventing one.
+    if (Object.keys(scene.modules || {}).length === 0) {
+      continue;
+    }
+
     const links = Object.values(
       (scene.inputs && scene.inputs.inputLinks) || scene.inputLinks || {},
     );
@@ -682,6 +694,11 @@ test("hydrates legacy files that only have defaultsSeeded", async () => {
     };
 
     try {
+      // Any debounced scenes/* persist scheduled by earlier app activity must
+      // have landed before we overwrite the saved Scene list, otherwise the
+      // persist can rewrite the file between our write and the hydrate read.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(
         filePath,

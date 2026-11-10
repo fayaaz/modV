@@ -54,6 +54,8 @@ import { clearWarmInstances } from "../../../point10/warm-cache.js";
 import { collectSceneGroups } from "../../scene-capture";
 import { createEmptyScene, moveSceneToIndex } from "../../scene-columns";
 import { clearSceneCellModules, mergeSceneCell } from "../../scene-cell";
+import atomicWrite from "../../atomic-write.cjs";
+const { writeFileAtomic } = atomicWrite;
 import {
   DEFAULT_SCENE_BPM_TWEEN,
   getBpmDivision,
@@ -1686,8 +1688,7 @@ async function writeStoredScenes(state) {
   };
 
   try {
-    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.promises.writeFile(filePath, JSON.stringify(payload));
+    await writeFileAtomic(filePath, JSON.stringify(payload));
   } catch (e) {
     console.error("Could not save the Scene list", e);
   }

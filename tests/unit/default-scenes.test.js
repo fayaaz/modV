@@ -82,8 +82,8 @@ const getModulesInGroup = (scene, name) =>
   (getGroup(scene, name)?.modules || []).map((module) => module.name);
 
 describe("default scenes", () => {
-  it("bumps the defaults version to 11", () => {
-    expect(DEFAULTS_VERSION).toBe(11);
+  it("bumps the defaults version to 12", () => {
+    expect(DEFAULTS_VERSION).toBe(12);
   });
 
   it("ships at least 54 default scenes with unique names", () => {
@@ -419,6 +419,11 @@ describe("default scenes", () => {
   });
 
   it("lets a Scene use any subset of the Group roles", () => {
+    // Soft Bands was emptied by the version 12 Bands removal and kept as an
+    // intentionally blank cell in the grid; every other Scene must draw
+    // something.
+    const intentionallyEmpty = new Set(["Soft Bands"]);
+
     for (const scene of DEFAULT_SCENES) {
       const groupNames = scene.groups.map((group) => group.name);
 
@@ -444,7 +449,9 @@ describe("default scenes", () => {
         expect(typeof group.compositeOperation).toBe("string");
       }
 
-      expect(getModuleNames(scene).length).toBeGreaterThan(0);
+      if (!intentionallyEmpty.has(scene.name)) {
+        expect(getModuleNames(scene).length).toBeGreaterThan(0);
+      }
     }
   });
 
@@ -517,12 +524,18 @@ describe("default scenes", () => {
     expect(offenders.map((scene) => scene.name)).toEqual([]);
   });
 
-  it("does not put the Bands 2D shape in an Effects group", () => {
-    const offenders = DEFAULT_SCENES.filter((scene) =>
-      getModulesInGroup(scene, "Effects").includes("Bands"),
+  it("does not use the Bands module in any default scene", () => {
+    const moduleOffenders = DEFAULT_SCENES.filter((scene) =>
+      getModuleNames(scene).includes("Bands"),
     );
 
-    expect(offenders.map((scene) => scene.name)).toEqual([]);
+    expect(moduleOffenders.map((scene) => scene.name)).toEqual([]);
+
+    const linkOffenders = DEFAULT_SCENES.filter((scene) =>
+      (scene.inputLinks || []).some((link) => link.module === "Bands"),
+    );
+
+    expect(linkOffenders.map((scene) => scene.name)).toEqual([]);
   });
 
   it("keeps Strobe subtle and synced to the beat", () => {
@@ -1132,13 +1145,46 @@ describe("version 9 sparse default scenes", () => {
     expect(only("Foreground").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("keeps Bands in a Background group because it is a 2D shape", () => {
+  it("leaves the rows empty when Bands was the only module", () => {
+    const rollingFireBloom = DEFAULT_SCENES.find(
+      (scene) => scene.name === "Rolling Fire Bloom",
+    );
+
+    expect(getModulesInGroup(rollingFireBloom, "Foreground")).toEqual([]);
+    expect(getModulesInGroup(rollingFireBloom, "Background")).toEqual([
+      "Point10 Rolling Fire",
+    ]);
+    expect(getModulesInGroup(rollingFireBloom, "Effects")).toEqual(["Bloom"]);
+
+    const aroundWaterGarden = DEFAULT_SCENES.find(
+      (scene) => scene.name === "Around Water Garden",
+    );
+
+    expect(getModulesInGroup(aroundWaterGarden, "Foreground")).toEqual([]);
+    expect(
+      (aroundWaterGarden.inputLinks || []).some(
+        (link) => link.module === "Bands",
+      ),
+    ).toBe(false);
+
+    const mosaicMeridian = DEFAULT_SCENES.find(
+      (scene) => scene.name === "Mosaic Meridian",
+    );
+
+    expect(getModulesInGroup(mosaicMeridian, "Foreground")).toEqual([]);
+    expect(getModulesInGroup(mosaicMeridian, "Background")).toEqual([
+      "Point10 Chromatic Wave",
+    ]);
+    expect(getModulesInGroup(mosaicMeridian, "Effects")).toEqual([
+      "Color Posterize",
+    ]);
+
     const softBands = DEFAULT_SCENES.find(
       (scene) => scene.name === "Soft Bands",
     );
 
     expect(softBands.groups.map((group) => group.name)).toEqual(["Background"]);
-    expect(getModulesInGroup(softBands, "Background")).toEqual(["Bands"]);
+    expect(getModulesInGroup(softBands, "Background")).toEqual([]);
 
     const quietBloom = DEFAULT_SCENES.find(
       (scene) => scene.name === "Quiet Bloom",
@@ -1148,7 +1194,7 @@ describe("version 9 sparse default scenes", () => {
       "Background",
       "Effects",
     ]);
-    expect(getModulesInGroup(quietBloom, "Background")).toEqual(["Bands"]);
+    expect(getModulesInGroup(quietBloom, "Background")).toEqual([]);
     expect(getModulesInGroup(quietBloom, "Effects")).toEqual(["Bloom"]);
   });
 
@@ -1191,10 +1237,10 @@ describe("version 9 sparse default scenes", () => {
   });
 });
 
-describe("version 10 default scene refresh", () => {
+describe("version 11 default scene refresh", () => {
   const seededScene = (name) => ({ id: `${name}-id`, name, modules: {} });
 
-  it("rebuilds the trimmed seeded defaults for installs on version 10", () => {
+  it("rebuilds the trimmed seeded defaults for installs on version 11", () => {
     const scenes = [
       seededScene("Circuit Ritual"),
       seededScene("Burning Mycelium Circle"),
@@ -1202,7 +1248,7 @@ describe("version 10 default scene refresh", () => {
       seededScene("Quiet Bloom"),
     ];
     const result = getDefaultScenesToReplace({
-      defaultsVersion: 10,
+      defaultsVersion: 11,
       scenes,
       removedModuleNames: [],
       seededNames: scenes.map((scene) => scene.name),
@@ -1275,7 +1321,7 @@ describe("version 10 default scene refresh", () => {
   it("does not overwrite user Scenes that were not seeded", () => {
     const scenes = [seededScene("Circuit Ritual")];
     const result = getDefaultScenesToReplace({
-      defaultsVersion: 10,
+      defaultsVersion: 11,
       scenes,
       removedModuleNames: [],
       seededNames: [],
@@ -1291,6 +1337,104 @@ describe("version 10 default scene refresh", () => {
       scenes,
       removedModuleNames: [],
       seededNames: ["Circuit Ritual"],
+    });
+
+    expect(result.replacements).toEqual([]);
+  });
+});
+
+describe("version 12 default scene refresh", () => {
+  const seededScene = (name) => ({ id: `${name}-id`, name, modules: {} });
+
+  it("rebuilds the Bands-using seeded defaults for installs on version 11", () => {
+    const scenes = [
+      seededScene("Rolling Fire Bloom"),
+      seededScene("Around Water Garden"),
+      seededScene("Mosaic Meridian"),
+      seededScene("Soft Bands"),
+      seededScene("Quiet Bloom"),
+    ];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 11,
+      scenes,
+      removedModuleNames: [],
+      seededNames: scenes.map((scene) => scene.name),
+    });
+    const names = result.replacements.map((replacement) => replacement.name);
+
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "Rolling Fire Bloom",
+        "Around Water Garden",
+        "Mosaic Meridian",
+        "Soft Bands",
+        "Quiet Bloom",
+      ]),
+    );
+
+    for (const replacement of result.replacements) {
+      expect(replacement.id).toBe(`${replacement.name}-id`);
+
+      const moduleNames = replacement.definition.groups.flatMap((group) =>
+        group.modules.map((module) => module.name),
+      );
+
+      expect(moduleNames).not.toContain("Bands");
+
+      for (const link of replacement.definition.inputLinks || []) {
+        expect(link.module).not.toBe("Bands");
+      }
+    }
+
+    const rollingFireBloom = result.replacements.find(
+      (replacement) => replacement.name === "Rolling Fire Bloom",
+    );
+    const rollingForeground = rollingFireBloom.definition.groups.find(
+      (group) => group.name === "Foreground",
+    );
+
+    expect(rollingForeground.modules).toEqual([]);
+  });
+
+  it("lists the Scenes whose definitions changed for version 12", () => {
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Rolling Fire Bloom");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Around Water Garden");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Mosaic Meridian");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Soft Bands");
+    expect(REFRESHED_DEFAULT_SCENES).toContain("Quiet Bloom");
+  });
+
+  it("does not refresh installs already on version 12", () => {
+    const scenes = [seededScene("Soft Bands"), seededScene("Quiet Bloom")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: DEFAULTS_VERSION,
+      scenes,
+      removedModuleNames: [],
+      seededNames: scenes.map((scene) => scene.name),
+    });
+
+    expect(result.replacements).toEqual([]);
+  });
+
+  it("does not refresh installs two versions behind", () => {
+    const scenes = [seededScene("Soft Bands"), seededScene("Quiet Bloom")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 10,
+      scenes,
+      removedModuleNames: [],
+      seededNames: scenes.map((scene) => scene.name),
+    });
+
+    expect(result.replacements).toEqual([]);
+  });
+
+  it("does not overwrite user Scenes that were not seeded", () => {
+    const scenes = [seededScene("Soft Bands")];
+    const result = getDefaultScenesToReplace({
+      defaultsVersion: 11,
+      scenes,
+      removedModuleNames: [],
+      seededNames: [],
     });
 
     expect(result.replacements).toEqual([]);
