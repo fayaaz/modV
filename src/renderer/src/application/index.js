@@ -35,6 +35,8 @@ import windowHandler from "./window-handler";
 import use from "./use";
 import constants, { GROUP_ENABLED } from "./constants";
 import ModVWorker from "./worker/index.worker.js?worker";
+import EngineClient from "./engine-client";
+import { createPresetData } from "./worker/preset-serializer";
 
 const logger = createLogger("renderer:app");
 
@@ -81,6 +83,7 @@ class ModV {
     this.ready = new Promise((resolve) => {
       resolver = resolve;
     });
+    this._resolveReady = resolver;
     // Bind subsystems and defaults
     this.setupMedia = setupMedia;
     this.mediaDeviceManager = new MediaDeviceManager();
@@ -121,125 +124,196 @@ class ModV {
     this._videoReconnectTimers = {};
     this._videoReconnectInFlight = {};
     this._shutdownStarted = false;
-    this.$worker = new ModVWorker();
-    this.$asyncWorker = new PromiseWorker(this.$worker);
 
-    this.$worker.postMessage({
-      type: "__dirname",
-      payload: app.getAppPath(),
-      userData: app.getPath("userData"),
-    });
+    // WS-14: MODV_ENGINE=1 runs the Rust engine instead of the worker. The
+    // engine presents its own native window; the renderer never creates a
+    // WebGL/WebGPU context in this mode.
+    this.engineMode = window.engine?.isEnabled?.() === true;
+    this.$worker = this.engineMode ? null : new ModVWorker();
+    this.$asyncWorker = this.engineMode
+      ? null
+      : new PromiseWorker(this.$worker);
 
-    this.$worker.addEventListener("message", async (e) => {
-      const message = e.data;
-      const { type } = message;
+    if (this.engineMode) {
+      this.engineClient = new EngineClient();
+      this.engineClient.bindMirror(store);
+      this.engineClient.trackPreviewFrames();
+      this.engineClient.onDelta((delta) => {
+        const d = delta?.data || delta;
 
-      // if (
-      //   type !== "metrics/SET_FPS_MEASURE" &&
-      //   type !== "modules/UPDATE_ACTIVE_MODULE_PROP" &&
-      //   type !== "beats/SET_BPM" &&
-      //   type !== "beats/SET_KICK" &&
-      //   type !== "tick"
-      // ) {
-      //   console.log(`⚙️%c ${type}`, "color: red");
-      // }
-
-      if (type === "destroyed") {
-        console.log("webcontents got destroyed, sending onto main");
-        ipcRenderer.send("destroyed");
-        return;
-      }
-
-      if (type === "createWebcodecVideo") {
-        const videoContext = await this.createWebcodecVideo(message);
-        this.videos[videoContext.id] = videoContext;
-        return;
-      }
-
-      if (type === "removeWebcodecVideo") {
-        const { video, stream } = this.videos[message.id];
-        video.src = "";
-        for (const track of stream.getTracks()) {
-          track.stop();
+        if (d && typeof d.type === "string") {
+          store.commit(d.type, d.payload);
         }
-        delete this.videos[message.id];
-      }
+      });
 
-      if (e.data.type === "tick" && this.ready) {
-        this.tick(e.data.payload);
-        return;
-      }
+      this.engineClient.onState((transition) => {
+        if (transition?.state === "running") {
+          void this._appReady();
+        }
+      });
+      // Fallback: never hang the app if the engine never reports running.
+      setTimeout(() => {
+        if (!this._appReadySent) {
+          logger.warn(
+            "engine did not report running within 10 s; continuing without it",
+          );
+          this._signalReady();
+        }
+      }, 10_000);
+    } else {
+      this.$worker.postMessage({
+        type: "__dirname",
+        payload: app.getAppPath(),
+        userData: app.getPath("userData"),
+      });
 
-      if (type === "worker-setup-complete") {
-        // Make the default group
-        await this.store.dispatch("groups/createGroup", {
-          enabled: GROUP_ENABLED,
-        });
+      this.$worker.addEventListener("message", async (e) => {
+        const message = e.data;
+        const { type } = message;
 
-        // Restore/seed Scenes before declaring the app ready. Seeding builds
-        // temporary Groups and Modules, so tests (and the UI) must not race it
-        // or they see a changing Group/Module list.
-        try {
-          await this.store.dispatch("scenes/hydrateScenes");
-          await this.store.dispatch("scenes/ensureDefaultScenes");
-        } catch (e) {
-          console.error("Could not restore Scenes", e);
+        // if (
+        //   type !== "metrics/SET_FPS_MEASURE" &&
+        //   type !== "modules/UPDATE_ACTIVE_MODULE_PROP" &&
+        //   type !== "beats/SET_BPM" &&
+        //   type !== "beats/SET_KICK" &&
+        //   type !== "tick"
+        // ) {
+        //   console.log(`⚙️%c ${type}`, "color: red");
+        // }
+
+        if (type === "destroyed") {
+          console.log("webcontents got destroyed, sending onto main");
+          ipcRenderer.send("destroyed");
+          return;
         }
 
-        await this.store.dispatch("osc/createServer", {
-          host: "0.0.0.0",
-          port: 3333,
-        });
-
-        resolver();
-        ipcRenderer.send("modv-ready");
-        return;
-      }
-
-      if (Array.isArray(message)) {
-        return;
-      }
-      const payload = e.data.payload ? JSON.parse(e.data.payload) : undefined;
-
-      if (type === "commitQueue") {
-        for (let i = 0; i < payload.length; i++) {
-          const commit = payload[i];
-          store.commit(commit.type, commit.payload);
+        if (type === "createWebcodecVideo") {
+          const videoContext = await this.createWebcodecVideo(message);
+          this.videos[videoContext.id] = videoContext;
+          return;
         }
-      } else {
-        store.commit(type, payload);
-      }
-    });
+
+        if (type === "removeWebcodecVideo") {
+          const { video, stream } = this.videos[message.id];
+          video.src = "";
+          for (const track of stream.getTracks()) {
+            track.stop();
+          }
+          delete this.videos[message.id];
+        }
+
+        if (e.data.type === "tick" && this.ready) {
+          this.tick(e.data.payload);
+          return;
+        }
+
+        if (type === "worker-setup-complete") {
+          void this._appReady();
+          return;
+        }
+
+        if (Array.isArray(message)) {
+          return;
+        }
+        const payload = e.data.payload ? JSON.parse(e.data.payload) : undefined;
+
+        if (type === "commitQueue") {
+          for (let i = 0; i < payload.length; i++) {
+            const commit = payload[i];
+            store.commit(commit.type, commit.payload);
+          }
+        } else {
+          store.commit(type, payload);
+        }
+      });
+    }
 
     const that = this;
 
-    this.store = {
-      state: store.state,
-      getters: store.getters,
+    this.store = this.engineMode
+      ? this.engineClient.storeFacade
+      : {
+          state: store.state,
+          getters: store.getters,
 
-      commit(...args) {
-        return that.$worker.postMessage(
-          {
-            type: "commit",
-            identifier: args[0],
-            payload: args[1],
+          commit(...args) {
+            return that.$worker.postMessage(
+              {
+                type: "commit",
+                identifier: args[0],
+                payload: args[1],
+              },
+              args[2],
+            );
           },
-          args[2],
-        );
-      },
 
-      dispatch(...args) {
-        return that.$asyncWorker.postMessage(
-          {
-            __async: true,
-            type: "dispatch",
-            identifier: args[0],
-            payload: args[1],
+          dispatch(...args) {
+            return that.$asyncWorker.postMessage(
+              {
+                __async: true,
+                type: "dispatch",
+                identifier: args[0],
+                payload: args[1],
+              },
+              args[2],
+            );
           },
-          args[2],
-        );
-      },
-    };
+        };
+
+    if (this.engineMode) {
+      // The worker drove rendering; the engine has its own native window.
+      // Keep the renderer's audio pump on a rAF cadence so the UI meters
+      // stay live until the engine owns the analysis (WS-9, M6).
+      const frame = (timestamp) => {
+        this.tick(timestamp);
+        this._engineRaf = window.requestAnimationFrame(frame);
+      };
+      this._engineRaf = window.requestAnimationFrame(frame);
+    }
+  }
+
+  _signalReady() {
+    this._resolveReady?.();
+    ipcRenderer.send("modv-ready");
+  }
+
+  // Shared ready path: the legacy worker signals worker-setup-complete, the
+  // engine signals `engine/state running`. Idempotent.
+  async _appReady() {
+    if (this._appReadySent) {
+      return;
+    }
+    this._appReadySent = true;
+
+    // Make the default group
+    try {
+      await this.store.dispatch("groups/createGroup", {
+        enabled: GROUP_ENABLED,
+      });
+    } catch (error) {
+      logger.error("groups/createGroup failed", { message: error?.message });
+    }
+
+    // Restore/seed Scenes before declaring the app ready. Seeding builds
+    // temporary Groups and Modules, so tests (and the UI) must not race it
+    // or they see a changing Group/Module list.
+    try {
+      await this.store.dispatch("scenes/hydrateScenes");
+      await this.store.dispatch("scenes/ensureDefaultScenes");
+    } catch (error) {
+      console.error("Could not restore Scenes", error);
+    }
+
+    try {
+      await this.store.dispatch("osc/createServer", {
+        host: "0.0.0.0",
+        port: 3333,
+      });
+    } catch (error) {
+      logger.error("osc/createServer failed", { message: error?.message });
+    }
+
+    this._signalReady();
   }
 
   async setup(canvas = document.createElement("canvas")) {
@@ -373,16 +447,22 @@ class ModV {
     this.setupBeatDetektor();
 
     this.canvas = canvas;
-    const offscreen = this.canvas.transferControlToOffscreen();
 
-    this.$worker.postMessage(
-      {
-        type: "canvas",
-        where: "output",
-        payload: offscreen,
-      },
-      [offscreen],
-    );
+    if (this.engineMode) {
+      // The engine presents the output natively in its own window; the
+      // renderer's hidden canvas stays untouched (no OffscreenCanvas handoff).
+    } else {
+      const offscreen = this.canvas.transferControlToOffscreen();
+
+      this.$worker.postMessage(
+        {
+          type: "canvas",
+          where: "output",
+          payload: offscreen,
+        },
+        [offscreen],
+      );
+    }
 
     this.store.dispatch("windows/createWindow");
 
@@ -579,6 +659,16 @@ class ModV {
     if (!this._shutdownStarted) {
       this._shutdownStarted = true;
 
+      if (this._engineRaf) {
+        try {
+          window.cancelAnimationFrame(this._engineRaf);
+        } catch (e) {
+          // already stopped
+        }
+      }
+
+      this.engineClient?.dispose();
+
       try {
         this.$worker?.postMessage({ type: "modv-destroy" });
       } catch (e) {
@@ -664,7 +754,18 @@ class ModV {
       features.byteTimeDomainData = Array.from(
         timeDomain ? timeDomain.slice(-constants.AUDIO_BUFFER_SIZE) : [],
       );
-      this.$worker.postMessage({ type: "meyda", payload: features });
+      if (this.engineMode) {
+        // Keep the UI's meters live by feeding the mirror directly; the
+        // engine owns analysis proper from WS-9 (M6).
+        this._store.commit("meyda/SET_BANDS", {
+          bass: features.bass ?? 0,
+          mid: features.mid ?? 0,
+          treble: features.treble ?? 0,
+          cells: features.p10?.cells || [],
+        });
+      } else {
+        this.$worker.postMessage({ type: "meyda", payload: features });
+      }
 
       for (let i = 0; i < featuresToGet.length; i += 1) {
         const feature = featuresToGet[i];
@@ -682,6 +783,16 @@ class ModV {
   }
 
   startCaptureForDevice(deviceId) {
+    if (this.engineMode) {
+      // Camera/screen frames flow to the engine via WS-10 (M6); until then
+      // capture is not started in engine mode.
+      if (!this._warnedEngineCamera) {
+        logger.warn("camera capture is not wired to the engine yet (WS-10)");
+        this._warnedEngineCamera = true;
+      }
+      return undefined;
+    }
+
     if (!this._captureState[deviceId]) {
       this._captureState[deviceId] = { running: false, generation: 0 };
     }
@@ -805,13 +916,18 @@ class ModV {
           state.grabFailuresReported = false;
 
           if (bitmap && bitmap.width && bitmap.height) {
-            this.$worker.postMessage(
-              {
-                type: "videoFrame",
-                payload: { deviceId, label: deviceLabel, bitmap },
-              },
-              [bitmap],
-            );
+            if (this.engineMode) {
+              // WS-10 (M6): the engine will ingest frames directly.
+              bitmap.close?.();
+            } else {
+              this.$worker.postMessage(
+                {
+                  type: "videoFrame",
+                  payload: { deviceId, label: deviceLabel, bitmap },
+                },
+                [bitmap],
+              );
+            }
           }
         })
         .catch((error) => {
@@ -951,6 +1067,14 @@ class ModV {
   }
 
   async generatePreset() {
+    if (this.engineMode) {
+      // The engine doesn't serialise presets until WS-13 lands (M2), so the
+      // renderer builds the document from the mirror store — the same code
+      // the worker runs on the authoritative store. Keep the promise-worker
+      // contract (a JSON string) for the save-preset menu path.
+      return JSON.stringify(await createPresetData(this._store));
+    }
+
     return await this.$asyncWorker.postMessage({
       __async: true,
       type: "generatePreset",
@@ -958,6 +1082,15 @@ class ModV {
   }
 
   loadPreset(filePathToPreset) {
+    if (this.engineMode) {
+      // Preset application in the engine is WS-13 (M2). Mutating the mirror
+      // directly would desync the engine, so load is a documented no-op here.
+      logger.warn("loadPreset is not wired to the engine yet (WS-13, M2)", {
+        filePathToPreset,
+      });
+      return;
+    }
+
     this.$worker.postMessage({ type: "loadPreset", payload: filePathToPreset });
   }
 
