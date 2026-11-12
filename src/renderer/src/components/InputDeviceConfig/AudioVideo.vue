@@ -70,6 +70,17 @@
           </grid>
         </c>
 
+        <c v-if="engineMode" span="1..">
+          <grid columns="4">
+            <c span="1">Capture</c>
+            <c span="3" class="engine-capture-hint">
+              Cameras are captured by the Rust engine (GStreamer). Enabling a
+              camera starts an engine source; the order below is the Webcam
+              module's <code>camera</code> index.
+            </c>
+          </grid>
+        </c>
+
         <c span="1..">
           <grid columns="4">
             <c span="1">Video Inputs</c>
@@ -164,6 +175,47 @@
               </Select>
             </c>
             <c>{{ appliedFrameRateText(input.deviceId) }}</c>
+
+            <c
+              v-if="engineMode && engineStatusText(input.deviceId)"
+              span="1.."
+              class="engine-source-status"
+            >
+              {{ engineStatusText(input.deviceId) }}
+            </c>
+
+            <c
+              v-if="engineMode && engineNotice(input.deviceId)"
+              span="1.."
+              class="system-audio-error"
+            >
+              {{ engineNotice(input.deviceId) }}
+            </c>
+          </grid>
+        </c>
+
+        <c v-if="engineMode && engineStatusError" span="1..">
+          <grid columns="4">
+            <c span="1"></c>
+            <c span="3" class="system-audio-error">{{ engineStatusError }}</c>
+          </grid>
+        </c>
+
+        <c v-if="engineMode && engineSources.length" span="1..">
+          <grid columns="4">
+            <c span="1">Engine Sources</c>
+            <c span="3">
+              <div
+                v-for="source in engineSources"
+                :key="source.sourceId"
+                class="engine-source"
+              >
+                <span class="engine-source__id">{{ source.sourceId }}</span>
+                <span class="engine-source__state">
+                  — {{ formatEngineSource(source) }}</span
+                >
+              </div>
+            </c>
           </grid>
         </c>
 
@@ -186,6 +238,12 @@ import {
   buildFrameRateOptions,
   buildResolutionOptions,
 } from "../../application/video-capabilities";
+import {
+  cameraSourceId,
+  ENGINE_MEDIA_STATUS_POLL_MS,
+  formatDeviceStatus,
+  formatMediaSourceStatus,
+} from "../../application/engine-media";
 
 const logger = createLogger("renderer:audio-input");
 
@@ -199,10 +257,17 @@ export default {
       gainRangeValue: 1,
       audioSelectValue: null,
       logDirectory: "",
+      // WS-10: engine media sources and their last known state (~1 Hz poll).
+      engineSources: [],
+      engineStatusError: "",
+      enginePollTimer: null,
     };
   },
 
   computed: {
+    engineMode() {
+      return this.$modV?.engineMode === true;
+    },
     audioInputs() {
       const audioInputs = Object.values(
         this.$modV.store.state.mediaStream.audio,
@@ -349,6 +414,14 @@ export default {
     this.gainRangeValue = Number(value);
 
     this.loadLogDirectory();
+
+    if (this.engineMode) {
+      this.startEngineStatusPolling();
+    }
+  },
+
+  beforeUnmount() {
+    this.stopEngineStatusPolling();
   },
 
   methods: {
@@ -379,6 +452,85 @@ export default {
     setSystemAudioState(payload) {
       this.$modV.store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
       this.$modV._store.commit("mediaStream/SET_SYSTEM_AUDIO_STATE", payload);
+    },
+
+    // -- WS-10 engine capture ------------------------------------------------
+
+    startEngineStatusPolling() {
+      this.stopEngineStatusPolling();
+      this.enginePollTimer = setInterval(() => {
+        void this.pollEngineStatus();
+      }, ENGINE_MEDIA_STATUS_POLL_MS);
+      void this.pollEngineStatus();
+    },
+
+    stopEngineStatusPolling() {
+      if (this.enginePollTimer !== null) {
+        clearInterval(this.enginePollTimer);
+        this.enginePollTimer = null;
+      }
+    },
+
+    // One `media/status` poll: refreshes the per-source state line, and lets
+    // the controller stop cameras that disappeared and restart dead ones (with
+    // a backoff, so a busy device is not hammered).
+    async pollEngineStatus() {
+      const engineMedia = this.$modV.engineMedia;
+
+      if (!engineMedia?.isEnabled?.()) {
+        return;
+      }
+
+      const availableIds = Object.values(
+        this.$modV.store.state.mediaStream.video || {},
+      )
+        .map((device) => device?.deviceId)
+        .filter(Boolean);
+
+      try {
+        const result = await engineMedia.pollStatus({
+          selectedIds: this.selectedVideoSourceIds,
+          availableIds,
+        });
+
+        this.engineSources = Array.isArray(result.sources)
+          ? result.sources
+          : [];
+        this.engineStatusError = result.error || "";
+      } catch (e) {
+        this.engineStatusError = e?.message || String(e);
+      }
+    },
+
+    engineStatusText(deviceId) {
+      return formatDeviceStatus({ sources: this.engineSources }, deviceId);
+    },
+
+    formatEngineSource(source) {
+      return formatMediaSourceStatus(source);
+    },
+
+    // One message per source, recorded by the controller, so a failing camera
+    // does not append a notice on every poll.
+    engineNotice(deviceId) {
+      const sourceId = cameraSourceId(deviceId);
+
+      return sourceId
+        ? this.$modV.engineMedia?.noticeFor?.(sourceId) || ""
+        : "";
+    },
+
+    commitSelectedVideoSources(videoIds) {
+      const payload = { videoIds: [...videoIds] };
+
+      this.$modV.store.commit(
+        "mediaStream/SET_SELECTED_VIDEO_SOURCES",
+        payload,
+      );
+      this.$modV._store.commit(
+        "mediaStream/SET_SELECTED_VIDEO_SOURCES",
+        payload,
+      );
     },
 
     revertAudioSource(previous) {
@@ -597,13 +749,43 @@ export default {
           const { resolution, frameRate } =
             this.getDeviceVideoSettings(deviceId);
 
-          await this.$modV.setupMedia({
-            videoId: deviceId,
-            videoResolution: resolution,
-            videoFrameRate: frameRate,
-          });
+          if (this.engineMode) {
+            // The engine's 1-based camera index is the position in the saved
+            // selection, so add the camera to the order *before* starting it.
+            const selected = [...this.selectedVideoSourceIds];
+            const alreadySelected = selected.includes(deviceId);
 
-          this.syncSelectedVideoSources();
+            if (!alreadySelected) {
+              selected.push(deviceId);
+              this.commitSelectedVideoSources(selected);
+            }
+
+            try {
+              await this.$modV.setupMedia({
+                videoId: deviceId,
+                videoResolution: resolution,
+                videoFrameRate: frameRate,
+              });
+            } catch (e) {
+              if (!alreadySelected) {
+                this.commitSelectedVideoSources(
+                  selected.filter((id) => id !== deviceId),
+                );
+              }
+
+              throw e;
+            }
+
+            void this.pollEngineStatus();
+          } else {
+            await this.$modV.setupMedia({
+              videoId: deviceId,
+              videoResolution: resolution,
+              videoFrameRate: frameRate,
+            });
+
+            this.syncSelectedVideoSources();
+          }
         } else {
           // Stop and remove this device stream if present
           this.stopVideoDevice(deviceId);
@@ -709,7 +891,14 @@ export default {
     },
 
     renumerate() {
-      this.$modV.enumerateDevices();
+      // In engine mode a re-scan must also re-list the engine's cameras and
+      // reconcile the running sources; `refreshVideoInputs` does both.
+      if (typeof this.$modV.refreshVideoInputs === "function") {
+        void this.$modV.refreshVideoInputs();
+        return;
+      }
+
+      void this.$modV.mediaDeviceManager?.enumerateDevices?.();
     },
   },
 };
@@ -744,6 +933,28 @@ export default {
 }
 
 .video-settings-hint {
+  color: #9a9a9a;
+}
+
+.engine-capture-hint {
+  color: #9a9a9a;
+  font-style: italic;
+}
+
+.engine-source-status {
+  color: #8f8;
+}
+
+.engine-source {
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.engine-source__id {
+  color: var(--foreground-color);
+}
+
+.engine-source__state {
   color: #9a9a9a;
 }
 </style>

@@ -22,6 +22,9 @@
 
     <div style="margin-bottom: 12px">
       <div class="section-title">Available Sources</div>
+      <div v-if="engineMode" class="engine-screen-notice">
+        {{ engineScreenHint }}
+      </div>
       <div class="sources-grid">
         <div
           v-for="s in sources"
@@ -40,10 +43,13 @@
       </div>
     </div>
 
+    <div v-if="engineError" class="engine-screen-error">{{ engineError }}</div>
+
     <div class="dialog-actions">
       <Button
         class="light"
-        :disabled="!selectedSource"
+        :disabled="!selectedSource || (engineMode && !engineScreenNodeId)"
+        :title="engineMode && !engineScreenNodeId ? engineScreenHint : null"
         @click="startFromSelectedSource"
       >
         Start Capture
@@ -57,6 +63,11 @@ import Dialog from "../Dialog.vue";
 import Number from "../inputs/Number.vue";
 import Checkbox from "../inputs/Checkbox.vue";
 import { v4 as uuidv4 } from "uuid";
+import {
+  ENGINE_SCREEN_CAPTURE_UNAVAILABLE,
+  engineUnsupportedMessage,
+} from "../../application/engine-unsupported";
+import { screenNodeIdFromSource } from "../../application/engine-media";
 
 export default {
   components: {
@@ -71,7 +82,27 @@ export default {
       selectedSource: null,
       fps: 60,
       showCursor: false,
+      engineError: "",
     };
+  },
+  computed: {
+    engineMode() {
+      return this.$modV?.engineMode === true;
+    },
+
+    engineScreenHint() {
+      return ENGINE_SCREEN_CAPTURE_UNAVAILABLE;
+    },
+
+    /**
+     * The PipeWire node id the engine's `media/start-screen` needs. Electron 45
+     * does not expose it (`desktopCapturer` only returns Chromium source ids),
+     * so this is null today; `screenNodeIdFromSource` picks it up automatically
+     * if a future Electron version starts surfacing one.
+     */
+    engineScreenNodeId() {
+      return screenNodeIdFromSource(this.selectedSource);
+    },
   },
   watch: {
     // Refresh sources when dialog opens
@@ -105,6 +136,34 @@ export default {
 
     async startFromSelectedSource() {
       if (!this.selectedSource) return;
+
+      // WS-10: engine mode never opens getUserMedia for a screen share. The
+      // engine needs the portal's PipeWire node id, which this Electron version
+      // does not expose, so the dialog explains that instead of capturing
+      // frames nothing consumes.
+      if (this.engineMode) {
+        this.engineError = "";
+
+        const nodeId = this.engineScreenNodeId;
+
+        if (!nodeId) {
+          this.engineError = ENGINE_SCREEN_CAPTURE_UNAVAILABLE;
+          console.warn(engineUnsupportedMessage("Screen capture"));
+          return;
+        }
+
+        try {
+          await this.$modV.engineMedia.startScreen({
+            nodeId,
+            name: this.selectedSource.name,
+          });
+          this.dialogClosed();
+        } catch (e) {
+          this.engineError = e?.message || String(e);
+        }
+
+        return;
+      }
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -184,6 +243,7 @@ export default {
       this.selectedSource = null;
       this.fps = 60;
       this.showCursor = false;
+      this.engineError = "";
 
       // Remove from Vuex store
       this.$store.commit("dialogs/REMOVE_OPEN", "screenPicker");
@@ -193,6 +253,17 @@ export default {
 </script>
 
 <style scoped>
+.engine-screen-notice {
+  color: #f8c;
+  font-style: italic;
+  margin-bottom: 8px;
+}
+
+.engine-screen-error {
+  color: #f88;
+  margin-bottom: 8px;
+}
+
 .section-title {
   font-weight: bold;
   margin-bottom: 8px;

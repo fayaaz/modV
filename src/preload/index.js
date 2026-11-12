@@ -65,6 +65,45 @@ const engineApi = {
       height,
     });
   },
+  // WS-10 — engine-owned media capture (GStreamer). The renderer keeps the
+  // device UI; these calls only carry the capture intent. Every method resolves
+  // with the engine's reply or rejects with an error whose message starts with
+  // a `media_*` code (`application/engine-media.js#mapEngineMediaError`).
+  listCameras() {
+    return ipcRenderer.invoke("engine/media-list");
+  },
+  startEngineCamera({ sourceId, cameraId, index, width, height, fps } = {}) {
+    return ipcRenderer.invoke("engine/media-start-camera", {
+      sourceId,
+      cameraId,
+      index,
+      width,
+      height,
+      fps,
+    });
+  },
+  startEngineFile({ sourceId, path, width, height, fps, loop } = {}) {
+    return ipcRenderer.invoke("engine/media-start-file", {
+      sourceId,
+      path,
+      width,
+      height,
+      fps,
+      loop,
+    });
+  },
+  startEngineScreen({ sourceId, nodeId } = {}) {
+    return ipcRenderer.invoke("engine/media-start-screen", {
+      sourceId,
+      nodeId,
+    });
+  },
+  stopEngineSource(sourceId) {
+    return ipcRenderer.invoke("engine/media-stop", { sourceId });
+  },
+  engineMediaStatus() {
+    return ipcRenderer.invoke("engine/media-status");
+  },
   getState() {
     return ipcRenderer.invoke("engine/get-state");
   },

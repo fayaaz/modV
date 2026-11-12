@@ -6,6 +6,7 @@ import {
   buildVideoConstraints,
   describeCaptureError,
   shouldReconnectVideoCapture,
+  shouldUseBrowserVideoCapture,
 } from "./media-inputs";
 import { buildVideoOptions } from "./video-capabilities";
 
@@ -22,6 +23,7 @@ async function getMediaStream({
   videoResolution,
   videoFrameRate,
   audioStream,
+  engineMediaEnabled = false,
 }) {
   const audioConstraints = {};
   const videoConstraints = {};
@@ -33,7 +35,15 @@ async function getMediaStream({
     };
   }
 
-  if (videoSourceId) {
+  // WS-10: in engine mode the Rust engine owns camera capture
+  // (GStreamer/V4L2), so the renderer must not ask for `getUserMedia` video at
+  // all — not even to enumerate, which would open the device.
+  const browserVideo = shouldUseBrowserVideoCapture({
+    engineMediaEnabled,
+    videoSourceId,
+  });
+
+  if (browserVideo) {
     videoConstraints.video = buildVideoConstraints({
       deviceId: videoSourceId,
       resolution: videoResolution,
@@ -47,7 +57,9 @@ async function getMediaStream({
       (audioConstraints.audio
         ? navigator.mediaDevices.getUserMedia(audioConstraints)
         : false),
-    videoSourceId && navigator.mediaDevices.getUserMedia(videoConstraints),
+    browserVideo
+      ? navigator.mediaDevices.getUserMedia(videoConstraints)
+      : false,
   ];
 }
 
@@ -103,6 +115,12 @@ async function setupMedia({
       deviceSettings?.frameRate ?? mediaStreamState.videoFrameRate;
   }
 
+  // WS-10: with MODV_ENGINE=1 the engine captures the camera, so the entire
+  // getUserMedia → hidden <video> → ImageCapture → grabFrame chain is skipped.
+  // Failure surfaces as a rejected start and is reported by the caller.
+  const engineMediaEnabled = this.engineMedia?.isEnabled?.() === true;
+  const engineVideo = engineMediaEnabled && !!videoSourceId;
+
   const streams = [];
 
   if (audioId) {
@@ -120,7 +138,12 @@ async function setupMedia({
   // If the requested video device already exists and its track is live,
   // short-circuit. A capture whose track has ended (camera unplugged) is
   // torn down so a fresh getUserMedia stream can be acquired below.
-  if (videoId && this._imageCaptures && this._imageCaptures[videoSourceId]) {
+  if (
+    !engineVideo &&
+    videoId &&
+    this._imageCaptures &&
+    this._imageCaptures[videoSourceId]
+  ) {
     const existingCapture = this._imageCaptures[videoSourceId];
 
     if (
@@ -182,6 +205,7 @@ async function setupMedia({
       videoResolution,
       videoFrameRate,
       audioStream,
+      engineMediaEnabled,
     }),
   ).catch((e) => {
     logger.error("could not open the media input", {
@@ -192,6 +216,46 @@ async function setupMedia({
 
     throw e;
   });
+
+  // WS-10: engine mode. The engine already owns the pipeline; all the renderer
+  // does is ask for it (a restart of the same source id replaces the previous
+  // pipeline engine-side) and record what it asked for. No hidden <video>, no
+  // ImageCapture and no capture loop are created.
+  if (engineVideo) {
+    const device = (mediaStreamDevices.video || []).find(
+      (candidate) => candidate.deviceId === videoSourceId,
+    );
+
+    try {
+      await this.engineMedia.startCamera({
+        deviceId: videoSourceId,
+        cameraId: device?.engineCameraId || videoSourceId,
+        selectedIds: [
+          ...(this._store.state.mediaStream.selectedVideoSources || []),
+        ],
+        resolution: videoResolution,
+        frameRate: videoFrameRate,
+      });
+
+      // `startCamera` writes the applied settings into the mirror store, so the
+      // panel's "(active: …)" lines and the engine agree.
+      mediaDeviceManager.selectVideoDevice(videoSourceId);
+
+      logger.info("started the engine camera", {
+        deviceId: videoSourceId,
+        cameraId: device?.engineCameraId || videoSourceId,
+        resolution: videoResolution,
+        frameRate: videoFrameRate,
+      });
+    } catch (e) {
+      logger.error("the engine could not start the camera", {
+        deviceId: videoSourceId,
+        error: e?.message || String(e),
+      });
+
+      throw e;
+    }
+  }
 
   // This video element is required to keep the camera alive for the ImageCapture API
   // (this._imageCapture, ./index.js)

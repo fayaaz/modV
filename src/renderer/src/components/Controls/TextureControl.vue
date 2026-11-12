@@ -163,6 +163,9 @@
 <script>
 import constants from "../../application/constants";
 import { VideoControl } from "./VideoControl.vue";
+import { createLogger } from "../../application/logger";
+
+const logger = createLogger("renderer:texture-control");
 
 export default {
   components: {
@@ -189,10 +192,16 @@ export default {
       modelImagePath: "",
       modelVideoPath: "",
       modelCanvasId: "",
+      // WS-10: the engine source this control started for its video file, so a
+      // file switch/unmount can stop exactly that pipeline.
+      engineVideoSourceId: null,
     };
   },
 
   computed: {
+    engineMode() {
+      return this.$modV?.engineMode === true;
+    },
     auxillaries() {
       return this.$modV.store.state.outputs.auxillary;
     },
@@ -274,6 +283,16 @@ export default {
       (this.modelValue?.type === "video" && this.modelValue?.options?.path) ||
       "";
     this.modelCanvasId = this.modelValue?.options?.id || "";
+
+    // An already-applied video texture (preset load / panel reopen): make sure
+    // the engine has a source for it.
+    if (this.engineMode && this.type === "video" && this.modelVideoPath) {
+      void this.applyEngineVideoSource();
+    }
+  },
+
+  beforeUnmount() {
+    void this.stopEngineVideoSource();
   },
 
   methods: {
@@ -299,6 +318,15 @@ export default {
         textureDefinition.options.paused = false;
         textureDefinition.options.playbackrate = 1;
         textureDefinition.options.path = this.modelVideoPath;
+
+        // WS-10: the engine decodes the file (GStreamer) — never a WebCodecs
+        // decoder. The old source is stopped before the new one starts.
+        if (this.engineMode) {
+          void this.applyEngineVideoSource();
+        }
+      } else if (this.engineMode && this.engineVideoSourceId) {
+        // Switched away from the video texture: release its pipeline.
+        void this.stopEngineVideoSource();
       }
 
       if (
@@ -341,6 +369,61 @@ export default {
       this.updateTextureDefinition({
         options: { ...this.modelValue.options, playbackrate },
       });
+    },
+
+    // -- WS-10 engine video files -------------------------------------------
+
+    /**
+     * Start the engine's GStreamer source for the selected video file.
+     *
+     * The media library stores a media-directory-relative path
+     * (`default/video/clip.mp4`); the engine wants an absolute path or a URI
+     * (`engine-media.js#toEngineMediaPath`). The previous source for this
+     * control is stopped first, and no WebCodecs decoder/`<video>` element is
+     * ever created.
+     */
+    async applyEngineVideoSource() {
+      const engineMedia = this.$modV.engineMedia;
+
+      if (!engineMedia?.isEnabled?.() || !this.modelVideoPath) {
+        return;
+      }
+
+      try {
+        const response = await engineMedia.startVideoFile({
+          path: this.modelVideoPath,
+          mediaPath: this.$modV.store.state.media?.path,
+          previousSourceId: this.engineVideoSourceId,
+          // 0 = engine default (1280×720@30; the engine normalises).
+          loop: this.modelValue?.options?.loop !== false,
+        });
+
+        this.engineVideoSourceId = response?.sourceId || null;
+      } catch (e) {
+        logger.warn("could not start the engine video file", {
+          path: this.modelVideoPath,
+          error: e?.message || String(e),
+        });
+      }
+    },
+
+    async stopEngineVideoSource() {
+      const sourceId = this.engineVideoSourceId;
+
+      if (!sourceId) {
+        return;
+      }
+
+      this.engineVideoSourceId = null;
+
+      try {
+        await this.$modV.engineMedia?.stopSource?.(sourceId);
+      } catch (e) {
+        logger.warn("could not stop the engine video file", {
+          sourceId,
+          error: e?.message || String(e),
+        });
+      }
     },
   },
 };

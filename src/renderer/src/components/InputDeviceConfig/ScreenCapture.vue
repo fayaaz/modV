@@ -9,6 +9,10 @@
     class="device-config"
   >
     <grid class="borders">
+      <c v-if="engineMode" span="1..">
+        <div class="engine-screen-notice">{{ engineScreenHint }}</div>
+      </c>
+
       <c span="1..">
         <grid columns="6">
           <c span="1">Screen Capture</c>
@@ -59,6 +63,10 @@
 
 <script>
 import { v4 as uuidv4 } from "uuid";
+import {
+  ENGINE_SCREEN_CAPTURE_UNAVAILABLE,
+  engineUnsupportedMessage,
+} from "../../application/engine-unsupported";
 
 export default {
   data() {
@@ -70,6 +78,14 @@ export default {
     };
   },
   computed: {
+    engineMode() {
+      return this.$modV?.engineMode === true;
+    },
+
+    engineScreenHint() {
+      return ENGINE_SCREEN_CAPTURE_UNAVAILABLE;
+    },
+
     captures() {
       const aux = this.$modV.store.state.outputs.auxillary;
       return Object.values(aux).filter((o) => o.group === "screen");
@@ -82,6 +98,14 @@ export default {
     },
 
     async reconnectCapture(cap) {
+      if (this.engineMode) {
+        // The engine captures screens through a PipeWire node id, which the
+        // Electron desktopCapturer path does not expose; reconnect stays a
+        // legacy-only action.
+        console.warn(engineUnsupportedMessage("Screen capture"));
+        return;
+      }
+
       try {
         const { id, name } = cap;
         // Try getDisplayMedia with system picker if available; fall back to direct selection by name
@@ -120,6 +144,11 @@ export default {
     },
 
     async startCapture() {
+      if (this.engineMode) {
+        console.warn(engineUnsupportedMessage("Screen capture"));
+        return;
+      }
+
       try {
         // Use getDisplayMedia with continuous capture constraints
         const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -302,6 +331,11 @@ export default {
 </script>
 
 <style scoped>
+.engine-screen-notice {
+  color: #f8c;
+  font-style: italic;
+}
+
 .muted {
   color: var(--foreground-color-2);
 }

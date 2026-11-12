@@ -8,11 +8,37 @@ import {
   restoreVideoSources,
   selectWebcamSource,
   shouldReconnectVideoCapture,
+  shouldUseBrowserVideoCapture,
   VIDEO_CAPTURE_MAX_GRAB_FAILURES,
   VIDEO_CAPTURE_MUTED_RECONNECT_MS,
 } from "../../src/renderer/src/application/media-inputs.js";
 
 const SYSTEM_AUDIO_ID = "modv:system-audio";
+
+describe("shouldUseBrowserVideoCapture", () => {
+  it("captures with getUserMedia in legacy mode", () => {
+    expect(
+      shouldUseBrowserVideoCapture({
+        engineMediaEnabled: false,
+        videoSourceId: "/dev/video0",
+      }),
+    ).toBe(true);
+  });
+
+  it("never captures video in the renderer when the engine owns capture", () => {
+    expect(
+      shouldUseBrowserVideoCapture({
+        engineMediaEnabled: true,
+        videoSourceId: "/dev/video0",
+      }),
+    ).toBe(false);
+  });
+
+  it("does not capture without a source", () => {
+    expect(shouldUseBrowserVideoCapture({ videoSourceId: "" })).toBe(false);
+    expect(shouldUseBrowserVideoCapture()).toBe(false);
+  });
+});
 
 describe("isLiveVideoTrack", () => {
   it("is true for a live track even when it is muted", () => {

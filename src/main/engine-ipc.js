@@ -17,6 +17,11 @@ import { ipcMain } from "electron";
 import { createLogger } from "./logger";
 import { windows } from "./windows";
 import { readPreviewSlot } from "./engine-preview-read";
+import {
+  buildEngineMediaRequest,
+  ENGINE_MEDIA_CHANNEL_NAMES,
+  mediaInvokeError,
+} from "./engine-media-request";
 
 const logger = createLogger("engine-ipc");
 
@@ -236,6 +241,39 @@ export function registerEngineIpc(getSupervisor) {
       5000,
     );
   });
+
+  // WS-10 — engine-owned media capture. The renderer keeps the device UI and
+  // sends the capture intent (which camera, which size/rate, which file, which
+  // PipeWire node); the engine owns the GStreamer pipelines. Every request is
+  // validated before it reaches the socket (`engine-media-request.js`), and the
+  // engine's `media_*` error code is kept in the message the renderer sees,
+  // because `ipcRenderer.invoke` drops custom error fields.
+  for (const channel of ENGINE_MEDIA_CHANNEL_NAMES) {
+    ipcMain.handle(channel, async (event, message) => {
+      if (!isMainWindowSender(event)) {
+        throw new Error(`${channel} is only available to the main window`);
+      }
+
+      const supervisor = getSupervisor();
+      if (!supervisor?.isRunning() || !supervisor.client) {
+        throw new Error(
+          "media_unavailable: the engine is not running (MODV_ENGINE=1 required)",
+        );
+      }
+
+      const { command, payload, timeoutMs } = buildEngineMediaRequest(
+        channel,
+        message,
+      );
+
+      try {
+        return await supervisor.client.request(command, payload, timeoutMs);
+      } catch (error) {
+        logger.warn(`${channel} failed: ${error?.message || String(error)}`);
+        throw mediaInvokeError(error, command);
+      }
+    });
+  }
 
   // -- engine → renderer ---------------------------------------------------
 

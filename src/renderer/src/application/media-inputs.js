@@ -5,6 +5,24 @@ export function isLiveVideoTrack(track) {
   return !!(track && track.readyState === "live");
 }
 
+/**
+ * Whether the *renderer* should open the browser's video capture for a source.
+ *
+ * With `MODV_ENGINE=1` the Rust engine owns GStreamer capture, so the renderer
+ * must never call `getUserMedia` for a camera: doing so would open the device a
+ * second time, and the frames would be dropped (nothing consumes them in engine
+ * mode). Kept pure so the engine-mode gating has a unit test.
+ *
+ * @param {{engineMediaEnabled?: boolean, videoSourceId?: string}} options
+ * @returns {boolean}
+ */
+export function shouldUseBrowserVideoCapture({
+  engineMediaEnabled,
+  videoSourceId,
+} = {}) {
+  return !engineMediaEnabled && !!videoSourceId;
+}
+
 export function shouldReconnectVideoCapture(
   capture,
   { allowMuted = false } = {},

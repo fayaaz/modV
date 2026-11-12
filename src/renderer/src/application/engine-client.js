@@ -9,6 +9,7 @@
 // main process's engine-protocol.js — the renderer never touches the socket.
 
 import { createLogger } from "./logger";
+import { describeEngineMediaError, normaliseMediaStatus } from "./engine-media";
 
 const logger = createLogger("renderer:engine-client");
 
@@ -18,6 +19,16 @@ const FORMAT_BGRA8 = 2;
 
 /** The engine publishes frames with 32-bit pixels. */
 const BYTES_PER_PIXEL = 4;
+
+/**
+ * Timeouts for the media channels (WS-10). Starting a GStreamer pipeline can
+ * take a moment (device open, caps negotiation), and the Audio/Video panel
+ * polls `media/status` at 1 Hz, so the status timeout stays short.
+ */
+const MEDIA_REQUEST_TIMEOUT_MS = 20_000;
+const MEDIA_LIST_TIMEOUT_MS = 10_000;
+const MEDIA_STATUS_TIMEOUT_MS = 5_000;
+const MEDIA_STOP_TIMEOUT_MS = 8_000;
 
 /**
  * Scene hover previews poll at the legacy worker's cadence
@@ -297,6 +308,53 @@ function scenePreviewPollDelay(
   return Math.max(0, lastMs + 1000 / SCENE_PREVIEW_FPS - nowMs);
 }
 
+/**
+ * An engine media error that survives the IPC/handler boundary: `code` is set
+ * locally, the message also starts with the code so `mapEngineMediaError` can
+ * recover it after `ipcRenderer.invoke`.
+ */
+function engineMediaTimeoutError(message, code) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+
+  return error;
+}
+
+/**
+ * Race `promise` against a timeout. Used by every media request so a wedged
+ * engine never leaves the Audio/Video panel waiting forever.
+ *
+ * @template T
+ * @param {Promise<T> | T} promise
+ * @param {number} timeoutMs
+ * @param {{message?: string, code?: string}} [options]
+ * @returns {Promise<T>}
+ */
+function withTimeout(promise, timeoutMs, { message, code } = {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return Promise.resolve(promise);
+  }
+
+  let timer = null;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        engineMediaTimeoutError(
+          message || `the request timed out after ${timeoutMs} ms`,
+          code || "media_unavailable",
+        ),
+      );
+    }, timeoutMs);
+
+    // Do not hold a Node/browser event loop open for a pending timeout.
+    timer?.unref?.();
+  });
+
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 export default class EngineClient {
   constructor() {
     if (!window.engine) {
@@ -488,6 +546,116 @@ export default class EngineClient {
     });
   }
 
+  /**
+   * One `window.engine` media call with a timeout and a clear error when the
+   * preload surface is missing. The timeout code is chosen per call so the
+   * renderer's mapping shows a sensible hint.
+   */
+  _mediaCall(
+    method,
+    argument,
+    {
+      timeoutMs = MEDIA_REQUEST_TIMEOUT_MS,
+      code = "media_start_failed",
+      label = method,
+    } = {},
+  ) {
+    const fn = this.engine?.[method];
+
+    if (typeof fn !== "function") {
+      return Promise.reject(
+        engineMediaTimeoutError(
+          `window.engine.${method} is not exposed; engine media capture is unavailable`,
+          "media_unavailable",
+        ),
+      );
+    }
+
+    return withTimeout(
+      Promise.resolve().then(() => fn.call(this.engine, argument)),
+      timeoutMs,
+      { message: `${label} timed out after ${timeoutMs} ms`, code },
+    );
+  }
+
+  /**
+   * Engine cameras via `media/list-cameras` (WS-10).
+   *
+   * Returns the raw camera DTOs (`{ id, name, path, caps }`) in camera order;
+   * `engine-media.js#engineCameraDevices` maps them into the `mediaStream`
+   * device shape. Throws (`media_unavailable`, …) so the caller can keep the
+   * legacy device list instead of showing an empty picker.
+   */
+  async listEngineCameras() {
+    const response = await this._mediaCall("listCameras", undefined, {
+      timeoutMs: MEDIA_LIST_TIMEOUT_MS,
+      code: "media_unavailable",
+      label: "listing the engine cameras",
+    });
+
+    if (Array.isArray(response)) {
+      return response;
+    }
+
+    return Array.isArray(response?.cameras) ? response.cameras : [];
+  }
+
+  /** `media/start-camera` — resolves with `{ sourceId, index }`. */
+  startEngineCamera(request) {
+    return this._mediaCall("startEngineCamera", request, {
+      label: "starting the camera",
+    });
+  }
+
+  /** `media/start-file` — resolves with `{ sourceId, index }`. */
+  startEngineFile(request) {
+    return this._mediaCall("startEngineFile", request, {
+      label: "starting the video file",
+    });
+  }
+
+  /** `media/start-screen` — resolves with `{ sourceId, index }`. */
+  startEngineScreen(request) {
+    return this._mediaCall("startEngineScreen", request, {
+      label: "starting the screen capture",
+    });
+  }
+
+  /** `media/stop-source` — resolves with `{ sourceId }`. */
+  stopEngineSource(sourceId) {
+    if (typeof sourceId !== "string" || sourceId.length === 0) {
+      return Promise.resolve(null);
+    }
+
+    return this._mediaCall("stopEngineSource", sourceId, {
+      timeoutMs: MEDIA_STOP_TIMEOUT_MS,
+      label: "stopping the source",
+    });
+  }
+
+  /**
+   * `media/status`, normalised to `{ sources, error }`.
+   *
+   * Polled at ~1 Hz while the Audio/Video panel is open, so it resolves to an
+   * empty list (with the reason in `error`) instead of rejecting — a stopped
+   * engine must not turn a poll into an unhandled rejection.
+   */
+  async engineMediaStatus() {
+    try {
+      const response = await this._mediaCall("engineMediaStatus", undefined, {
+        timeoutMs: MEDIA_STATUS_TIMEOUT_MS,
+        code: "media_unavailable",
+        label: "reading the engine media status",
+      });
+
+      return normaliseMediaStatus(response);
+    } catch (error) {
+      this._previewFailed("media:status", error);
+
+      return { sources: [], error: describeEngineMediaError(error) };
+    }
+  }
+
   snapshot() {
     return this.engine.snapshot();
   }
@@ -513,6 +681,7 @@ export {
   shouldRefresh,
   shouldTransferScenePreviewCanvas,
   toFrameData,
+  withTimeout,
   FORMAT_BGRA8,
   FORMAT_RGBA8,
 };

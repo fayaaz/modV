@@ -16,6 +16,7 @@ import { BandFeatures } from "./band-features";
 import { reduceByteFrequencyData } from "./byte-frequency-data";
 import { createLogger } from "./logger";
 import MediaDeviceManager from "./media-device-manager";
+import { createEngineMediaController } from "./engine-media";
 import {
   SystemAudioCapture,
   SYSTEM_AUDIO_SOURCE_ID,
@@ -43,6 +44,11 @@ import {
   engineUnsupportedMessage,
 } from "./engine-unsupported";
 import { createPresetData } from "./worker/preset-serializer";
+import {
+  applyMediaPathToMirror,
+  applyMediaStateToMirror,
+  applyMediaUpdateToMirror,
+} from "./media-mirror";
 import grabCanvasPlugin from "./plugins/grab-canvas";
 import {
   createEngineStoreFacade,
@@ -313,6 +319,17 @@ class ModV {
       setActivePluginHost(null);
     }
 
+    // WS-10: with MODV_ENGINE=1 the engine owns camera/file/screen capture
+    // (GStreamer). The controller records every source this renderer started so
+    // it can stop removed devices, retry dead ones and release everything on
+    // quit. The legacy path never touches it.
+    this.engineMedia = createEngineMediaController({
+      engine: window.engine,
+      mirrorStore: store,
+      getStore: () => this.store,
+      logger,
+    });
+
     if (this.engineMode) {
       // The worker drove rendering; the engine has its own native window.
       // Keep the renderer's audio pump on a rAF cadence so the UI meters
@@ -573,14 +590,29 @@ class ModV {
     }
 
     ipcRenderer.on("media-manager-state", (event, message) => {
+      // Engine mode: the media library lives only in the main process, so the
+      // mirror (which the TextureControl video/image selects read) needs the
+      // replay — otherwise there is nothing to choose for `media/start-file`.
+      if (this.engineMode) {
+        applyMediaStateToMirror(this._store, message);
+      }
+
       this.store.dispatch("media/setState", message);
     });
 
     ipcRenderer.on("media-manager-update", (event, message) => {
+      if (this.engineMode) {
+        applyMediaUpdateToMirror(this._store, message);
+      }
+
       this.store.dispatch("media/addMedia", message.payload);
     });
 
     ipcRenderer.on("media-manager-path-changed", (event, message) => {
+      if (this.engineMode) {
+        applyMediaPathToMirror(this._store, message?.payload);
+      }
+
       this.store.dispatch("media/setMediaDirectoryPath", message.payload);
     });
 
@@ -652,6 +684,16 @@ class ModV {
   }
 
   stopMediaCapture() {
+    // WS-10: release the engine's GStreamer pipelines (cameras, video files and
+    // screen shares this renderer started). Fire-and-forget: shutdown must not
+    // wait on the control socket, and the engine also stops its hub when it
+    // exits.
+    try {
+      void this.engineMedia?.stopAll?.();
+    } catch (e) {
+      // The engine may already be gone.
+    }
+
     const reconnectTimers = this._videoReconnectTimers || {};
 
     for (const deviceId of Object.keys(reconnectTimers)) {
@@ -934,12 +976,9 @@ class ModV {
 
   startCaptureForDevice(deviceId) {
     if (this.engineMode) {
-      // Camera/screen frames flow to the engine via WS-10 (M6); until then
-      // capture is not started in engine mode.
-      if (!this._warnedEngineCamera) {
-        logger.warn("camera capture is not wired to the engine yet (WS-10)");
-        this._warnedEngineCamera = true;
-      }
+      // WS-10: the engine runs one GStreamer pipeline per source, so there is
+      // no per-frame grab loop in the renderer. `setupMedia` started it.
+      logger.info("the engine owns the camera capture", { deviceId });
       return undefined;
     }
 
@@ -1067,7 +1106,9 @@ class ModV {
 
           if (bitmap && bitmap.width && bitmap.height) {
             if (this.engineMode) {
-              // WS-10 (M6): the engine will ingest frames directly.
+              // Unreachable in engine mode: no capture loop runs there (the
+              // engine owns the camera). Kept as a safe no-op for a stale loop
+              // that was still draining when engine mode booted.
               bitmap.close?.();
             } else {
               this.$worker.postMessage(
@@ -1132,6 +1173,15 @@ class ModV {
   }
 
   stopCaptureForDevice(deviceId) {
+    if (this.engineMode) {
+      // Ask the engine to tear the pipeline down; stopping a source it does not
+      // have is a no-op.
+      void this.engineMedia?.stopCamera?.(deviceId);
+
+      logger.info("stopped the engine camera", { deviceId });
+      return;
+    }
+
     const state = this._captureState[deviceId];
     if (!state) return;
 
@@ -1150,6 +1200,12 @@ class ModV {
   }
 
   scheduleVideoReconnect(deviceId, { allowMuted = false } = {}) {
+    if (this.engineMode) {
+      // Engine mode has no ImageCapture to reconnect; `engineMedia.pollStatus`
+      // restarts a selected camera the engine reported as stopped/errored.
+      return;
+    }
+
     if (
       !deviceId ||
       this._videoReconnectTimers[deviceId] ||
@@ -1199,6 +1255,36 @@ class ModV {
 
   async refreshVideoInputs() {
     const enumerated = await this.mediaDeviceManager.enumerateDevices();
+
+    if (this.engineMode) {
+      // The engine's status poll decides what to stop (removed/unchecked
+      // cameras) and what to restart (selected cameras the engine lost). A
+      // re-scan is the right moment to reconcile: it has a fresh camera list.
+      const selected = this._store.state.mediaStream.selectedVideoSources || [];
+
+      try {
+        await this.engineMedia?.ensureCameras({
+          selectedIds: selected,
+          availableIds: (enumerated.video || []).map(
+            (device) => device.deviceId,
+          ),
+        });
+
+        await this.engineMedia?.pollStatus({
+          selectedIds: selected,
+          availableIds: (enumerated.video || []).map(
+            (device) => device.deviceId,
+          ),
+        });
+      } catch (e) {
+        logger.warn("could not reconcile the engine cameras", {
+          error: e?.message || String(e),
+        });
+      }
+
+      return;
+    }
+
     const available = new Set(
       (enumerated.video || []).map((device) => device.deviceId),
     );

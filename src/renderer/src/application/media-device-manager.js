@@ -4,6 +4,11 @@ import {
   SYSTEM_AUDIO_SOURCE_ID,
   SYSTEM_AUDIO_SOURCE_LABEL,
 } from "./system-audio";
+import {
+  cameraCapabilities,
+  engineCameraDevices,
+  isEngineMediaEnabled,
+} from "./engine-media";
 
 const logger = createLogger("renderer:media-devices");
 
@@ -12,9 +17,16 @@ class MediaDeviceManager {
     this._store = store;
     this.audioSources = [];
     this.videoSources = [];
+    // WS-10: with MODV_ENGINE=1 the engine enumerates cameras (GStreamer /
+    // V4L2) and `navigator.mediaDevices.enumerateDevices()` must not be used
+    // for video — Chromium's opaque device ids are not what the engine captures
+    // from. Audio still comes from the browser (WS-9 is unchanged).
+    this.engineMedia = isEngineMediaEnabled();
 
-    // Listen for device changes
-    if (navigator.mediaDevices) {
+    // Listen for device changes. Only meaningful for the browser's own device
+    // table; engine cameras are re-listed on demand (Re-scan Devices) and
+    // reconciled from `media/status`.
+    if (!this.engineMedia && navigator.mediaDevices) {
       navigator.mediaDevices.ondevicechange = () => this.enumerateDevices();
     }
   }
@@ -36,13 +48,19 @@ class MediaDeviceManager {
       video: [],
     };
 
+    if (this.engineMedia) {
+      sources.video = await this.enumerateEngineCameras();
+    }
+
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
 
       for (const device of devices) {
         if (device.kind === "audioinput") {
           sources.audio.push(device);
-        } else if (device.kind === "videoinput") {
+        } else if (device.kind === "videoinput" && !this.engineMedia) {
+          // Engine mode: the engine's camera list is authoritative, so the
+          // browser's (unusable) video devices are ignored.
           sources.video.push(device);
         }
       }
@@ -68,6 +86,52 @@ class MediaDeviceManager {
     }
 
     return sources;
+  }
+
+  /**
+   * Engine cameras as `mediaStream.video` devices (WS-10).
+   *
+   * The engine's caps list is also written to `mediaStream.videoCapabilities`
+   * so `AudioVideo.vue` offers exactly the modes the camera/engine advertises
+   * instead of the legacy `getCapabilities()` report.
+   *
+   * @returns {Promise<Array>}
+   */
+  async enumerateEngineCameras() {
+    const engine = typeof window !== "undefined" ? window.engine : undefined;
+
+    if (typeof engine?.listCameras !== "function") {
+      return [];
+    }
+
+    try {
+      const devices = engineCameraDevices(await engine.listCameras());
+
+      this._engineCameraListFailed = false;
+
+      for (const device of devices) {
+        const { resolutions, frameRates } = cameraCapabilities(device.caps);
+
+        this._store.commit("mediaStream/SET_VIDEO_CAPABILITIES", {
+          deviceId: device.deviceId,
+          resolutions,
+          frameRates,
+        });
+      }
+
+      return devices;
+    } catch (e) {
+      // One warning per failure streak: `enumerateDevices` runs on every audio
+      // switch too, and a stopped engine would otherwise fill the log.
+      if (!this._engineCameraListFailed) {
+        this._engineCameraListFailed = true;
+        logger.error("could not list the engine cameras", {
+          error: e?.message || String(e),
+        });
+      }
+
+      return [];
+    }
   }
 
   /**
