@@ -147,12 +147,25 @@ impl EngineSupervisor {
             }
         };
 
-        // Announce the preview channel to freshly connected clients.
+        // Announce the preview channel to freshly connected clients, then
+        // hand them the full state: the engine seeds Scenes and applies
+        // documents before the UI connects, so the delta stream alone would
+        // leave the mirror stale.
         for client in poll.accepted {
             let response = self.preview_ready_event();
             if let Ok(event) = response {
                 let payload = serde_json::to_vec(&event).expect("preview/ready serialises");
                 let _ = self.server.send(client, KIND_EVENT, &payload);
+            }
+
+            let sync = Event::new("state/sync", store.sync_state());
+            match serde_json::to_vec(&sync) {
+                Ok(payload) => {
+                    if let Err(error) = self.server.send(client, KIND_EVENT, &payload) {
+                        eprintln!("engine: WARN could not send state/sync: {error}");
+                    }
+                }
+                Err(error) => eprintln!("engine: WARN could not serialise state/sync: {error}"),
             }
         }
 

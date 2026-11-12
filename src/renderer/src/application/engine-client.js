@@ -68,6 +68,12 @@ export default class EngineClient {
     return this._unsubscribe.state;
   }
 
+  /** Late-joiner state sync: the full mirror-relevant engine state. */
+  onStateSync(callback) {
+    this._unsubscribe.sync = this.engine.onStateSync(callback);
+    return this._unsubscribe.sync;
+  }
+
   /** Count preview frames into window.__enginePreviewCount (e2e hook). */
   trackPreviewFrames() {
     this._unsubscribe.preview = this.engine.onPreviewFrame(() => {

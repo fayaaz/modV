@@ -138,6 +138,9 @@ class ModV {
       this.engineClient = new EngineClient();
       this.engineClient.bindMirror(store);
       this.engineClient.trackPreviewFrames();
+      this.engineClient.onStateSync((snapshot) => {
+        this._applyEngineSync(snapshot);
+      });
       this.engineClient.onDelta((delta) => {
         const d = delta?.data || delta;
 
@@ -275,6 +278,68 @@ class ModV {
   _signalReady() {
     this._resolveReady?.();
     ipcRenderer.send("modv-ready");
+  }
+
+  // Late-joiner sync: the engine seeds Scenes (and may apply documents)
+  // before the renderer's socket client exists, so the delta stream alone
+  // leaves the mirror stale. `state/sync` carries the snapshot; replay it
+  // into the mirror with the same mutations the deltas use.
+  _applyEngineSync(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") {
+      return;
+    }
+
+    const store = this._store;
+
+    try {
+      if (Array.isArray(snapshot.groups)) {
+        store.commit("groups/REPLACE_GROUPS", { groups: snapshot.groups });
+      }
+
+      const active = store.state.modules.active || {};
+      for (const id of Object.keys(active)) {
+        store.commit("modules/REMOVE_ACTIVE_MODULE", { moduleId: id });
+      }
+      for (const module of Object.values(snapshot.modules || {})) {
+        store.commit("modules/ADD_ACTIVE_MODULE", { module });
+      }
+
+      const inputState = snapshot.inputs || {};
+      for (const id of Object.keys(store.state.inputs.inputs || {})) {
+        store.commit("inputs/REMOVE_INPUT", { inputId: id });
+      }
+      for (const input of Object.values(inputState.inputs || {})) {
+        store.commit("inputs/ADD_INPUT", { input });
+      }
+      for (const id of Object.keys(store.state.inputs.inputLinks || {})) {
+        store.commit("inputs/REMOVE_INPUT_LINK", { inputId: id });
+      }
+      for (const link of Object.values(inputState.inputLinks || {})) {
+        store.commit("inputs/ADD_INPUT_LINK", { inputLink: link });
+      }
+
+      if (Array.isArray(snapshot.scenes)) {
+        store.commit("scenes/REPLACE_SCENES", snapshot.scenes);
+      }
+      if (snapshot.performance && typeof snapshot.performance === "object") {
+        store.commit("scenes/UPDATE_PERFORMANCE", snapshot.performance);
+      }
+      store.commit("scenes/SET_DEFAULTS_SEEDED", !!snapshot.defaultsSeeded);
+      if (typeof snapshot.defaultsVersion === "number") {
+        store.commit("scenes/SET_DEFAULTS_VERSION", snapshot.defaultsVersion);
+      }
+      if (Array.isArray(snapshot.seededDefaultScenes)) {
+        store.commit(
+          "scenes/SET_SEEDED_DEFAULT_SCENES",
+          snapshot.seededDefaultScenes,
+        );
+      }
+      store.commit("scenes/UPDATE_PERFORMANCE", {
+        currentSceneId: snapshot.appliedSceneId || null,
+      });
+    } catch (error) {
+      logger.warn("engine state sync failed", { message: error?.message });
+    }
   }
 
   // Shared ready path: the legacy worker signals worker-setup-complete, the

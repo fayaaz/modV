@@ -30,6 +30,11 @@ const engineApi = {
     ipcRenderer.on("engine/preview-frame", listener);
     return () => ipcRenderer.removeListener("engine/preview-frame", listener);
   },
+  onStateSync(callback) {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("engine/state-sync", listener);
+    return () => ipcRenderer.removeListener("engine/state-sync", listener);
+  },
   requestPreview() {
     return ipcRenderer.invoke("engine/preview");
   },

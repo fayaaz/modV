@@ -126,6 +126,9 @@ export function registerEngineIpc(getSupervisor) {
       sup.lastPreviewFrame = data;
       sendToMainWindow("engine/preview-frame", data);
     });
+    client.on("state/sync", (data) => {
+      sendToMainWindow("engine/state-sync", data);
+    });
     client.on("preview/ready", () => {
       logger.info("engine preview channel ready");
     });

@@ -847,6 +847,28 @@ impl Store {
         preset
     }
 
+    /// The full mirror-relevant state for a late-joining UI: the preset
+    /// document plus the Scene list, performance config and seeding metadata.
+    ///
+    /// Sent as `state/sync` to each newly connected client: the engine seeds
+    /// default Scenes (and can mutate state) before the renderer's socket
+    /// client exists, so deltas alone would leave the UI mirror stale.
+    pub fn sync_state(&self) -> Value {
+        let mut snapshot = self.snapshot();
+        if let Value::Object(map) = &mut snapshot {
+            map.insert("scenes".into(), json!(self.scenes.scenes));
+            map.insert("performance".into(), self.scenes.performance.clone());
+            map.insert("defaultsSeeded".into(), json!(self.scenes.defaults_seeded));
+            map.insert("defaultsVersion".into(), json!(self.scenes.defaults_version));
+            map.insert(
+                "seededDefaultScenes".into(),
+                json!(self.scenes.seeded_default_scenes),
+            );
+            map.insert("appliedSceneId".into(), json!(self.applied_scene_id));
+        }
+        snapshot
+    }
+
     /// The on-disk snapshot: [`Store::snapshot`] plus the engine sidecar.
     ///
     /// `framesPresented` lives in `_engine` rather than in the preset so a
