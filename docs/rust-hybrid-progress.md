@@ -12,8 +12,8 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1538 tests pass** (modv-app 227, modv-engine 413,
-  modv-ipc 32, modv-media 160, modv-render 21, modv-renderers 685).
+- Rust workspace: **1630 tests pass** (modv-app 241, modv-engine 425,
+  modv-ipc 42, modv-media 178, modv-render 22, modv-renderers 721).
 - Vitest: **947 tests pass** (includes the engine mirror-parity replay, the
   preview-client helpers and the engine audio payload shape).
 - Real-music analyser check (opt-in fixture): 12 s of the noiseblock radio
@@ -203,7 +203,10 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - Custom/third-party ISF transitions are not available: the six native
   transitions are ported, the picker filters unknown names to Fade.
 - 7 of 351 ISF corpus shaders still need translation overrides
-  (`docs/isf-corpus-report.md`); they log once and render nothing.
+  (`docs/isf-corpus-report.md`); the embedding/fingerprint/validation
+  machinery is in place but the 7 `.wgsl` files themselves are not written,
+  so those shaders log once and render nothing. The corpus gate now asserts a
+  checked-in baseline (≥95 %) instead of only `translated > 0`.
 - The packaged engine links `libpipewire-0.3` for system-audio capture; the
   AppImage relies on the host providing it (standard on current distros).
 - Shader transitions freeze the outgoing frame and render at full output size
