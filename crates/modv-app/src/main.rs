@@ -22,6 +22,8 @@ use std::process::ExitCode;
 use modv_render::{Engine, EngineConfig};
 
 fn main() -> ExitCode {
+    die_with_parent();
+
     let cli = cli::parse();
 
     // Fixture emission is a pure store session: no GPU device, no window and no
@@ -131,3 +133,23 @@ fn x11_backend_problem() -> Option<String> {
 fn x11_backend_problem() -> Option<String> {
     None
 }
+
+/// Ask the kernel to SIGTERM this process when its parent dies.
+///
+/// The Electron supervisor normally sends `engine/shutdown` on quit, but if
+/// the main process is SIGKILLed or the container is torn down abruptly the
+/// engine would otherwise be orphaned (it owns a native window and GPU
+/// device). `PR_SET_PDEATHSIG` ties its lifetime to the spawner; the periodic
+/// snapshot is the state-restore safety net in that path.
+#[cfg(target_os = "linux")]
+fn die_with_parent() {
+    // SAFETY: prctl(PR_SET_PDEATHSIG, SIGTERM) only sets a per-process signal
+    // disposition; it has no memory-safety implications and cannot fail in a
+    // way that would leave this process in an invalid state.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn die_with_parent() {}
