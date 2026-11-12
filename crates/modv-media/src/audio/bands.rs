@@ -106,7 +106,7 @@ fn clamp01(x: f32) -> f32 {
 /// dB-map a linear magnitude onto `0..=1` against [`FEATURE_DB_FLOOR`]
 /// (audio-bands.js:41-49). NaN / non-positive magnitudes read 0.
 fn feature_value(magnitude: f32) -> f32 {
-    if !(magnitude > 0.0) {
+    if magnitude.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return 0.0;
     }
 
@@ -488,8 +488,7 @@ impl AudioBands {
 
         let cells = self.band_cells(n, input.sample_rate).to_vec();
 
-        for c in 0..16 {
-            let (a, b) = cells[c];
+        for (c, &(a, b)) in cells.iter().enumerate() {
             let mut sum = 0.0f32;
 
             for i in a..=b {
@@ -506,8 +505,7 @@ impl AudioBands {
             }
         }
 
-        for b in 0..3 {
-            let [lo, hi] = BAND_CELLS[b];
+        for (b, &[lo, hi]) in BAND_CELLS.iter().enumerate() {
             let mut sum = 0.0f32;
 
             for c in lo..=hi {

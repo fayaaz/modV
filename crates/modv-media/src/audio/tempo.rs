@@ -207,10 +207,10 @@ impl TempoDetector {
         };
 
         // tempo-detector.js:87-91
-        if let Some(last_sample) = self.samples.last() {
-            if time_seconds < last_sample.time {
-                self.reset();
-            }
+        if let Some(last_sample) = self.samples.last()
+            && time_seconds < last_sample.time
+        {
+            self.reset();
         }
 
         // tempo-detector.js:93
@@ -270,7 +270,7 @@ impl TempoDetector {
         let last_index = self.samples.len() - 1; // tempo-detector.js:140
         let mut sample_index = 0_usize; // tempo-detector.js:141
 
-        for i in 0..frames {
+        for (i, envelope_slot) in envelope.iter_mut().enumerate().take(frames) {
             let time = start + i as f64 * self.frame_duration; // tempo-detector.js:144
 
             // tempo-detector.js:146-151
@@ -280,7 +280,7 @@ impl TempoDetector {
 
             // tempo-detector.js:153-156
             if sample_index >= last_index {
-                envelope[i] = self.samples[last_index].value;
+                *envelope_slot = self.samples[last_index].value;
                 continue;
             }
 
@@ -301,7 +301,7 @@ impl TempoDetector {
                     next.value
                 };
 
-                envelope[i] = if distance < 0.05 {
+                *envelope_slot = if distance < 0.05 {
                     nearest_value * (1.0 - distance / 0.05)
                 } else {
                     0.0
@@ -317,7 +317,8 @@ impl TempoDetector {
             };
             let clamped_fraction = clamp(fraction, 0.0, 1.0);
 
-            envelope[i] = previous.value + (next.value - previous.value) * clamped_fraction;
+            *envelope_slot =
+                previous.value + (next.value - previous.value) * clamped_fraction;
         }
 
         // tempo-detector.js:182-192

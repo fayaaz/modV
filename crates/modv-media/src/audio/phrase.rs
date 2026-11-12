@@ -196,9 +196,7 @@ pub fn switch_chance(elapsed: f64, min_seconds: f64, max_seconds: f64) -> f64 {
     }
 
     // phrase-detector.js:92-95
-    ((elapsed - min_seconds) / (max_seconds - min_seconds))
-        .min(1.0)
-        .max(0.0)
+    ((elapsed - min_seconds) / (max_seconds - min_seconds)).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
