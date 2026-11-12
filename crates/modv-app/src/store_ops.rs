@@ -2381,11 +2381,27 @@ impl Store {
         };
         // `modules.js:499-503`: the raw incoming value is compared with the
         // stored prop *before* `applyExpression`.
-        let unchanged = prop_value(&module.props, prop, path)
+        let current = prop_value(&module.props, prop, path).cloned();
+        let module_name = module.module_name.clone();
+        let unchanged = current
+            .as_ref()
             .and_then(Value::as_f64)
             .is_some_and(|current| (current - write.value).abs() <= LINK_DELTA_EPSILON);
         if unchanged {
-            self.clear_link_pending(&write.input_id);
+            // The prop already carries the value, but the mirror may still be
+            // behind: the 10 Hz throttle holds the newest delta in `pending`,
+            // and a value that settles inside one interval would otherwise be
+            // dropped by `clear_link_pending` — the UI slider then sticks at
+            // an intermediate reading while the engine renders the final one.
+            self.flush_link_mirror_current(
+                &write.input_id,
+                module_id,
+                &module_name,
+                prop,
+                path,
+                current,
+                now,
+            );
             return;
         }
 
@@ -2480,7 +2496,8 @@ impl Store {
         let Some(module) = self.state.modules.get(module_id) else {
             return;
         };
-        let unchanged = match module.meta.get(meta_key) {
+        let current_meta = module.meta.get(meta_key).cloned();
+        let unchanged = match current_meta.as_ref() {
             Some(current) => match (current.as_f64(), value.as_f64()) {
                 (Some(current), Some(next)) => (current - next).abs() <= LINK_DELTA_EPSILON,
                 _ => *current == value,
@@ -2488,6 +2505,23 @@ impl Store {
             None => false,
         };
         if unchanged {
+            if let Some(current) = current_meta
+                && let Some(number) = current.as_f64()
+            {
+                let payload = json!({
+                    "id": module_id,
+                    "metaKey": meta_key,
+                    "data": current,
+                });
+                self.flush_link_mirror(
+                    &write.input_id,
+                    number,
+                    "modules/UPDATE_ACTIVE_MODULE_META",
+                    payload,
+                    now,
+                );
+                return;
+            }
             self.clear_link_pending(&write.input_id);
             return;
         }
@@ -2537,6 +2571,17 @@ impl Store {
                 .find_group(group_id)
                 .is_some_and(|group| (group.alpha - number).abs() <= LINK_DELTA_EPSILON);
         if unchanged {
+            if let Some(current) = self.state.find_group(group_id).map(|group| group.alpha) {
+                let payload = json!({ "groupId": group_id, "key": key, "data": current });
+                self.flush_link_mirror(
+                    &write.input_id,
+                    current,
+                    "groups/UPDATE_GROUP_BY_KEY",
+                    payload,
+                    now,
+                );
+                return;
+            }
             self.clear_link_pending(&write.input_id);
             return;
         }
@@ -2609,6 +2654,74 @@ impl Store {
         } else {
             entry.pending = Some((delta_type, payload));
         }
+    }
+
+    /// Emit the current (final) value when an unchanged write hid it.
+    ///
+    /// Compared with the last delta the mirror actually received, so a settled
+    /// value is sent at most once.
+    fn flush_link_mirror(
+        &mut self,
+        input_id: &str,
+        value: f64,
+        delta_type: &'static str,
+        payload: Value,
+        now: Duration,
+    ) {
+        let Some(entry) = self.link_deltas.get_mut(input_id) else {
+            return;
+        };
+        if (entry.last_value - value).abs() <= LINK_DELTA_EPSILON {
+            entry.pending = None;
+            return;
+        }
+        entry.last_emit = Some(now);
+        entry.last_value = value;
+        entry.pending = None;
+        self.deltas.push(delta_type, payload);
+    }
+
+    /// [`Self::flush_link_mirror`] for a module prop: rebuilds the delta
+    /// payload from the value the prop already carries.
+    #[allow(clippy::too_many_arguments)]
+    fn flush_link_mirror_current(
+        &mut self,
+        input_id: &str,
+        module_id: &str,
+        module_name: &str,
+        prop: &str,
+        path: Option<&str>,
+        current: Option<Value>,
+        now: Duration,
+    ) {
+        let Some(current) = current else {
+            self.clear_link_pending(input_id);
+            return;
+        };
+        let Some(number) = current.as_f64() else {
+            self.clear_link_pending(input_id);
+            return;
+        };
+        let schema = self
+            .registry
+            .prop_schema(module_name, prop)
+            .unwrap_or_default();
+        let payload = json!({
+            "moduleId": module_id,
+            "prop": prop,
+            "data": {
+                "value": current,
+                "type": schema.type_,
+                "path": path.unwrap_or_default(),
+            },
+        });
+        self.flush_link_mirror(
+            input_id,
+            number,
+            "modules/UPDATE_ACTIVE_MODULE_PROP",
+            payload,
+            now,
+        );
     }
 
     /// Drop a throttled delta whose value the store already carries again.
@@ -4776,6 +4889,34 @@ mod tests {
         assert_eq!(store.drain_deltas().len(), 1);
 
         store.update_input_links(&audio_with_bass(0.500_000_1), Duration::from_millis(200));
+        assert_eq!(store.drain_deltas().len(), 0);
+    }
+
+    #[test]
+    fn a_value_that_settles_inside_the_throttle_interval_reaches_the_mirror() {
+        let mut store = Store::new();
+        store.restore(&link_preset("bass")).expect("preset loads");
+        store.drain_deltas();
+
+        // The mirror receives 0.1.
+        store.update_input_links(&audio_with_bass(0.1), Duration::from_millis(0));
+        assert_eq!(store.drain_deltas().len(), 1);
+
+        // Inside the interval the prop moves to 0.6 but the delta is held.
+        store.update_input_links(&audio_with_bass(0.6), Duration::from_millis(50));
+        assert_eq!(store.drain_deltas().len(), 0);
+
+        // The next frame writes the same value: the prop is already correct,
+        // but the mirror is still at 0.1. It must receive the final value now
+        // instead of being cleared as "unchanged".
+        store.update_input_links(&audio_with_bass(0.6), Duration::from_millis(60));
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_PROP");
+        assert!((deltas[0].payload["data"]["value"].as_f64().unwrap() - 0.6).abs() < 1e-6);
+
+        // Once the mirror carries it, a steady value emits nothing more.
+        store.update_input_links(&audio_with_bass(0.6), Duration::from_millis(200));
         assert_eq!(store.drain_deltas().len(), 0);
     }
 
