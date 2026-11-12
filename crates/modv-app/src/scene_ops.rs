@@ -781,6 +781,7 @@ impl Store {
         }
 
         self.restore_scene_inputs(&scene, &input_map);
+        self.restore_scene_expressions(&scene, &input_map, None);
         self.applied_scene_id = Some(scene_id.clone());
         self.set_current_scene(&scene_id);
 
@@ -851,6 +852,40 @@ impl Store {
         let fade = fade && old_group.is_some() && !old_modules.is_empty() && target_alpha > 0.0;
         let duration =
             normalize_transition_duration(self.scenes.performance.get("transitionSeconds"));
+
+        // Expressions on inputs that this row apply drops must go with them
+        // (`scenes.js:2429-2448`): the old Group's control inputs always, and
+        // the old Modules' inputs when no ghost keeps those Modules alive.
+        let mut stale_input_ids: HashSet<String> = HashSet::new();
+        if let Some(group) = &old_group {
+            for (_, key) in GROUP_CONTROL_INPUTS {
+                if let Some(input_id) = group_input_id(group, *key) {
+                    stale_input_ids.insert(input_id);
+                }
+            }
+        }
+        if !fade {
+            for module_id in &old_modules {
+                if let Some(module) = self.state.modules.get(module_id) {
+                    if let Some(props) = module.dollar_props.as_object() {
+                        for descriptor in props.values() {
+                            if let Some(input_id) = descriptor.get("id").and_then(Value::as_str) {
+                                stale_input_ids.insert(input_id.to_string());
+                            }
+                        }
+                    }
+                    for key in MODULE_META_INPUTS {
+                        if let Some(input_id) = module
+                            .meta
+                            .get(format!("{key}InputId"))
+                            .and_then(Value::as_str)
+                        {
+                            stale_input_ids.insert(input_id.to_string());
+                        }
+                    }
+                }
+            }
+        }
 
         let mut input_map: HashMap<String, String> = HashMap::new();
         let mut new_group = self.build_live_group(&snapshot, scene_id, row, &mut input_map);
@@ -964,6 +999,7 @@ impl Store {
         }
 
         self.restore_scene_inputs(&scene, &input_map);
+        self.restore_scene_expressions(&scene, &input_map, Some(&stale_input_ids));
 
         // `groups/orderByIds` (`scenes.js:2515-2520`): the mirror's layer
         // stack follows the live row order, with the fading ghost before its
@@ -1923,6 +1959,97 @@ impl Store {
         // on rows that stay (`scenes.js` never rebuilds them, R-8). Only ids
         // that left the authoritative list are dropped.
         self.prune_tweens();
+    }
+
+    /// Restore a Scene document's expression assignments (`scenes.js`
+    /// `restoreSceneExpressions`, `scenes.js:534-592`).
+    ///
+    /// `input_map` maps the document's input ids to the freshly created live
+    /// ids. `stale_input_ids` selects between the two JS modes:
+    ///
+    /// * `None` — whole-Scene apply: replace every live assignment with the
+    ///   document's mapped assignments (`loadPresetData` + `SWAP`).
+    /// * `Some(ids)` — row apply: remove the assignments whose input the
+    ///   replaced Group/Modules owned, then merge the mapped ones.
+    ///
+    /// Assignments whose input is not in the map (the Scene's row did not
+    /// create it) and the identity expression `"value"` are skipped, exactly
+    /// like `restoreSceneExpressions` skipping a missing `newInputId` and
+    /// `expressions/create` returning `null` for `"value"`.
+    fn restore_scene_expressions(
+        &mut self,
+        scene: &Value,
+        input_map: &HashMap<String, String>,
+        stale_input_ids: Option<&HashSet<String>>,
+    ) {
+        let source = scene
+            .get("expressions")
+            .and_then(|expressions| expressions.get("assignments"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut assignments: Vec<modv_engine::preset::ExpressionAssignment> = Vec::new();
+        for (key, raw) in &source {
+            let Some(object) = raw.as_object() else {
+                continue;
+            };
+            let Some(old_input_id) = object.get("inputId").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(new_input_id) = input_map.get(old_input_id) else {
+                continue;
+            };
+            let expression = object
+                .get("expression")
+                .and_then(Value::as_str)
+                .unwrap_or("value");
+            if expression.trim() == "value" {
+                continue;
+            }
+
+            let mut value = raw.clone();
+            let Some(map) = value.as_object_mut() else {
+                continue;
+            };
+            map.insert("inputId".to_string(), json!(new_input_id));
+            map.entry("id".to_string()).or_insert_with(|| json!(key));
+            let Ok(assignment) =
+                serde_json::from_value::<modv_engine::preset::ExpressionAssignment>(value)
+            else {
+                continue;
+            };
+            assignments.push(assignment);
+        }
+
+        let removed: Vec<String> = self
+            .state
+            .expressions
+            .iter()
+            .filter(|(_, assignment)| match stale_input_ids {
+                Some(stale) => stale.contains(&assignment.input_id),
+                None => true,
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in removed {
+            self.state.expressions.shift_remove(&id);
+            self.deltas
+                .push("expressions/REMOVE_EXPRESSION", json!({ "id": id }));
+        }
+
+        for assignment in assignments {
+            self.state
+                .expressions
+                .insert(assignment.id.clone(), assignment.clone());
+            let value = serde_json::to_value(&assignment).unwrap_or(Value::Null);
+            self.deltas.push(
+                "expressions/ADD_EXPRESSION",
+                json!({ "assignment": value, "writeToSwap": false }),
+            );
+        }
+
+        self.rebuild_expressions();
     }
 
     /// Active rows implied by the live Group stamps for one Scene
@@ -3927,5 +4054,76 @@ mod tests {
             .expect("remove");
         assert!(store.scenes_state().scenes.is_empty());
         assert!(store.state().groups.is_empty());
+    }
+
+    #[test]
+    fn apply_scene_restores_expressions_with_remapped_input_ids() {
+        let mut scene = two_row_scene("scene-expressions");
+        scene["modules"]["doc-bands"]["$props"] = json!({
+            "u_ringWidth": { "id": "doc-input-ring", "type": "float" }
+        });
+        scene["expressions"] = json!({
+            "assignments": {
+                "doc-ex-1": {
+                    "id": "doc-ex-1",
+                    "inputId": "doc-input-ring",
+                    "expression": "value * 4",
+                    "evaluateEveryFrame": false,
+                }
+            }
+        });
+
+        let mut store = Store::new();
+        seed_scene(&mut store, scene);
+        store
+            .dispatch(
+                "scenes/applyScene",
+                json!({ "sceneId": "scene-expressions" }),
+            )
+            .expect("applyScene dispatches");
+
+        let assignment = store
+            .state()
+            .expressions
+            .get("doc-ex-1")
+            .expect("expression restored");
+        assert_ne!(assignment.input_id, "doc-input-ring", "input id remapped");
+
+        let live = store
+            .state()
+            .groups
+            .iter()
+            .find(|group| group.name == "Background")
+            .expect("background row");
+        let module_id = live.modules[0].clone();
+        let module = store.state().modules.get(&module_id).expect("module");
+        assert_eq!(
+            module.dollar_props["u_ringWidth"]["id"],
+            json!(assignment.input_id)
+        );
+
+        // A manual write to the Scene's prop goes through the restored
+        // expression (`value * 4`).
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({
+                    "moduleId": module_id,
+                    "prop": "u_ringWidth",
+                    "data": { "value": 0.1 },
+                }),
+            )
+            .expect("updateProp dispatches");
+        assert!(
+            (store.state().modules[&module_id].props["u_ringWidth"]
+                .as_f64()
+                .unwrap()
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
+
+        let types = delta_types(&mut store);
+        assert!(types.contains(&"expressions/ADD_EXPRESSION".to_string()));
     }
 }

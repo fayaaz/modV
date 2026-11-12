@@ -72,7 +72,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
@@ -81,11 +81,14 @@ use modv_engine::engine_state::{
     EngineState, GALLERY_GROUP_NAME, GROUP_DISABLED, Group, InheritFrom, ModuleInstance,
 };
 use modv_engine::inputs::{Input, InputLink};
-use modv_engine::preset::{PresetError, create_preset_from_state, load_preset_into_state};
+use modv_engine::preset::{
+    ExpressionAssignment, PresetError, create_preset_from_state, load_preset_into_state,
+};
 use modv_engine::props::{PropSchema, coerce_prop_value};
 use modv_media::audio::analyser::AudioSnapshot;
 use modv_renderers::two_d::AudioFrame;
 
+use crate::expressions::{ExpressionCache, ExpressionFailure, resolve_input_value};
 use crate::input_links::{
     BeatsState, LINK_DELTA_EPSILON, LINK_DELTA_INTERVAL, LinkTarget, LinkWrite,
 };
@@ -190,6 +193,9 @@ pub struct Store {
     link_smoothing: HashMap<String, f64>,
     /// Delta-throttle state for Input Link writes, keyed by input id.
     link_deltas: HashMap<String, LinkDeltaState>,
+    /// Compiled JS expressions (WS-12), one per input, rebuilt when the
+    /// preset/Scene or the `expressions/*` actions change the assignments.
+    expression_cache: ExpressionCache,
     pub(crate) warned: HashSet<String>,
 }
 
@@ -279,6 +285,7 @@ impl Store {
             beats: BeatsState::default(),
             link_smoothing: HashMap::new(),
             link_deltas: HashMap::new(),
+            expression_cache: ExpressionCache::new(),
             warned: HashSet::new(),
         }
     }
@@ -371,6 +378,11 @@ impl Store {
             "tweens/ADD_TWEEN" => self.add_tween(params),
             "tweens/REMOVE_TWEEN" => self.remove_tween_action(params),
             "tweens/createTween" => self.create_tween(params),
+            // ————————————————— Expressions (WS-12) —————————————————
+            "expressions/create" => self.create_expression(params),
+            "expressions/update" => self.update_expression(params),
+            "expressions/updateEvaluation" => self.update_expression_evaluation(params),
+            "expressions/remove" => self.remove_expression(params),
             // ————————————————— Inputs (WS-1b) —————————————————
             "inputs/addInput" => self.add_input(params),
             "inputs/removeInput" => self.remove_input_action(params),
@@ -766,6 +778,14 @@ impl Store {
         };
         let path = path.filter(|path| !path.is_empty());
 
+        // WS-12: `applyExpression` runs before the coercion/clamp block in
+        // `modules.js:510-526`, keyed by the prop's input id.
+        let input_id = self.module_prop_input_id(&module_id, &prop);
+        let value = match input_id {
+            Some(input_id) => self.apply_expression(&input_id, value),
+            None => value,
+        };
+
         let Some(module) = self.state.modules.get_mut(&module_id) else {
             self.warn_once(
                 format!("missing-module:{module_id}"),
@@ -825,6 +845,14 @@ impl Store {
             .or_else(|| params.get("data"))
             .cloned()
             .unwrap_or(Value::Null);
+
+        // WS-12: `modules/updateMeta` calls `applyExpression` with the meta
+        // field's input id (`modules.js:577-579`).
+        let input_id = self.module_meta_input_id(&id, &meta_key);
+        let data = match input_id {
+            Some(input_id) => self.apply_expression(&input_id, data),
+            None => data,
+        };
 
         let Some(module) = self.state.modules.get_mut(&id) else {
             self.warn_once(
@@ -1713,6 +1741,435 @@ impl Store {
         self.state.tweens = Value::Array(entries);
     }
 
+    // ————————————————— Expressions (WS-12) —————————————————
+
+    /// Input id bound to a Module prop (`$props[prop].id`).
+    fn module_prop_input_id(&self, module_id: &str, prop: &str) -> Option<String> {
+        self.state
+            .modules
+            .get(module_id)?
+            .dollar_props
+            .get(prop)?
+            .get("id")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Input id bound to a Module meta field (`meta.<key>InputId`).
+    fn module_meta_input_id(&self, module_id: &str, meta_key: &str) -> Option<String> {
+        self.state
+            .modules
+            .get(module_id)?
+            .meta
+            .get(format!("{meta_key}InputId"))?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// The `inputValue` for an expression: the current value at the input's
+    /// `getLocation` (`utils/apply-expression.js:16`).
+    fn expression_input_value(&self, input_id: &str) -> Value {
+        let Some(input) = self.state.inputs.get(input_id) else {
+            return Value::Null;
+        };
+        match &input.get_location {
+            Some(path) => resolve_input_value(&self.state, &self.beats, path),
+            None => Value::Null,
+        }
+    }
+
+    /// Run the expression assigned to `input_id`, if any.
+    ///
+    /// Returns the incoming `value` unchanged when the input has no
+    /// expression, when the expression throws (the previous value is kept),
+    /// or when the result cannot be represented (the evaluator maps
+    /// `undefined` to null, which the caller may still write — matching JS
+    /// enough for prop coercion).
+    fn apply_expression(&mut self, input_id: &str, value: Value) -> Value {
+        if !self.expression_cache.has(input_id) {
+            return value;
+        }
+
+        let input_value = self.expression_input_value(input_id);
+        let osc = json!({});
+        let time_ms = wall_clock_ms();
+
+        match self
+            .expression_cache
+            .apply(input_id, &value, &input_value, &osc, time_ms)
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => value,
+            Err(failure) => {
+                self.warn_expression_failure(&failure, "runtime");
+                value
+            }
+        }
+    }
+
+    /// Recompile the expression cache from `state.expressions`, warning once
+    /// per failing assignment. Returns the failures so action handlers can
+    /// reject an invalid create/update.
+    pub(crate) fn rebuild_expressions(&mut self) -> Vec<ExpressionFailure> {
+        let failures = self.expression_cache.rebuild(&self.state);
+        for failure in &failures {
+            self.warn_expression_failure(failure, "compile");
+        }
+        failures
+    }
+
+    fn warn_expression_failure(&mut self, failure: &ExpressionFailure, kind: &str) {
+        self.warn_once(
+            format!("expression:{kind}:{}", failure.assignment_id),
+            &format!(
+                "engine: WARN expression {} {kind} failed: {}",
+                failure.assignment_id, failure.message
+            ),
+        );
+    }
+
+    /// Push the mirror mutation `expressions/ADD_EXPRESSION` for `id`.
+    fn push_expression_delta(&mut self, id: &str) {
+        let Some(assignment) = self.state.expressions.get(id) else {
+            return;
+        };
+        let value = serde_json::to_value(assignment).unwrap_or(Value::Null);
+        self.deltas.push(
+            "expressions/ADD_EXPRESSION",
+            json!({ "assignment": value, "writeToSwap": false }),
+        );
+    }
+
+    /// `expressions/create` (`expressions.js:49-89`).
+    ///
+    /// An expression of exactly `value` is the identity JS stores as "no
+    /// assignment" (`create` returns `null`), and an invalid source is
+    /// rejected the way the JS action's `throw new Error("Unable to compile
+    /// Expression")` prevents the assignment from reaching the state.
+    ///
+    /// `writeToSwap` is accepted and ignored: the engine has no separate swap
+    /// buffer for expressions, because preset loading goes through
+    /// [`Store::restore`] rather than the six `loadPresetData` + `SWAP` steps.
+    fn create_expression(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let action = "expressions/create";
+        let input_id = required_str(params, action, "inputId")?.to_string();
+        let expression = params
+            .get("expression")
+            .and_then(Value::as_str)
+            .unwrap_or("value")
+            .to_string();
+        if expression.trim() == "value" {
+            return Ok(Value::Null);
+        }
+
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(crate::ids::uuid_v4);
+
+        let assignment = ExpressionAssignment {
+            id: id.clone(),
+            input_id,
+            expression,
+            evaluate_every_frame: params
+                .get("evaluateEveryFrame")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            extra: Map::new(),
+        };
+        let previous = self.state.expressions.get(&id).cloned();
+        self.state.expressions.insert(id.clone(), assignment);
+
+        let failures = self.rebuild_expressions();
+        if failures.iter().any(|failure| failure.assignment_id == id) {
+            // Reject like the JS action's `throw` would: leave any assignment
+            // that already used this id untouched.
+            match previous {
+                Some(previous) => {
+                    self.state.expressions.insert(id.clone(), previous);
+                }
+                None => {
+                    self.state.expressions.shift_remove(&id);
+                }
+            }
+            self.rebuild_expressions();
+            return Ok(Value::Null);
+        }
+
+        self.push_expression_delta(&id);
+        Ok(json!(id))
+    }
+
+    /// `expressions/update` (`expressions.js:91-123`).
+    fn update_expression(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let action = "expressions/update";
+        let id = required_str(params, action, "id")?.to_string();
+        let Some(existing) = self.state.expressions.get(&id).cloned() else {
+            return Err(invalid(
+                action,
+                format!("no expression with id {id} (update ignored)"),
+            ));
+        };
+
+        let expression = params
+            .get("expression")
+            .and_then(Value::as_str)
+            .unwrap_or("value")
+            .to_string();
+
+        if expression.trim() == "value" {
+            self.state.expressions.shift_remove(&id);
+            self.rebuild_expressions();
+            self.deltas
+                .push("expressions/REMOVE_EXPRESSION", json!({ "id": id }));
+            return Ok(Value::Null);
+        }
+
+        let mut updated = existing.clone();
+        updated.expression = expression;
+        self.state.expressions.insert(id.clone(), updated);
+
+        let failures = self.rebuild_expressions();
+        if failures.iter().any(|failure| failure.assignment_id == id) {
+            // Keep the previous expression, like the JS action throwing before
+            // it mutates `existingExpression`.
+            self.state.expressions.insert(id.clone(), existing);
+            self.rebuild_expressions();
+            return Ok(Value::Null);
+        }
+
+        self.push_expression_delta(&id);
+        Ok(json!(id))
+    }
+
+    /// `expressions/updateEvaluation` (`expressions.js:125-136`).
+    fn update_expression_evaluation(
+        &mut self,
+        params: &Map<String, Value>,
+    ) -> Result<Value, StoreError> {
+        let action = "expressions/updateEvaluation";
+        let id = required_str(params, action, "id")?.to_string();
+        let Some(mut assignment) = self.state.expressions.get(&id).cloned() else {
+            return Err(invalid(
+                action,
+                format!("no expression with id {id} (update ignored)"),
+            ));
+        };
+
+        assignment.evaluate_every_frame = params
+            .get("evaluateEveryFrame")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.state.expressions.insert(id.clone(), assignment);
+        self.rebuild_expressions();
+        self.push_expression_delta(&id);
+        Ok(json!(id))
+    }
+
+    /// `expressions/remove` (`expressions.js:138-140`).
+    fn remove_expression(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let action = "expressions/remove";
+        let id = required_str(params, action, "id")?.to_string();
+        self.state.expressions.shift_remove(&id);
+        self.rebuild_expressions();
+        self.deltas
+            .push("expressions/REMOVE_EXPRESSION", json!({ "id": id }));
+        Ok(Value::Null)
+    }
+
+    /// Evaluate every `evaluateEveryFrame` assignment once, after the Input
+    /// Links and before the frame renders.
+    ///
+    /// The JS worker stores the flag but never uses it; the engine implements
+    /// the documented intent. Writes go straight to the target state (never
+    /// back through `updateProp`/`updateMeta`), so one input is evaluated at
+    /// most once per frame and cannot recurse into itself.
+    fn apply_every_frame_expressions(&mut self, now: Duration) {
+        for input_id in self.expression_cache.every_frame_inputs() {
+            let Some(input) = self.state.inputs.get(&input_id) else {
+                continue;
+            };
+            let Some(target) = crate::input_links::link_target(&self.state, input) else {
+                continue;
+            };
+
+            let current = self.expression_target_value(&target);
+            let value = self.apply_expression(&input_id, current);
+            // `undefined`/no value: keep the previous state. A null write would
+            // wipe a prop instead of leaving it where the expression found it.
+            if value.is_null() {
+                continue;
+            }
+            self.write_expression_target(&input_id, &target, value, now);
+        }
+    }
+
+    /// The current value of an expression's write target.
+    fn expression_target_value(&self, target: &LinkTarget) -> Value {
+        match target {
+            LinkTarget::Module {
+                module_id,
+                prop,
+                path,
+            } => self
+                .state
+                .modules
+                .get(module_id)
+                .and_then(|module| prop_value(&module.props, prop, path.as_deref()).cloned())
+                .unwrap_or(Value::Null),
+            LinkTarget::ModuleMeta {
+                module_id,
+                meta_key,
+            } => self
+                .state
+                .modules
+                .get(module_id)
+                .and_then(|module| module.meta.get(meta_key).cloned())
+                .unwrap_or(Value::Null),
+            LinkTarget::Group { group_id, key } => {
+                let Some(group) = self.state.find_group(group_id) else {
+                    return Value::Null;
+                };
+                match key.as_str() {
+                    "alpha" => json!(group.alpha),
+                    "hidden" => json!(group.hidden),
+                    "enabled" => json!(group.enabled),
+                    "clearing" => json!(group.clearing),
+                    "inherit" => json!(group.inherit),
+                    "pipeline" => json!(group.pipeline),
+                    "compositeOperation" => json!(group.composite_operation),
+                    _ => Value::Null,
+                }
+            }
+        }
+    }
+
+    /// Write an every-frame expression result to its target and emit the
+    /// corresponding mirror mutation (throttled like an Input Link write).
+    fn write_expression_target(
+        &mut self,
+        input_id: &str,
+        target: &LinkTarget,
+        value: Value,
+        now: Duration,
+    ) {
+        match target {
+            LinkTarget::Module {
+                module_id,
+                prop,
+                path,
+            } => {
+                let Some(module) = self.state.modules.get(module_id) else {
+                    return;
+                };
+                let module_name = module.module_name.clone();
+                let schema = self
+                    .registry
+                    .prop_schema(&module_name, prop)
+                    .unwrap_or_default();
+                let coerced = coerce_prop_value(&schema, &value);
+                let unchanged = match prop_value(&module.props, prop, path.as_deref()) {
+                    Some(current) => match (current.as_f64(), coerced.as_f64()) {
+                        (Some(current), Some(next)) => (current - next).abs() <= LINK_DELTA_EPSILON,
+                        _ => *current == coerced,
+                    },
+                    None => false,
+                };
+                if unchanged {
+                    return;
+                }
+
+                let Some(module) = self.state.modules.get_mut(module_id) else {
+                    return;
+                };
+                set_prop_value(&mut module.props, prop, path.as_deref(), coerced.clone());
+                let payload = json!({
+                    "moduleId": module_id,
+                    "prop": prop,
+                    "data": {
+                        "value": coerced,
+                        "type": schema.type_,
+                        "path": path.clone().unwrap_or_default(),
+                    },
+                });
+                self.record_link_delta(
+                    input_id,
+                    coerced.as_f64().unwrap_or(0.0),
+                    "modules/UPDATE_ACTIVE_MODULE_PROP",
+                    payload,
+                    now,
+                );
+            }
+            LinkTarget::ModuleMeta {
+                module_id,
+                meta_key,
+            } => {
+                let Some(module) = self.state.modules.get(module_id) else {
+                    return;
+                };
+                if module.meta.get(meta_key) == Some(&value) {
+                    return;
+                }
+                let value = match meta_key.as_str() {
+                    "enabled" => json!(
+                        value
+                            .as_bool()
+                            .unwrap_or_else(|| value.as_f64().is_some_and(|value| value != 0.0))
+                    ),
+                    _ => value,
+                };
+                let Some(module) = self.state.modules.get_mut(module_id) else {
+                    return;
+                };
+                let Some(meta) = module.meta.as_object_mut() else {
+                    return;
+                };
+                meta.insert(meta_key.clone(), value.clone());
+                self.record_link_delta(
+                    input_id,
+                    value.as_f64().unwrap_or(0.0),
+                    "modules/UPDATE_ACTIVE_MODULE_META",
+                    json!({ "id": module_id, "metaKey": meta_key, "data": value }),
+                    now,
+                );
+            }
+            LinkTarget::Group { group_id, key } => {
+                let Some(number) = value.as_f64() else {
+                    return;
+                };
+                let Some(group) = self.state.find_group_mut(group_id) else {
+                    return;
+                };
+                let applied = match key.as_str() {
+                    "alpha" => {
+                        group.alpha = number;
+                        true
+                    }
+                    "hidden" => {
+                        group.hidden = number != 0.0;
+                        true
+                    }
+                    "enabled" => {
+                        group.enabled = number as i64;
+                        true
+                    }
+                    _ => false,
+                };
+                if !applied {
+                    return;
+                }
+                self.record_link_delta(
+                    input_id,
+                    number,
+                    "groups/UPDATE_GROUP_BY_KEY",
+                    json!({ "groupId": group_id, "key": key, "data": value }),
+                    now,
+                );
+            }
+        }
+    }
+
     /// Evaluate every Input Link against the current audio frame and apply the
     /// resulting writes (WS-9).
     ///
@@ -1732,6 +2189,7 @@ impl Store {
             &mut writes,
         );
         self.apply_link_writes(writes, now);
+        self.apply_every_frame_expressions(now);
     }
 
     /// Apply resolved writes: coerce, skip unchanged values, and emit at most
@@ -1766,15 +2224,8 @@ impl Store {
         let Some(module) = self.state.modules.get(module_id) else {
             return;
         };
-        let module_name = module.module_name.clone();
-        let schema = self
-            .registry
-            .prop_schema(&module_name, prop)
-            .unwrap_or_default();
-
-        // Skip a write the prop already carries (f32 tolerance): the audio
-        // frames repeat values constantly and re-writing burns no GPU time but
-        // does churn the mirror.
+        // `modules.js:499-503`: the raw incoming value is compared with the
+        // stored prop *before* `applyExpression`.
         let unchanged = prop_value(&module.props, prop, path)
             .and_then(Value::as_f64)
             .is_some_and(|current| (current - write.value).abs() <= LINK_DELTA_EPSILON);
@@ -1783,7 +2234,39 @@ impl Store {
             return;
         }
 
-        let coerced = coerce_prop_value(&schema, &json!(write.value));
+        // WS-12: JS delivers link writes through `modules/updateProp`, which
+        // runs `applyExpression` for the prop's input before coercion.
+        let value = self.apply_expression(&write.input_id, json!(write.value));
+
+        let Some(module) = self.state.modules.get(module_id) else {
+            return;
+        };
+        let module_name = module.module_name.clone();
+        let schema = self
+            .registry
+            .prop_schema(&module_name, prop)
+            .unwrap_or_default();
+
+        let coerced = coerce_prop_value(&schema, &value);
+
+        // Skip a write the prop already carries after the expression (f32
+        // tolerance): the audio frames repeat values constantly and writing
+        // the same value burns no GPU time but does churn the mirror.
+        let unchanged = match (
+            prop_value(&module.props, prop, path),
+            coerced.as_f64().filter(|_| !coerced.is_array()),
+        ) {
+            (Some(current), Some(next)) => current
+                .as_f64()
+                .is_some_and(|current| (current - next).abs() <= LINK_DELTA_EPSILON),
+            (Some(current), None) => *current == coerced,
+            _ => false,
+        };
+        if unchanged {
+            self.clear_link_pending(&write.input_id);
+            return;
+        }
+
         let Some(module) = self.state.modules.get_mut(module_id) else {
             return;
         };
@@ -1800,7 +2283,7 @@ impl Store {
         });
         self.record_link_delta(
             &write.input_id,
-            write.value,
+            coerced.as_f64().unwrap_or(write.value),
             "modules/UPDATE_ACTIVE_MODULE_PROP",
             payload,
             now,
@@ -1809,9 +2292,9 @@ impl Store {
 
     /// Apply a link that targets a Module meta value (`alpha`, `enabled`, ...).
     ///
-    /// `modules.js:564-590` (`updateMeta`) writes the value through unchanged
-    /// (after `applyExpression`, which the engine evaluates separately), so no
-    /// clamping happens here beyond the `enabled` boolean conversion.
+    /// `modules.js:564-590` (`updateMeta`) applies the expression and writes
+    /// the value through unchanged, so no clamping happens here beyond the
+    /// `enabled` boolean conversion.
     fn apply_meta_link_write(
         &mut self,
         write: &LinkWrite,
@@ -1819,22 +2302,48 @@ impl Store {
         meta_key: &str,
         now: Duration,
     ) {
+        // `modules.js:568-571`: the raw link value is compared with the stored
+        // meta *before* `applyExpression` (numbers only; `enabled` is a bool in
+        // state and never equal to the incoming f64).
         let Some(module) = self.state.modules.get(module_id) else {
             return;
         };
-        let unchanged = module
+        if module
             .meta
             .get(meta_key)
             .and_then(Value::as_f64)
-            .is_some_and(|current| (current - write.value).abs() <= LINK_DELTA_EPSILON);
+            .is_some_and(|current| (current - write.value).abs() <= LINK_DELTA_EPSILON)
+        {
+            self.clear_link_pending(&write.input_id);
+            return;
+        }
+
+        // WS-12: meta links dispatch `modules/updateMeta`, which is another
+        // `applyExpression` call site.
+        let value = self.apply_expression(&write.input_id, json!(write.value));
+
+        let Some(module) = self.state.modules.get(module_id) else {
+            return;
+        };
+        let unchanged = match module.meta.get(meta_key) {
+            Some(current) => match (current.as_f64(), value.as_f64()) {
+                (Some(current), Some(next)) => (current - next).abs() <= LINK_DELTA_EPSILON,
+                _ => *current == value,
+            },
+            None => false,
+        };
         if unchanged {
             self.clear_link_pending(&write.input_id);
             return;
         }
 
         let value = match meta_key {
-            "enabled" => json!(write.value != 0.0),
-            _ => json!(write.value),
+            "enabled" => json!(
+                value
+                    .as_bool()
+                    .unwrap_or_else(|| value.as_f64().is_some_and(|value| value != 0.0))
+            ),
+            _ => value,
         };
         let Some(module) = self.state.modules.get_mut(module_id) else {
             return;
@@ -1846,7 +2355,7 @@ impl Store {
 
         self.record_link_delta(
             &write.input_id,
-            write.value,
+            value.as_f64().unwrap_or(write.value),
             "modules/UPDATE_ACTIVE_MODULE_META",
             json!({ "id": module_id, "metaKey": meta_key, "data": value }),
             now,
@@ -1860,11 +2369,18 @@ impl Store {
         key: &str,
         now: Duration,
     ) {
+        // WS-12: group control links get the same expression treatment as the
+        // `groups/updateGroupInput` action, keyed by the control's input id.
+        let value = self.apply_expression(&write.input_id, json!(write.value));
+        let Some(number) = value.as_f64() else {
+            return;
+        };
+
         let unchanged = key == "alpha"
             && self
                 .state
                 .find_group(group_id)
-                .is_some_and(|group| (group.alpha - write.value).abs() <= LINK_DELTA_EPSILON);
+                .is_some_and(|group| (group.alpha - number).abs() <= LINK_DELTA_EPSILON);
         if unchanged {
             self.clear_link_pending(&write.input_id);
             return;
@@ -1874,18 +2390,18 @@ impl Store {
             return;
         };
 
-        let value = json!(write.value);
+        let measured = number;
         let applied = match key {
             "alpha" => {
-                group.alpha = write.value;
+                group.alpha = number;
                 true
             }
             "hidden" => {
-                group.hidden = write.value != 0.0;
+                group.hidden = number != 0.0;
                 true
             }
             "enabled" => {
-                group.enabled = write.value as i64;
+                group.enabled = number as i64;
                 true
             }
             _ => false,
@@ -1897,7 +2413,7 @@ impl Store {
         let payload = json!({ "groupId": group_id, "key": key, "data": value });
         self.record_link_delta(
             &write.input_id,
-            write.value,
+            measured,
             "groups/UPDATE_GROUP_BY_KEY",
             payload,
             now,
@@ -2085,6 +2601,9 @@ impl Store {
             .push("scenes/SET_ACTIVE_ROWS", self.live_scene_rows());
 
         self.reload_tweens();
+        // WS-12: preset/Scene documents carry expression source text; compile
+        // it after the inputs/modules it targets are in state.
+        self.rebuild_expressions();
         Ok(())
     }
 
@@ -2373,6 +2892,14 @@ fn padded_u8_array<const N: usize>(value: Option<&Value>) -> Option<[u8; N]> {
 }
 
 /// Read `props[prop]` or the value at `path` inside `props[prop]`.
+/// Wall-clock milliseconds, the value JS passes as `time` (`Date.now()`).
+fn wall_clock_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
 fn prop_value<'a>(props: &'a Value, prop: &str, path: Option<&str>) -> Option<&'a Value> {
     let mut current = props.get(prop)?;
     let Some(path) = path else {
@@ -4696,5 +5223,353 @@ mod tests {
         assert_eq!(schema.default, Some(json!(0.05)));
         assert!(registry.prop_schema("Bands", "nope").is_none());
         assert!(registry.prop_schema("Nope", "u_ringWidth").is_none());
+    }
+
+    // ————————————————— Expressions (WS-12) —————————————————
+
+    /// A one-module preset with no links and no expressions.
+    fn expression_preset() -> Value {
+        let mut preset = link_preset("bass");
+        preset["inputs"]["inputLinks"] = json!({});
+        preset["expressions"] = json!({ "assignments": {} });
+        preset
+    }
+
+    /// [`expression_preset`] plus one assignment on `input-a`.
+    fn preset_with_expression(expression: &str, evaluate_every_frame: bool) -> Value {
+        let mut preset = expression_preset();
+        preset["expressions"] = json!({
+            "assignments": {
+                "ex-1": {
+                    "id": "ex-1",
+                    "inputId": "input-a",
+                    "expression": expression,
+                    "evaluateEveryFrame": evaluate_every_frame,
+                }
+            }
+        });
+        preset
+    }
+
+    fn amount(store: &Store) -> f64 {
+        store.state().modules["m1"].props["amount"]
+            .as_f64()
+            .expect("amount is numeric")
+    }
+
+    #[test]
+    fn expression_transforms_a_manual_update_prop_write() {
+        let mut store = Store::new();
+        store
+            .restore(&preset_with_expression("value * 3", false))
+            .expect("preset loads");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({
+                    "moduleId": "m1",
+                    "prop": "amount",
+                    "data": { "value": 2.0 },
+                }),
+            )
+            .expect("updateProp dispatches");
+
+        assert!((amount(&store) - 6.0).abs() < 1e-6);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_PROP");
+        assert!((deltas[0].payload["data"]["value"].as_f64().unwrap() - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expression_transforms_an_audio_link_write() {
+        let mut preset = preset_with_expression("value * 2", false);
+        preset["inputs"]["inputLinks"] = link_preset("bass")["inputs"]["inputLinks"].clone();
+        let mut store = Store::new();
+        store.restore(&preset).expect("preset loads");
+        store.drain_deltas();
+
+        store.update_input_links(&audio_with_bass(0.25), Duration::from_millis(0));
+
+        assert!((amount(&store) - 0.5).abs() < 1e-6);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert!((deltas[0].payload["data"]["value"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expression_transforms_a_meta_link_write() {
+        let mut preset = expression_preset();
+        preset["modules"]["m1"]["meta"]["alphaInputId"] = json!("input-meta");
+        preset["inputs"]["inputs"]["input-meta"] = json!({
+            "id": "input-meta",
+            "type": "action",
+            "data": { "id": "m1", "metaKey": "alpha" },
+            "getLocation": "modules.active[\"m1\"].meta.alpha",
+            "location": "modules/updateMeta",
+        });
+        preset["inputs"]["inputLinks"]["input-meta"] = json!({
+            "id": "input-meta",
+            "type": "getter",
+            "location": "meyda/getFeature",
+            "source": "meyda",
+            "args": ["bass"],
+        });
+        preset["expressions"] = json!({
+            "assignments": {
+                "ex-meta": {
+                    "id": "ex-meta",
+                    "inputId": "input-meta",
+                    "expression": "value * 2",
+                    "evaluateEveryFrame": false,
+                }
+            }
+        });
+
+        let mut store = Store::new();
+        store.restore(&preset).expect("preset loads");
+        store.drain_deltas();
+        store.update_input_links(&audio_with_bass(0.25), Duration::from_millis(0));
+
+        let module = store.state().modules.get("m1").expect("module");
+        assert!((module.meta["alpha"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_META");
+        assert!((deltas[0].payload["data"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expression_transforms_a_group_link_write() {
+        let mut store = Store::new();
+        let group = store
+            .dispatch("groups/createGroup", json!({ "name": "Effects" }))
+            .expect("createGroup dispatches");
+        let group_id = group["id"].as_str().expect("id").to_string();
+        let input = store
+            .dispatch(
+                "inputs/addInput",
+                json!({
+                    "id": "input-alpha",
+                    "type": "commit",
+                    "location": "groups/UPDATE_GROUP_BY_KEY",
+                    "data": { "groupId": group_id, "key": "alpha" },
+                }),
+            )
+            .expect("addInput dispatches");
+        assert_eq!(input["id"], json!("input-alpha"));
+        store
+            .dispatch(
+                "groups/UPDATE_GROUP_BY_KEY",
+                json!({ "groupId": group_id, "key": "alphaInputId", "value": "input-alpha" }),
+            )
+            .expect("bind alpha input");
+        store
+            .dispatch(
+                "expressions/create",
+                json!({
+                    "id": "ex-group",
+                    "inputId": "input-alpha",
+                    "expression": "value * 2",
+                }),
+            )
+            .expect("create expression");
+        store
+            .dispatch(
+                "inputs/createInputLink",
+                json!({
+                    "inputId": "input-alpha",
+                    "source": "meyda",
+                    "type": "getter",
+                    "location": "meyda/getFeature",
+                    "args": ["bass"],
+                }),
+            )
+            .expect("create link");
+        store.drain_deltas();
+
+        store.update_input_links(&audio_with_bass(0.25), Duration::from_millis(0));
+
+        let live = store.state().find_group(&group_id).expect("group");
+        assert!((live.alpha - 0.5).abs() < 1e-6);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "groups/UPDATE_GROUP_BY_KEY");
+        assert_eq!(deltas[0].payload["key"], json!("alpha"));
+        assert!((deltas[0].payload["data"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn evaluate_every_frame_runs_once_per_frame_without_recursion() {
+        let mut store = Store::new();
+        store
+            .restore(&preset_with_expression("value + 1", true))
+            .expect("preset loads");
+        store.drain_deltas();
+
+        store.update_input_links(&AudioFrame::default(), Duration::from_millis(0));
+        assert!((amount(&store) - 1.0).abs() < 1e-6);
+
+        store.update_input_links(&AudioFrame::default(), Duration::from_millis(16));
+        // Exactly one evaluation per frame: 0 → 1 → 2, never 3.
+        assert!((amount(&store) - 2.0).abs() < 1e-6);
+
+        store.update_input_links(&AudioFrame::default(), Duration::from_millis(32));
+        assert!((amount(&store) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expressions_actions_mutate_state_and_emit_mirror_deltas() {
+        let mut store = Store::new();
+        store.restore(&expression_preset()).expect("preset loads");
+        store.drain_deltas();
+
+        let created = store
+            .dispatch(
+                "expressions/create",
+                json!({ "id": "ex-new", "inputId": "input-a", "expression": "value * 2" }),
+            )
+            .expect("create dispatches");
+        assert_eq!(created, json!("ex-new"));
+        assert_eq!(store.state().expressions["ex-new"].expression, "value * 2");
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "expressions/ADD_EXPRESSION");
+        assert_eq!(
+            deltas[0].payload["assignment"]["expression"],
+            json!("value * 2")
+        );
+        assert_eq!(deltas[0].payload["assignment"]["inputId"], json!("input-a"));
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({
+                    "moduleId": "m1",
+                    "prop": "amount",
+                    "data": { "value": 4.0 },
+                }),
+            )
+            .expect("updateProp dispatches");
+        assert!((amount(&store) - 8.0).abs() < 1e-6);
+        store.drain_deltas();
+
+        let updated = store
+            .dispatch(
+                "expressions/update",
+                json!({ "id": "ex-new", "expression": "value + 5" }),
+            )
+            .expect("update dispatches");
+        assert_eq!(updated, json!("ex-new"));
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "expressions/ADD_EXPRESSION");
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({
+                    "moduleId": "m1",
+                    "prop": "amount",
+                    "data": { "value": 4.0 },
+                }),
+            )
+            .expect("updateProp dispatches");
+        assert!((amount(&store) - 9.0).abs() < 1e-6);
+        store.drain_deltas();
+
+        // `updateEvaluation` persists the flag and re-announces the assignment.
+        store
+            .dispatch(
+                "expressions/updateEvaluation",
+                json!({ "id": "ex-new", "evaluateEveryFrame": true }),
+            )
+            .expect("updateEvaluation dispatches");
+        assert!(store.state().expressions["ex-new"].evaluate_every_frame);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "expressions/ADD_EXPRESSION");
+        assert_eq!(
+            deltas[0].payload["assignment"]["evaluateEveryFrame"],
+            json!(true)
+        );
+
+        store
+            .dispatch("expressions/remove", json!({ "id": "ex-new" }))
+            .expect("remove dispatches");
+        assert!(!store.state().expressions.contains_key("ex-new"));
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "expressions/REMOVE_EXPRESSION");
+    }
+
+    #[test]
+    fn invalid_expression_leaves_values_untouched() {
+        let mut store = Store::new();
+        store
+            .restore(&preset_with_expression("value +", false))
+            .expect("preset loads");
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({
+                    "moduleId": "m1",
+                    "prop": "amount",
+                    "data": { "value": 2.0 },
+                }),
+            )
+            .expect("updateProp dispatches");
+        assert!((amount(&store) - 2.0).abs() < 1e-6);
+
+        // `create` with an invalid source is rejected and nothing is stored.
+        let created = store
+            .dispatch(
+                "expressions/create",
+                json!({ "id": "bad", "inputId": "input-a", "expression": "value +" }),
+            )
+            .expect("create dispatches");
+        assert_eq!(created, Value::Null);
+        assert!(!store.state().expressions.contains_key("bad"));
+    }
+
+    #[test]
+    fn expression_returning_value_is_treated_as_no_assignment() {
+        let mut store = Store::new();
+        store.restore(&expression_preset()).expect("preset loads");
+        store.drain_deltas();
+
+        let created = store
+            .dispatch(
+                "expressions/create",
+                json!({ "inputId": "input-a", "expression": " value " }),
+            )
+            .expect("create dispatches");
+        assert_eq!(created, Value::Null);
+        assert!(store.state().expressions.is_empty());
+        assert!(store.drain_deltas().is_empty());
+    }
+
+    #[test]
+    fn runtime_throwing_expression_keeps_the_previous_value() {
+        let mut store = Store::new();
+        store
+            .restore(&preset_with_expression("inputValue.missing.deeper", false))
+            .expect("preset loads");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({
+                    "moduleId": "m1",
+                    "prop": "amount",
+                    "data": { "value": 2.0 },
+                }),
+            )
+            .expect("updateProp dispatches");
+        assert!((amount(&store) - 2.0).abs() < 1e-6);
     }
 }

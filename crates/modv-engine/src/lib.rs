@@ -46,12 +46,16 @@
 //! - [`tweens`] — the anime.js frame pre-renderer, the easing catalogue and
 //!   the link-readable tween runtimes (`store/modules/tweens.js`,
 //!   `dataTypes.js` `tween` type).
+//! - [`expressions`] — a Boa-backed JavaScript evaluator for the expression
+//!   assignments (`store/modules/expressions.js` `compileExpression`,
+//!   `utils/apply-expression.js`).
 
 pub mod blend;
 pub mod default_scene_migrations;
 pub mod default_scenes;
 pub mod delta;
 pub mod engine_state;
+pub mod expressions;
 pub mod inputs;
 pub mod preset;
 pub mod props;

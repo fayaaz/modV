@@ -7,6 +7,7 @@
 mod audio;
 mod cli;
 mod compositor;
+mod expressions;
 mod fixtures;
 mod headless;
 mod ids;

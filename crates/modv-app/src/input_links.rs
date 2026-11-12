@@ -227,7 +227,10 @@ pub fn evaluate_input_links(
 
 /// Resolve an input's write target from its bind-side `data`
 /// (`inputs.js` `action`/`commit` records).
-fn link_target(state: &EngineState, input: &modv_engine::inputs::Input) -> Option<LinkTarget> {
+pub(crate) fn link_target(
+    state: &EngineState,
+    input: &modv_engine::inputs::Input,
+) -> Option<LinkTarget> {
     let data = input.data.as_object()?;
 
     if let (Some(module_id), Some(prop)) = (

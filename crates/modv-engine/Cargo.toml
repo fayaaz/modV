@@ -6,6 +6,7 @@ license.workspace = true
 description = "modV engine — see docs/rust-hybrid.md"
 
 [dependencies]
+boa_engine = { version = "0.22.0", default-features = false }
 indexmap = { version = "2.14.2", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
