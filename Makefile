@@ -60,10 +60,28 @@ GUI_RUN_ARGS_X11 := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(X11_G
 RUST_IMAGE ?= modv-rust:local
 CARGO_VOLUME ?= modv-cargo
 
-.DEFAULT_GOAL := build
-.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-e2e-all test-unit yarn shell rave-reencode docker-rust docker-cargo-volume engine engine-test engine-lint engine-run
+# Building the engine and the installers needs several GB of BuildKit cache.
+# Fail before a build starts when the filesystem is nearly full instead of
+# letting BuildKit fill the disk (which breaks every later command).
+MIN_FREE_GB ?= 20
 
-build:
+.DEFAULT_GOAL := build
+.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-e2e-all test-unit yarn shell rave-reencode docker-rust docker-cargo-volume engine engine-test engine-lint engine-run disk-guard disk-clean
+
+disk-guard:
+	@free=$$(df -Pk "$(CURDIR)" | awk 'NR==2 {print int($$4/1048576)}'); \
+	if [ "$$free" -lt "$(MIN_FREE_GB)" ]; then \
+		echo "error: only $${free} GB free on the build filesystem (need $(MIN_FREE_GB) GB)."; \
+		echo "       run 'make disk-clean' (docker builder prune) and retry."; \
+		exit 1; \
+	fi
+
+disk-clean:
+	-$(DOCKER) builder prune -af
+	-$(DOCKER) image prune -f
+	-$(DOCKER) container prune -f
+
+build: disk-guard
 	mkdir -p "$(DIST_DIR)"
 	find "$(DIST_DIR)" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 	docker buildx build \
@@ -74,7 +92,7 @@ build:
 
 # AppImage-only variant of `build`. The deb packaging step is by far the
 # slowest part (~70s vs ~2s for the AppImage), so this skips it for local runs.
-appimage:
+appimage: disk-guard
 	mkdir -p "$(DIST_DIR)"
 	find "$(DIST_DIR)" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 	docker buildx build \
@@ -87,7 +105,7 @@ appimage:
 clean:
 	rm -rf "$(DIST_DIR)"
 
-docker-deps:
+docker-deps: disk-guard
 	$(DOCKER) build --target toolchain -t "$(TOOLCHAIN_IMAGE)" .
 
 # Seed the node_modules volume from the toolchain image the first time it is
@@ -154,7 +172,7 @@ rave-reencode: docker-node-modules
 yarn: docker-node-modules
 	$(call run-yarn,$(ARGS))
 
-docker-rust:
+docker-rust: disk-guard
 	$(DOCKER) build --target rust -t "$(RUST_IMAGE)" .
 
 docker-cargo-volume: docker-rust
