@@ -24,12 +24,16 @@
 //! * `modules/makeActiveModule` — `modules.js:226-479`. Known modules get the
 //!   registry `meta` and the registry prop defaults; unknown modules get the
 //!   `$status: [{type: "error", ...}]` entry that makes the render loop skip
-//!   them (`modules.js:253-268`). Both shader (`meta.type: "shader"`) and 2D
-//!   (`meta.type: "2d"`) modules are registered (M3, see
-//!   [`crate::module_registry`]).
+//!   them (`modules.js:253-268`). Shader (`meta.type: "shader"`), 2D
+//!   (`meta.type: "2d"`) and Point10 (also `meta.type: "2d"`, the JS wrapper
+//!   meta) modules are registered (M3/M4, see [`crate::module_registry`]);
+//!   the compositor picks the render path from the registry kind.
 //! * `modules/updateProp` — `modules.js:481-562`, with the coercion pipeline in
 //!   [`modv_engine::props::coerce_prop_value`] fed by the same registry for
-//!   both module kinds.
+//!   every module kind. Point10 props come from the scene's
+//!   [`modv_renderers::point10::SceneProp`] schema, whose numeric bounds are
+//!   strict (the scene binder clamps on read, so clamping on write is the same
+//!   stored value).
 //! * `modules/updateMeta` / `modules/updateActiveModule` /
 //!   `modules/removeActiveModule` — `modules.js:564-587`, `:858-888`, `:715`.
 //! * `meyda/SET_BANDS` — the renderer's audio pump commits the AGC bands
@@ -146,7 +150,7 @@ impl Default for Store {
 }
 
 impl Store {
-    /// An empty store with the built-in shader registry and no Scene storage.
+    /// An empty store with the built-in module registry and no Scene storage.
     pub fn new() -> Self {
         Self::with_state_path(None)
     }
@@ -1614,6 +1618,90 @@ mod tests {
         let last = deltas.last().expect("a delta was emitted");
         assert_eq!(last.r#type, "modules/UPDATE_ACTIVE_MODULE_PROP");
         assert_eq!(last.payload["data"]["type"], json!("int"));
+    }
+
+    #[test]
+    fn make_active_module_point10_uses_the_scene_meta_and_props() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Point10 Chromatic Wave"}),
+            )
+            .expect("makeActiveModule dispatches");
+
+        // The JS wrapper meta (`adapter.js:857-866`): a `2d` module in the
+        // `2d-scenes` Gallery category.
+        assert_eq!(module["meta"]["name"], json!("Point10 Chromatic Wave"));
+        assert_eq!(module["meta"]["author"], json!("Point10"));
+        assert_eq!(module["meta"]["version"], json!("1.0.0"));
+        assert_eq!(module["meta"]["type"], json!("2d"));
+        assert_eq!(module["meta"]["category"], json!("2d-scenes"));
+        assert_eq!(
+            module["meta"]["audioFeatures"],
+            json!(["bass", "mid", "treble"])
+        );
+        assert_eq!(module["$status"], json!([]), "registered, no error status");
+
+        // Prop defaults: the levers then the scene schema.
+        assert_eq!(module["props"]["gain"], json!(1.0));
+        assert_eq!(module["props"]["smoothing"], json!(0.0));
+        assert_eq!(module["props"]["useAgc"], json!(true));
+        assert_eq!(module["props"]["distortion"], json!(0.05));
+        assert_eq!(module["props"]["amplitude"], json!(1.0));
+
+        let id = module["$id"].as_str().unwrap().to_string();
+        // A Scene document can reference the wrapper name and the apply path
+        // rebuilds it through this same action (`scene_ops::build_live_module`).
+        assert_eq!(
+            store.state().modules[&id].module_name,
+            "Point10 Chromatic Wave"
+        );
+    }
+
+    #[test]
+    fn update_prop_coerces_point10_scene_props() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Point10 Chromatic Wave"}),
+            )
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+
+        // The scene schema clamps on read, so the engine marks its numeric
+        // props strict: the stored value is already inside `[min, max]`.
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "gain", "data": {"value": 9.0}}),
+            )
+            .expect("updateProp dispatches");
+        assert_eq!(store.state().modules[&id].props["gain"], json!(4.0));
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "distortion", "data": {"value": -1.0}}),
+            )
+            .expect("updateProp dispatches");
+        assert_eq!(store.state().modules[&id].props["distortion"], json!(0.0));
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "useAgc", "data": {"value": false}}),
+            )
+            .expect("updateProp dispatches");
+        assert_eq!(store.state().modules[&id].props["useAgc"], json!(false));
+
+        let deltas = store.drain_deltas();
+        let prop_delta = deltas
+            .iter()
+            .find(|delta| delta.r#type == "modules/UPDATE_ACTIVE_MODULE_PROP")
+            .expect("a prop delta was emitted");
+        assert_eq!(prop_delta.payload["data"]["type"], json!("float"));
     }
 
     #[test]

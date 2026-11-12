@@ -1,5 +1,5 @@
-//! The combined module registry (M3): shader modules plus the ported 2D
-//! modules.
+//! The combined module registry (M3 + M4): shader modules, the ported 2D
+//! modules and the ported Point10 scenes.
 //!
 //! M2 only knew the shader registry ([`modv_renderers::shader::all_modules`]);
 //! `modules/makeActiveModule` therefore turned every 2D module into an
@@ -11,6 +11,25 @@
 //!   and the module's prop defaults, and
 //! * the compositor can tell a shader module (pipeline slot) from a 2D module
 //!   (canvas facade instance) by name.
+//!
+//! M4 adds the Point10 scenes ([`modv_renderers::point10::all_scenes`]). They
+//! are registered as **`meta.type: "2d"`** modules under their JS wrapper name
+//! (`Point10 <Scene>`, `renderers/2d/modules/Point10*.js`) so Scene documents,
+//! presets and the Gallery keep working unchanged, but they render through
+//! their own scene path in the compositor (see [`ModuleKind::Point10`]). The
+//! Gallery `category`, `audioFeatures` and prop schema come straight from each
+//! scene's [`modv_renderers::point10::Point10Scene::meta`]/`props` report.
+//!
+//! ## Point10 prop binding
+//!
+//! [`modv_renderers::point10::Point10Scene`] deliberately has no prop binder:
+//! the scene schemas live in `modv-renderers` while the resolved prop values
+//! live in the engine store. The vendored scenes do expose an inherent
+//! `apply_props(getter)` (the `sceneProps.js` binder), so
+//! [`Point10SceneKind`] wraps the four concrete batch-1 scenes, delegates the
+//! trait, and adds [`Point10SceneKind::apply_props`]. The compositor needs
+//! that wrapper to push prop changes into a live scene; the trait-object form
+//! the plan asks for is [`ModuleRegistry::create_point10`].
 //!
 //! ## Two prop-metadata gaps in [`TwoDProp`]
 //!
@@ -50,6 +69,13 @@
 use serde_json::{Map, Value, json};
 
 use modv_engine::props::PropSchema;
+use modv_renderers::point10::chromatic::wave::ChromaticWave;
+use modv_renderers::point10::scenes::particle_field::ParticleField;
+use modv_renderers::point10::scenes::spiral_particles::SpiralParticles;
+use modv_renderers::point10::scenes::waveform::Waveform;
+use modv_renderers::point10::{
+    Point10Scene, SceneMeta, SceneProp, ScenePropKind, all_scenes as all_point10_scenes,
+};
 use modv_renderers::shader::uniforms::{PropKind, ShaderProp};
 use modv_renderers::shader::{ShaderModule, all_modules as all_shader_modules};
 use modv_renderers::two_d::modules::default_props as two_d_default_props;
@@ -64,6 +90,12 @@ pub enum ModuleKind {
     Shader,
     /// A `modv-renderers::two_d` module (canvas facade instance).
     TwoD,
+    /// A `modv-renderers::point10` scene (own target texture + composite).
+    ///
+    /// Registered with `meta.type: "2d"` (the JS `createPoint10Module` meta) so
+    /// Scene documents and presets resolve it, but rendered through the Point10
+    /// path in the compositor, never the 2D canvas facade.
+    Point10,
 }
 
 /// A registered 2D module: its static metadata and prop descriptors, factored
@@ -74,6 +106,162 @@ pub struct TwoDDefinition {
     pub meta: TwoDModuleMeta,
     /// Prop descriptors in declaration order.
     pub props: Vec<TwoDProp>,
+}
+
+/// A registered Point10 scene: the metadata and prop schema the scene reports,
+/// factored out of the GPU-backed instance.
+///
+/// Unlike [`TwoDDefinition`] there is no separate descriptor type: the scene's
+/// [`SceneMeta`]/[`SceneProp`] values *are* the JS `meta`/`props` contract
+/// (`adapter.js:857-871`), so they are stored verbatim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Point10Definition {
+    /// `meta` (`name`, `author`, `version`, `module_type`, `category`,
+    /// `audio_features`).
+    pub meta: SceneMeta,
+    /// The scene's own schema preceded by the responsiveness levers
+    /// ([`modv_renderers::point10::scene_props_with_levers`]).
+    pub props: Vec<SceneProp>,
+}
+
+/// The app-side wrapper around the concrete batch-1 Point10 scenes.
+///
+/// [`modv_renderers::point10::Point10Scene`] is the render contract and has no
+/// prop binder, while every ported scene exposes an inherent
+/// `apply_props(getter)` (the `sceneProps.js` binder). This enum keeps that
+/// capability: it delegates every trait method to the live scene and adds
+/// [`Point10SceneKind::apply_props`], which the compositor calls once per frame.
+///
+/// A new scene must be added here *and* to
+/// [`modv_renderers::point10::all_scenes`]; `every_registered_scene_constructs`
+/// fails when the two drift.
+pub enum Point10SceneKind {
+    /// `Point10 Chromatic Wave` (`chromatic/wave.rs`).
+    ChromaticWave(ChromaticWave),
+    /// `Point10 Particle Field` (`scenes/particle_field.rs`).
+    ParticleField(ParticleField),
+    /// `Point10 Spiral Particles` (`scenes/spiral_particles.rs`).
+    SpiralParticles(SpiralParticles),
+    /// `Point10 Waveform` (`scenes/waveform.rs`).
+    Waveform(Waveform),
+}
+
+impl Point10SceneKind {
+    /// Build a fresh scene for a registered wrapper name.
+    ///
+    /// `None` when `name` is not a ported scene — the compositor then skips the
+    /// module exactly like an unregistered 2D module.
+    pub fn create(name: &str) -> Option<Self> {
+        Some(match name {
+            "Point10 Chromatic Wave" => Self::ChromaticWave(ChromaticWave::new()),
+            "Point10 Particle Field" => Self::ParticleField(ParticleField::new()),
+            "Point10 Spiral Particles" => Self::SpiralParticles(SpiralParticles::new()),
+            "Point10 Waveform" => Self::Waveform(Waveform::new()),
+            _ => return None,
+        })
+    }
+
+    /// Push the resolved modV props into the scene.
+    ///
+    /// The getter is the engine's prop bag (`modules.active[id].props`): each
+    /// schema entry falls back to its default and clamps to its range, exactly
+    /// like `sceneProps.js: readSceneProps` does once per frame
+    /// (`adapter.js:797-800`).
+    pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
+        match self {
+            Self::ChromaticWave(scene) => scene.apply_props(|key| get(key)),
+            Self::ParticleField(scene) => scene.apply_props(|key| get(key)),
+            Self::SpiralParticles(scene) => scene.apply_props(|key| get(key)),
+            Self::Waveform(scene) => scene.apply_props(|key| get(key)),
+        }
+    }
+}
+
+/// Every trait method delegates to the concrete scene.
+impl Point10Scene for Point10SceneKind {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::ChromaticWave(scene) => scene.name(),
+            Self::ParticleField(scene) => scene.name(),
+            Self::SpiralParticles(scene) => scene.name(),
+            Self::Waveform(scene) => scene.name(),
+        }
+    }
+
+    fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
+        match self {
+            Self::ChromaticWave(scene) => scene.init(ctx),
+            Self::ParticleField(scene) => scene.init(ctx),
+            Self::SpiralParticles(scene) => scene.init(ctx),
+            Self::Waveform(scene) => scene.init(ctx),
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Self::ChromaticWave(scene) => scene.resize(width, height),
+            Self::ParticleField(scene) => scene.resize(width, height),
+            Self::SpiralParticles(scene) => scene.resize(width, height),
+            Self::Waveform(scene) => scene.resize(width, height),
+        }
+    }
+
+    fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
+        match self {
+            Self::ChromaticWave(scene) => scene.update(dt, audio),
+            Self::ParticleField(scene) => scene.update(dt, audio),
+            Self::SpiralParticles(scene) => scene.update(dt, audio),
+            Self::Waveform(scene) => scene.update(dt, audio),
+        }
+    }
+
+    fn render(
+        &mut self,
+        encoder: &mut modv_render::wgpu::CommandEncoder,
+        target: &modv_render::wgpu::TextureView,
+    ) {
+        match self {
+            Self::ChromaticWave(scene) => scene.render(encoder, target),
+            Self::ParticleField(scene) => scene.render(encoder, target),
+            Self::SpiralParticles(scene) => scene.render(encoder, target),
+            Self::Waveform(scene) => scene.render(encoder, target),
+        }
+    }
+
+    fn dispose(&mut self) {
+        match self {
+            Self::ChromaticWave(scene) => scene.dispose(),
+            Self::ParticleField(scene) => scene.dispose(),
+            Self::SpiralParticles(scene) => scene.dispose(),
+            Self::Waveform(scene) => scene.dispose(),
+        }
+    }
+
+    fn props(&self) -> Vec<SceneProp> {
+        match self {
+            Self::ChromaticWave(scene) => scene.props(),
+            Self::ParticleField(scene) => scene.props(),
+            Self::SpiralParticles(scene) => scene.props(),
+            Self::Waveform(scene) => scene.props(),
+        }
+    }
+
+    fn meta(&self) -> SceneMeta {
+        match self {
+            Self::ChromaticWave(scene) => scene.meta(),
+            Self::ParticleField(scene) => scene.meta(),
+            Self::SpiralParticles(scene) => scene.meta(),
+            Self::Waveform(scene) => scene.meta(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Point10SceneKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Point10SceneKind")
+            .field(&self.name())
+            .finish()
+    }
 }
 
 /// The JS 2D props whose descriptor sets `strict: true` (clamp to
@@ -100,15 +288,17 @@ const TWO_D_PREVIEW_WITH_OUTPUT: &[&str] = &[
     "Pixelate",     // Pixelate.js:9
 ];
 
-/// Both built-in registries, with the metadata the store and the compositor
-/// need.
+/// All three built-in registries, with the metadata the store and the
+/// compositor need.
 pub struct ModuleRegistry {
     shader: Vec<ShaderModule>,
     two_d: Vec<TwoDDefinition>,
+    point10: Vec<Point10Definition>,
 }
 
 impl ModuleRegistry {
-    /// The 37 built-in shader modules plus the 15 ported 2D modules.
+    /// The 37 built-in shader modules, the 15 ported 2D modules and the ported
+    /// Point10 scenes.
     pub fn builtin() -> Self {
         let shader = all_shader_modules();
         // `all_modules()` builds one default instance per module (all cheap,
@@ -120,7 +310,20 @@ impl ModuleRegistry {
                 props: module.props(),
             })
             .collect();
-        Self { shader, two_d }
+        // Point10 scenes report their own meta/schema; no GPU work happens on
+        // construction (pipelines and textures are built in `init`).
+        let point10 = all_point10_scenes()
+            .iter()
+            .map(|scene| Point10Definition {
+                meta: scene.meta(),
+                props: scene.props(),
+            })
+            .collect();
+        Self {
+            shader,
+            two_d,
+            point10,
+        }
     }
 
     /// The shader modules, in Gallery registration order.
@@ -133,6 +336,11 @@ impl ModuleRegistry {
         &self.two_d
     }
 
+    /// The Point10 scene definitions, in `all_scenes()` order.
+    pub fn point10_definitions(&self) -> &[Point10Definition] {
+        &self.point10
+    }
+
     /// Look up a shader module by its registration name (`$moduleName`).
     pub fn shader_module(&self, name: &str) -> Option<&ShaderModule> {
         self.shader.iter().find(|module| module.name == name)
@@ -141,6 +349,12 @@ impl ModuleRegistry {
     /// Look up a 2D module definition by its registration name.
     pub fn two_d_definition(&self, name: &str) -> Option<&TwoDDefinition> {
         self.two_d.iter().find(|module| module.meta.name == name)
+    }
+
+    /// Look up a Point10 scene definition by its wrapper module name
+    /// (`"Point10 Chromatic Wave"`).
+    pub fn point10_definition(&self, name: &str) -> Option<&Point10Definition> {
+        self.point10.iter().find(|scene| scene.meta.name == name)
     }
 
     /// Which renderer owns `name`, or `None` when it is not registered.
@@ -157,6 +371,12 @@ impl ModuleRegistry {
             .any(|module| module.meta.name == name)
         {
             Some(ModuleKind::TwoD)
+        } else if self
+            .point10_definitions()
+            .iter()
+            .any(|scene| scene.meta.name == name)
+        {
+            Some(ModuleKind::Point10)
         } else {
             None
         }
@@ -222,6 +442,27 @@ impl ModuleRegistry {
                 }
                 Some(meta)
             }
+            ModuleKind::Point10 => {
+                let definition = self.point10_definition(name)?;
+                // `createPoint10Module` always spreads all five meta fields
+                // (`adapter.js:857-866`), so unlike the 2D path none of them is
+                // optional here.
+                let mut meta = Map::new();
+                meta.insert("name".to_string(), json!(definition.meta.name));
+                meta.insert("author".to_string(), json!(definition.meta.author));
+                meta.insert("version".to_string(), json!(definition.meta.version));
+                meta.insert("type".to_string(), json!(definition.meta.module_type));
+                if !definition.meta.category.is_empty() {
+                    meta.insert("category".to_string(), json!(definition.meta.category));
+                }
+                if !definition.meta.audio_features.is_empty() {
+                    meta.insert(
+                        "audioFeatures".to_string(),
+                        json!(definition.meta.audio_features),
+                    );
+                }
+                Some(meta)
+            }
         }
     }
 
@@ -229,19 +470,28 @@ impl ModuleRegistry {
     ///
     /// Shader props never set `strict` (`renderers/shader/modules/*.js`), so
     /// their schemas keep `strict: false`; 2D props take `type`/`min`/`max`
-    /// from [`TwoDProp`] and `strict`/`abs` from [`TWO_D_PROP_FLAGS`].
+    /// from [`TwoDProp`] and `strict`/`abs` from [`TWO_D_PROP_FLAGS`]; Point10
+    /// props take both from the scene's [`SceneProp`] schema.
     pub fn prop_schema(&self, module_name: &str, prop: &str) -> Option<PropSchema> {
         if let Some(module) = self.shader_module(module_name) {
             let declared = module.props.iter().find(|declared| declared.name == prop)?;
             return Some(schema_for_shader(declared));
         }
 
-        let definition = self.two_d_definition(module_name)?;
+        if let Some(definition) = self.two_d_definition(module_name) {
+            let declared = definition
+                .props
+                .iter()
+                .find(|declared| declared.name == prop)?;
+            return Some(schema_for_two_d(definition.meta.name, declared));
+        }
+
+        let definition = self.point10_definition(module_name)?;
         let declared = definition
             .props
             .iter()
             .find(|declared| declared.name == prop)?;
-        Some(schema_for_two_d(definition.meta.name, declared))
+        Some(schema_for_point10(declared))
     }
 
     /// The default prop values for a module, as the `props` object of a new
@@ -255,8 +505,16 @@ impl ModuleRegistry {
             return Some(Value::Object(props));
         }
 
-        let definition = self.two_d_definition(module_name)?;
-        Some(two_d_default_props(&definition.props))
+        if let Some(definition) = self.two_d_definition(module_name) {
+            return Some(two_d_default_props(&definition.props));
+        }
+
+        let definition = self.point10_definition(module_name)?;
+        let mut props = Map::new();
+        for prop in &definition.props {
+            props.insert(prop.name.to_string(), default_scene_prop_value(prop));
+        }
+        Some(Value::Object(props))
     }
 
     /// Build a fresh 2D module instance for `name`.
@@ -270,6 +528,30 @@ impl ModuleRegistry {
         all_two_d_modules()
             .into_iter()
             .find(|module| module.meta().name == name)
+    }
+
+    /// Build a fresh Point10 scene for `name`.
+    ///
+    /// Returns `None` when `name` is not a registered scene, matching
+    /// [`ModuleRegistry::create_two_d`]. The concrete wrapper is returned (not
+    /// a trait object) so the compositor can call
+    /// [`Point10SceneKind::apply_props`]; it also implements [`Point10Scene`],
+    /// so [`ModuleRegistry::create_point10`] hands out the trait-object form.
+    pub fn create_point10_instance(&self, name: &str) -> Option<Point10SceneKind> {
+        self.point10_definition(name)?;
+        Point10SceneKind::create(name)
+    }
+
+    /// Build a fresh Point10 scene as the render-contract trait object.
+    ///
+    /// This is the `Box<dyn Point10Scene>` form of
+    /// [`ModuleRegistry::create_point10_instance`]. The compositor itself uses
+    /// the concrete wrapper because the trait has no prop binder (see the
+    /// module docs); this form exists for generic consumers.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn create_point10(&self, name: &str) -> Option<Box<dyn Point10Scene>> {
+        self.create_point10_instance(name)
+            .map(|scene| Box::new(scene) as Box<dyn Point10Scene>)
     }
 }
 
@@ -320,6 +602,55 @@ fn two_d_prop_flags(module_name: &str, prop: &str) -> (bool, bool) {
         .find(|(module, name, ..)| *module == module_name && *name == prop)
         .map(|(_, _, strict, abs)| (*strict, *abs))
         .unwrap_or((false, false))
+}
+
+/// Build a [`PropSchema`] from a Point10 scene prop declaration.
+///
+/// The JS scene schemas always declare `min`/`max` and clamp on read
+/// (`sceneProps.js: readSceneProps`), so the engine marks the numeric props
+/// `strict`: an out-of-range `modules/updateProp` (a hand-edited preset, an
+/// input link) is stored already clamped instead of only being clamped when the
+/// scene reads it. Booleans are `type: "bool"` and go through the plain
+/// `!= false` read, exactly like `props.useAgc`.
+fn schema_for_point10(prop: &SceneProp) -> PropSchema {
+    PropSchema {
+        type_: scene_prop_kind_name(prop.kind).to_string(),
+        min: Some(f64::from(prop.min)),
+        max: Some(f64::from(prop.max)),
+        strict: prop.kind == ScenePropKind::Float,
+        abs: false,
+        default: Some(default_scene_prop_value(prop)),
+    }
+}
+
+/// The `dataTypes` key for a Point10 prop kind.
+fn scene_prop_kind_name(kind: ScenePropKind) -> &'static str {
+    match kind {
+        ScenePropKind::Float => "float",
+        ScenePropKind::Bool => "bool",
+    }
+}
+
+/// The JSON default for a Point10 prop declaration.
+///
+/// `SceneProp` stores the default as an `f32`; going through the shortest
+/// round-trip decimal keeps the JSON readable and identical to the JS literals
+/// (`0.05` stays `0.05`, not `0.05000000074505806`). Whole numbers are written
+/// as floats (`1.0`) so every float prop has the same JSON number shape as the
+/// shader and 2D default paths.
+fn default_scene_prop_value(prop: &SceneProp) -> Value {
+    match prop.kind {
+        ScenePropKind::Bool => json!(prop.default != 0.0),
+        ScenePropKind::Float => {
+            let text = prop.default.to_string();
+            let text = if text.contains(['.', 'e', 'E']) {
+                text
+            } else {
+                format!("{text}.0")
+            };
+            serde_json::from_str(&text).unwrap_or_else(|_| json!(f64::from(prop.default)))
+        }
+    }
 }
 
 /// The JSON default for a shader prop declaration.
@@ -444,5 +775,193 @@ mod tests {
         let module = registry.create_two_d("Smear").expect("Smear is registered");
         assert_eq!(module.meta().name, "Smear");
         assert!(registry.create_two_d("Bands").is_none());
+    }
+
+    // ————————————————— Point10 scenes (M4) —————————————————
+
+    #[test]
+    fn registry_knows_the_point10_scenes() {
+        let registry = ModuleRegistry::builtin();
+        assert_eq!(
+            registry.kind("Point10 Chromatic Wave"),
+            Some(ModuleKind::Point10)
+        );
+        assert_eq!(registry.kind("Point10 Waveform"), Some(ModuleKind::Point10));
+        // Point10 names are their own kind, not 2D modules.
+        assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
+        assert_eq!(registry.kind("Point10 Not A Scene"), None);
+        assert_eq!(registry.point10_definitions().len(), 4);
+    }
+
+    #[test]
+    fn point10_definitions_match_the_wrapper_modules() {
+        let registry = ModuleRegistry::builtin();
+        let names: Vec<&str> = registry
+            .point10_definitions()
+            .iter()
+            .map(|definition| definition.meta.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Point10 Chromatic Wave",
+                "Point10 Particle Field",
+                "Point10 Spiral Particles",
+                "Point10 Waveform",
+            ]
+        );
+
+        for definition in registry.point10_definitions() {
+            assert_eq!(definition.meta.author, "Point10");
+            assert_eq!(definition.meta.version, "1.0.0");
+            // The JS wrappers register as `2d` modules so Scene documents and
+            // presets keep resolving them (`adapter.js:857-866`).
+            assert_eq!(definition.meta.module_type, "2d");
+            assert_eq!(definition.meta.audio_features, &["bass", "mid", "treble"]);
+            assert!(!definition.props.is_empty());
+
+            // The levers come first and the scene schema follows
+            // (`adapter.js:868-871`).
+            let levers: Vec<&str> = definition.props[..6].iter().map(|prop| prop.name).collect();
+            assert_eq!(
+                levers,
+                vec![
+                    "gain",
+                    "smoothing",
+                    "bassGain",
+                    "midGain",
+                    "trebleGain",
+                    "useAgc"
+                ]
+            );
+        }
+
+        // Only the fullscreen 2D scene overrides the default category
+        // (`Point10ChromaticWave.js:7`).
+        let category = |name: &str| {
+            registry
+                .point10_definition(name)
+                .expect("registered")
+                .meta
+                .category
+        };
+        assert_eq!(category("Point10 Chromatic Wave"), "2d-scenes");
+        assert_eq!(category("Point10 Particle Field"), "3d-scenes");
+        assert_eq!(category("Point10 Spiral Particles"), "3d-scenes");
+        assert_eq!(category("Point10 Waveform"), "3d-scenes");
+    }
+
+    #[test]
+    fn point10_meta_fields_match_the_js_wrapper() {
+        let registry = ModuleRegistry::builtin();
+        let meta = registry
+            .meta_fields("Point10 Chromatic Wave")
+            .expect("registered");
+        assert_eq!(meta["name"], json!("Point10 Chromatic Wave"));
+        assert_eq!(meta["author"], json!("Point10"));
+        assert_eq!(meta["version"], json!("1.0.0"));
+        assert_eq!(meta["type"], json!("2d"));
+        assert_eq!(meta["category"], json!("2d-scenes"));
+        assert_eq!(meta["audioFeatures"], json!(["bass", "mid", "treble"]));
+
+        let waveform = registry
+            .meta_fields("Point10 Waveform")
+            .expect("registered");
+        assert_eq!(waveform["category"], json!("3d-scenes"));
+    }
+
+    #[test]
+    fn point10_default_props_are_the_scene_defaults() {
+        let registry = ModuleRegistry::builtin();
+
+        // `sceneProps.js: CHROMATIC_LINE_PROPS` + the levers.
+        let props = registry
+            .default_props("Point10 Chromatic Wave")
+            .expect("registered");
+        assert_eq!(props["gain"], json!(1.0));
+        assert_eq!(props["smoothing"], json!(0.0));
+        assert_eq!(props["bassGain"], json!(1.0));
+        assert_eq!(props["useAgc"], json!(true));
+        assert_eq!(props["distortion"], json!(0.05));
+        assert_eq!(props["amplitude"], json!(1.0));
+        assert_eq!(props["glow"], json!(1.0));
+
+        let waveform = registry
+            .default_props("Point10 Waveform")
+            .expect("registered");
+        assert_eq!(waveform["height"], json!(1.0));
+        assert_eq!(waveform["speed"], json!(1.0));
+        assert_eq!(waveform["opacity"], json!(1.0));
+
+        // Every registered scene has a default for every declared prop.
+        for definition in registry.point10_definitions() {
+            let props = registry
+                .default_props(definition.meta.name)
+                .expect("defaults");
+            for prop in &definition.props {
+                assert!(
+                    props.get(prop.name).is_some(),
+                    "{} is missing a default for {}",
+                    definition.meta.name,
+                    prop.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn point10_prop_schema_clamps_like_the_scene_binder() {
+        let registry = ModuleRegistry::builtin();
+
+        let gain = registry
+            .prop_schema("Point10 Chromatic Wave", "gain")
+            .expect("gain is declared");
+        assert_eq!(gain.type_, "float");
+        assert_eq!(gain.min, Some(0.0));
+        assert_eq!(gain.max, Some(4.0));
+        assert!(gain.strict);
+
+        let use_agc = registry
+            .prop_schema("Point10 Waveform", "useAgc")
+            .expect("useAgc is declared");
+        assert_eq!(use_agc.type_, "bool");
+        assert!(!use_agc.strict);
+        assert_eq!(use_agc.default, Some(json!(true)));
+
+        assert!(
+            registry
+                .prop_schema("Point10 Waveform", "notAProp")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn create_point10_builds_the_named_scene() {
+        let registry = ModuleRegistry::builtin();
+
+        let scene = registry
+            .create_point10_instance("Point10 Waveform")
+            .expect("Waveform is registered");
+        assert_eq!(scene.name(), "Point10 Waveform");
+
+        let boxed = registry
+            .create_point10("Point10 Waveform")
+            .expect("Waveform is registered");
+        assert_eq!(boxed.name(), "Point10 Waveform");
+
+        assert!(registry.create_point10("Bands").is_none());
+        assert!(registry.create_point10_instance("Not A Scene").is_none());
+    }
+
+    #[test]
+    fn every_registered_scene_constructs() {
+        let registry = ModuleRegistry::builtin();
+        for definition in registry.point10_definitions() {
+            assert!(
+                registry.create_point10(definition.meta.name).is_some(),
+                "{} is registered but has no constructor in Point10SceneKind",
+                definition.meta.name
+            );
+        }
     }
 }

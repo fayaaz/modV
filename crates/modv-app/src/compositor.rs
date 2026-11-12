@@ -33,7 +33,9 @@
 //!      changes, `update` each frame, `draw` into the canvas, `submit`, then
 //!      composite the canvas texture onto the group target with the module's
 //!      `meta.alpha`/`meta.compositeOperation` (`loop.js:409-470`,
-//!      `renderers/2d/index.js:29-96`).
+//!      `renderers/2d/index.js:29-96`). A registered Point10 scene also
+//!      reports `meta.type: "2d"` but takes the scene path instead — see
+//!      "Point10 scenes (M4)" below.
 //!
 //! Then the main texture is composited from every group in render order,
 //! skipping the Gallery group **by name** (`loop.js:628-637` — the order
@@ -91,10 +93,10 @@
 //!   scratch ping-pong is needed; for 2D modules the per-module canvas replaces
 //!   the group canvas entirely, so `pipeline` also changes nothing.
 //!
-//! ## Deliberate M3 limitations
+//! ## Deliberate M3/M4 limitations
 //!
-//! * **ISF/Point10/three modules do not render.** They log once and are
-//!   skipped (their renderers land in M4).
+//! * **ISF/three modules do not render.** They log once and are skipped (their
+//!   renderers land in M4).
 //! * **No `input_texture` for 2D modules.** `Webcam` and `Texture2D` draw
 //!   nothing while `DrawContext::input_texture` is `None` — exactly what the
 //!   JS does when the video/texture source is missing. Media inputs land with
@@ -113,6 +115,47 @@
 //!   not cull hidden groups, and the main composite does not check `hidden`
 //!   either — it only stops a group from becoming `lastCanvas`
 //!   (`loop.js:538-557`).
+//!
+//! ## Point10 scenes (M4)
+//!
+//! Point10 modules are registered with `meta.type: "2d"` (the JS
+//! `createPoint10Module` meta), so the 2D branch of [`Compositor::render_module`]
+//! refines the dispatch through [`ModuleRegistry::kind`] and sends a
+//! [`ModuleKind::Point10`] module to [`Compositor::render_point10_module`]:
+//!
+//! 1. Build the scene once (`create_point10_instance`), `init` it with a
+//!    [`SceneContext`] sized to the output, `resize` it on later size changes.
+//! 2. Apply the module's props to the scene every frame (the JS
+//!    `applyProps`/`readLevers` pair, `adapter.js:797-804`), then advance the
+//!    [`AudioBridge`] with the resolved responsiveness levers.
+//! 3. `update(dt, &bridge)` and `render` into the scene's own
+//!    output-sized [`OutputTexture`].
+//! 4. Composite that texture onto the group target with the module's
+//!    `meta.alpha`/`meta.compositeOperation` — the same helper (and therefore
+//!    the same canvas blend math) the 2D canvas path uses.
+//!
+//! The JS adapter draws each scene into an `OffscreenCanvas` and blits it into
+//! the 2D group canvas one frame later (`adapter.js:818-836`); rendering into a
+//! texture removes both the blit and that lag. The scene target is
+//! `Rgba8Unorm` (the group format) because none of the batch-1 scenes use the
+//! postfx chain: `Point10Scene::render` clears to transparent black and the
+//! scene's own alpha blending lands directly on canvas-space values. The
+//! [`modv_renderers::point10::postfx::Composer`] and
+//! [`modv_renderers::point10::HDR_FORMAT`] stay available for the bloom scenes
+//! in later batches — a scene that needs bloom will grow a flag on its meta or
+//! schema and get a composer here, not a second render path.
+//!
+//! ### Interim audio mapping (M4; M6 replaces it)
+//!
+//! The engine has no analyser yet: `meyda/SET_BANDS` gives the store three AGC
+//! bands (plus a zeroed beat), and [`FrameInfo::audio`] carries them. The
+//! bridge wants the full `audio-bands.js` payload, so
+//! [`interim_band_payload`] synthesises it: each band is replicated across its
+//! four damping lanes and its grid cells ([`band_of_cell`]), `wave`/`freq_mag`
+//! are the store's (still zeroed) arrays, `sample_rate` is reported as
+//! 48 kHz, and the byte spectrum is whatever the frame carries (1024 zero bins
+//! today, so scenes see silence rather than "no analyser"). M6 replaces this
+//! function with the analyser's real payload and nothing else moves.
 //!
 //! ## Present boundary
 //!
@@ -139,12 +182,17 @@ use modv_render::frame_graph::{
     Executor, FrameGraph, GraphError, MAIN_TEXTURE_ID, PassNode, TextureId, TextureSurfaces,
 };
 use modv_render::wgpu;
+use modv_renderers::point10::audio_bridge::{
+    AUDIO_SAMPLES, AudioBridge, BandPayload, LANES_PER_BAND, RawBands, ResponsivenessLevers,
+    band_of_cell,
+};
+use modv_renderers::point10::{Point10Scene, SceneContext};
 use modv_renderers::shader::ShaderModule;
 use modv_renderers::shader::pipeline::{ShaderAudioUniforms, ShaderError, ShaderRenderer};
 use modv_renderers::shader::uniforms::{PropKind, PropSlots, ShaderProp};
 use modv_renderers::two_d::{AudioFrame, Canvas, DrawContext, ModuleContext, TwoDModule};
 
-use crate::module_registry::ModuleRegistry;
+use crate::module_registry::{ModuleKind, ModuleRegistry, Point10SceneKind};
 
 /// Preview frame width published to the UI (`modv-ipc` `VMP1` ring).
 pub const PREVIEW_WIDTH: u32 = 320;
@@ -267,6 +315,28 @@ impl TwoDInstance {
     }
 }
 
+/// One Point10 module's live state: the scene, its bridge and its target.
+///
+/// The JS adapter keeps one scene instance, one `OffscreenCanvas` and one
+/// `AudioBridge` per module id (`adapter.js:296-323`); this struct is that
+/// state. The target texture replaces the `OffscreenCanvas` + blit.
+struct Point10Instance {
+    /// The concrete scene wrapper (needs the inherent prop binder).
+    scene: Point10SceneKind,
+    /// Device/queue clones plus the shared quad, sized to the output.
+    context: SceneContext,
+    /// Per-instance audio bridge (lever state is per module in the JS).
+    bridge: AudioBridge,
+    /// The output-sized scene target, rebuilt when the output resizes.
+    target: Option<OutputTexture>,
+    /// Size the scene was last initialised/resized for.
+    size: Option<(u32, u32)>,
+    /// `init` runs once, on the first frame the scene draws.
+    initialised: bool,
+    /// `FrameInfo::time_seconds` of the previous frame, for the scene clock.
+    last_time: Option<f32>,
+}
+
 /// The GPU compositor: shader renderer, frame-graph executor, textures.
 pub struct Compositor {
     device: wgpu::Device,
@@ -290,6 +360,11 @@ pub struct Compositor {
     /// 2D module ids whose instance could not be created; skipped without
     /// retrying each frame.
     failed_two_d: HashSet<String>,
+    /// Live Point10 scene instances keyed by module id.
+    point10: HashMap<String, Point10Instance>,
+    /// Point10 module ids whose scene could not be created; skipped without
+    /// retrying each frame.
+    failed_point10: HashSet<String>,
     /// One-shot log keys (unknown blend mode, skipped module type, ...).
     warned: HashSet<String>,
     /// Sampler for module input textures — Repeat/Linear, matching
@@ -377,6 +452,8 @@ impl Compositor {
             failed_modules: HashSet::new(),
             two_d: HashMap::new(),
             failed_two_d: HashSet::new(),
+            point10: HashMap::new(),
+            failed_point10: HashSet::new(),
             warned: HashSet::new(),
             group_sampler,
             present_sampler,
@@ -404,6 +481,13 @@ impl Compositor {
             instance.canvas = None;
             instance.size = None;
         }
+        // Point10 scene targets are output-sized as well. The scenes keep their
+        // own pipelines (only `resize` re-derives size-dependent state), so the
+        // next frame rebuilds the target and calls `resize` on the scene.
+        for instance in self.point10.values_mut() {
+            instance.target = None;
+            instance.size = None;
+        }
     }
 
     /// Drop all GPU-side state (used after `engine/restore`).
@@ -423,6 +507,10 @@ impl Compositor {
             instance.module.dispose();
         }
         self.failed_two_d.clear();
+        for (_, mut instance) in self.point10.drain() {
+            instance.scene.dispose();
+        }
+        self.failed_point10.clear();
     }
 
     fn drop_output_textures(&mut self) {
@@ -583,8 +671,14 @@ impl Compositor {
             .and_then(Value::as_str)
             .unwrap_or("shader");
         match module_type {
-            // The 2D path is a canvas draw + composite, not a shader slot.
-            "2d" => return self.render_two_d_module(module, module_id, target, frame),
+            // Point10 scenes register as `2d` modules (the JS meta) but render
+            // through their own scene + target, so the registry decides.
+            "2d" => {
+                if self.registry.kind(&module.module_name) == Some(ModuleKind::Point10) {
+                    return self.render_point10_module(module, module_id, target, frame);
+                }
+                return self.render_two_d_module(module, module_id, target, frame);
+            }
             "shader" => {}
             other => {
                 self.warn_once(
@@ -854,6 +948,189 @@ impl Compositor {
         self.composite(texture_id, target.clone(), alpha, blend)
     }
 
+    /// Create the Point10 scene instance for `module_id` if it does not exist.
+    ///
+    /// Returns `false` when `module_name` is not a registered Point10 scene;
+    /// the failure is remembered so a Scene that outlives its registration does
+    /// not warn every frame.
+    fn create_point10_instance(&mut self, module_name: &str, module_id: &str) -> bool {
+        if self.failed_point10.contains(module_id) {
+            return false;
+        }
+        match self.registry.create_point10_instance(module_name) {
+            Some(scene) => {
+                // The scene target is the group format: none of the batch-1
+                // scenes run behind the postfx chain (see the module docs).
+                let context =
+                    SceneContext::new(&self.device, &self.queue, wgpu::TextureFormat::Rgba8Unorm);
+                self.point10.insert(
+                    module_id.to_string(),
+                    Point10Instance {
+                        scene,
+                        context,
+                        bridge: AudioBridge::new(),
+                        target: None,
+                        size: None,
+                        initialised: false,
+                        last_time: None,
+                    },
+                );
+                true
+            }
+            None => {
+                self.warn_once(
+                    format!("unregistered-point10:{module_name}"),
+                    &format!(
+                        "engine: WARN Point10 scene '{module_name}' has no ported scene wrapper; \
+                         skipping"
+                    ),
+                );
+                self.failed_point10.insert(module_id.to_string());
+                false
+            }
+        }
+    }
+
+    /// Render one Point10 scene into its target and composite it onto the group
+    /// target (`adapter.js:780-836`, `renderers/2d/index.js:29-96`).
+    ///
+    /// The per-instance frame clock matches `point10/timing.js`: the first
+    /// frame is `dt = 0` and later frames are clamped to 0.1 s, because Point10
+    /// scenes integrate `dt` while the 2D facade passes an absolute
+    /// `requestAnimationFrame` timestamp as its `delta`.
+    fn render_point10_module(
+        &mut self,
+        module: &ModuleInstance,
+        module_id: &str,
+        target: &TextureId,
+        frame: &FrameInfo,
+    ) -> Result<(), CompositorError> {
+        if !self.point10.contains_key(module_id)
+            && !self.create_point10_instance(&module.module_name, module_id)
+        {
+            return Ok(());
+        }
+
+        // `loop.js:410-412`: alpha and composite operation come from the meta.
+        let alpha = module
+            .meta
+            .get("alpha")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let blend_token = module
+            .meta
+            .get("compositeOperation")
+            .and_then(Value::as_str)
+            .unwrap_or("normal")
+            .to_string();
+        let blend = self.render_blend_mode(&blend_token);
+
+        let (width, height) = self.size;
+        let texture_id = point10_texture_id(module_id);
+
+        // Rebuild the scene target when it is missing or the output resized.
+        // The allocation needs `&self`, so it happens before the instance is
+        // borrowed mutably.
+        let needs_target = self
+            .point10
+            .get(module_id)
+            .map(|instance| instance.target.is_none() || instance.size != Some((width, height)))
+            .unwrap_or(false);
+        let new_target = if needs_target {
+            let texture =
+                self.create_output_texture(&format!("modv-point10-{module_id}"), width, height);
+            // wgpu does not zero-initialise allocations; every scene clears its
+            // own target on render, but a scene that declines to draw must still
+            // composite transparent black rather than undefined memory.
+            self.clear_texture(&texture.texture, "point10-allocate");
+            Some(texture)
+        } else {
+            None
+        };
+
+        // Register whichever texture the scene draws into so the frame-graph
+        // composite can sample it.
+        let target_texture = match &new_target {
+            Some(texture) => Some(texture.texture.clone()),
+            None => self
+                .point10
+                .get(module_id)
+                .and_then(|instance| instance.target.as_ref())
+                .map(|texture| texture.texture.clone()),
+        };
+        let Some(target_texture) = target_texture else {
+            return Ok(());
+        };
+        self.surfaces.insert(texture_id.clone(), target_texture);
+
+        // Cheap handle clone (Arc) so the submit below does not borrow `self`
+        // while the instance is borrowed.
+        let queue = self.queue.clone();
+        let time = frame.time_seconds;
+        let payload = interim_band_payload(&frame.audio);
+        let props = &module.props;
+
+        {
+            let Some(instance) = self.point10.get_mut(module_id) else {
+                return Ok(());
+            };
+            if let Some(texture) = new_target {
+                instance.target = Some(texture);
+            }
+
+            // `init` once, `resize` when the output size changed.
+            if instance.size != Some((width, height)) {
+                instance.size = Some((width, height));
+                instance.context.resize(width, height);
+                if instance.initialised {
+                    instance.scene.resize(width, height);
+                } else {
+                    instance.scene.init(&mut instance.context);
+                    instance.initialised = true;
+                }
+            }
+
+            // `timing.js: createFrameClock` — first frame 0, then clamped
+            // elapsed seconds.
+            let dt = match instance.last_time {
+                Some(previous) if (time - previous).is_finite() => {
+                    (time - previous).clamp(0.0, MAX_POINT10_FRAME_SECONDS)
+                }
+                Some(_) => 0.0,
+                None => 0.0,
+            };
+            instance.last_time = Some(time);
+
+            // `adapter.js:797-804`: scene props, then the bridge levers, then
+            // `update`. Both read the live prop bag; the schema supplies the
+            // defaults and the clamps.
+            let mut get = |key: &str| {
+                props
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .map(|value| value as f32)
+            };
+            instance.scene.apply_props(&mut get);
+            let levers = ResponsivenessLevers::from_getter(|key| get(key));
+            instance.bridge.update(dt, Some(&payload), &levers);
+            instance.scene.update(dt, &instance.bridge);
+
+            let Some(texture) = instance.target.as_ref() else {
+                return Ok(());
+            };
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("modv-point10-scene"),
+                });
+            instance.scene.render(&mut encoder, &texture.view);
+            queue.submit(Some(encoder.finish()));
+        }
+
+        self.composite(texture_id, target.clone(), alpha, blend)
+    }
+
     /// Main composite (`loop.js:555-663`).
     fn compose_main(&mut self, state: &EngineState) -> Result<(), CompositorError> {
         let order = state.group_index_render_order();
@@ -991,6 +1268,21 @@ impl Compositor {
             self.surfaces.remove(&two_d_texture_id(&id));
         }
         self.failed_two_d
+            .retain(|id| live_modules.contains(id.as_str()));
+
+        let stale_point10: Vec<String> = self
+            .point10
+            .keys()
+            .filter(|id| !live_modules.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale_point10 {
+            if let Some(mut instance) = self.point10.remove(&id) {
+                instance.scene.dispose();
+            }
+            self.surfaces.remove(&point10_texture_id(&id));
+        }
+        self.failed_point10
             .retain(|id| live_modules.contains(id.as_str()));
     }
 
@@ -1503,6 +1795,71 @@ fn two_d_texture_id(module_id: &str) -> TextureId {
     TextureId::from(format!("two-d:{module_id}"))
 }
 
+/// The frame-graph texture id of a Point10 scene's target.
+fn point10_texture_id(module_id: &str) -> TextureId {
+    TextureId::from(format!("point10:{module_id}"))
+}
+
+/// Longest frame the Point10 scene clock reports, mirroring
+/// `MAX_FRAME_SECONDS` in `point10/timing.js`.
+const MAX_POINT10_FRAME_SECONDS: f32 = 0.1;
+
+/// Sample rate reported by the interim audio payload.
+///
+/// The store's [`AudioFrame`] carries no sample rate yet (the renderer's
+/// `AudioBands` runs at the `AudioContext` rate); 48 kHz is the engine's
+/// assumption until the analyser lands in M6. No batch-1 scene reads it for
+/// anything but the chromatic ring-buffer append count
+/// (`ChromaticLine.js:168`), so a wrong value only changes how densely the
+/// wave texture is filled, never a pitch or a level.
+const INTERIM_SAMPLE_RATE: f32 = 48_000.0;
+
+/// Build the `audio-bands.js` payload the Point10 [`AudioBridge`] consumes from
+/// the engine's interim audio frame.
+///
+/// M4 has no analyser: `meyda/SET_BANDS` publishes three AGC bands and the
+/// store keeps them in [`AudioFrame`]. The bridge's payload has twelve damping
+/// lanes (`[damping * 3 + band]`) and sixteen log-spaced cells, so each band is
+/// replicated across its own lanes and cells — bands 0/1/2 own cells `0..=4`,
+/// `5..=9` and `10..=15` ([`band_of_cell`]), and lanes `band`, `3 + band`,
+/// `6 + band`, `9 + band`. The replication gives every scene the same value
+/// across damping, i.e. the payload is already as smooth as the three-band
+/// source allows; the levers' `smoothing` still low-passes it per module.
+///
+/// `wave` and `freq_mag` are the frame's arrays (zeroed until M6) and the byte
+/// spectrum is the frame's 1024 bins (also zeroed today — non-empty, so scenes
+/// take the "silent audio" branch rather than the "no analyser" one). M6
+/// replaces this function with the real `AudioBands` payload; nothing else
+/// changes.
+fn interim_band_payload(audio: &AudioFrame) -> BandPayload {
+    let bands = [audio.bass, audio.mid, audio.treble];
+
+    let mut lanes = [0.0; LANES_PER_BAND * 3];
+    for damping in 0..LANES_PER_BAND {
+        for (band, value) in bands.iter().enumerate() {
+            lanes[damping * 3 + band] = *value;
+        }
+    }
+
+    let mut cells = [0.0; 16];
+    for (cell, store) in cells.iter_mut().enumerate() {
+        *store = bands[band_of_cell(cell)];
+    }
+
+    BandPayload {
+        sample_rate: INTERIM_SAMPLE_RATE,
+        lanes,
+        cells,
+        beat: audio.beat,
+        wave: audio.wave,
+        freq_mag: [0.0; AUDIO_SAMPLES],
+        // The three-band source has no AGC-free twin, so `raw` mirrors the
+        // bands: `useAgc: false` must not silence every scene.
+        raw: RawBands { lanes, cells },
+        byte_frequency_data: audio.byte_frequency_data.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1512,6 +1869,10 @@ mod tests {
     use serde_json::json;
 
     const SIZE: u32 = 64;
+
+    /// Point10 scenes are rendered a bit larger: their `LineStrip` strips and
+    /// glow tails need more than 64 px to cover pixels reliably.
+    const POINT10_SIZE: u32 = 128;
 
     fn try_engine() -> Option<Engine> {
         match Engine::new(&EngineConfig {
@@ -1945,5 +2306,186 @@ mod tests {
         assert_eq!(uniforms.mid, 0.5);
         assert_eq!(uniforms.treble, 0.25);
         assert!(!uniforms.kick, "beat detection is WS-9 / M6");
+    }
+
+    // ————————————————— Point10 scene path (M4) —————————————————
+
+    /// A Point10 module record (`meta.type == "2d"`, as the JS wrapper sets it).
+    fn point10_module(module_id: &str, name: &str, props: Value) -> ModuleInstance {
+        serde_json::from_value(json!({
+            "$id": module_id,
+            "$moduleName": name,
+            "meta": {
+                "name": name,
+                "type": "2d",
+                "enabled": true,
+                "alpha": 1.0,
+                "compositeOperation": "normal"
+            },
+            "props": props,
+            "data": {}
+        }))
+        .expect("Point10 module decodes")
+    }
+
+    /// One group holding one Point10 module, sized by the caller's
+    /// `Compositor::resize`.
+    fn point10_state(name: &str, props: Value) -> EngineState {
+        let mut state = EngineState::new();
+        state.groups.push(group_with(
+            "group-a",
+            "Effects",
+            &["module-a"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        state.modules.insert(
+            "module-a".to_string(),
+            point10_module("module-a", name, props),
+        );
+        state
+    }
+
+    /// Two frames, so the second one proves per-frame scene state survives.
+    fn render_two_frames(compositor: &mut Compositor, state: &EngineState) {
+        for (index, time) in [(0_u64, 0.0_f32), (1, 1.0 / 60.0)] {
+            let frame = FrameInfo {
+                time_seconds: time,
+                frame_index: index,
+                ..frame_info()
+            };
+            compositor
+                .render_frame(state, &frame)
+                .expect("Point10 frame renders");
+        }
+    }
+
+    #[test]
+    fn point10_chromatic_wave_renders_through_the_scene_path() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(POINT10_SIZE, POINT10_SIZE);
+
+        let state = point10_state("Point10 Chromatic Wave", json!({}));
+        render_two_frames(&mut compositor, &state);
+
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        let lit = lit_pixels(&pixels);
+        assert!(
+            lit > 0,
+            "Point10 Chromatic Wave drew nothing through the scene path"
+        );
+        assert!(
+            compositor.point10.contains_key("module-a"),
+            "the scene instance is kept per module id"
+        );
+        // The scene target is registered for the composite pass.
+        assert!(
+            compositor
+                .surfaces
+                .get(&point10_texture_id("module-a"))
+                .is_some(),
+            "the scene target is registered with the frame graph"
+        );
+
+        // `reset` drops the scene and its target with the rest of the GPU
+        // state.
+        compositor.reset();
+        assert!(compositor.point10.is_empty());
+        assert!(
+            compositor
+                .surfaces
+                .get(&point10_texture_id("module-a"))
+                .is_none(),
+            "reset drops the scene target"
+        );
+    }
+
+    #[test]
+    fn point10_waveform_renders_through_the_scene_path() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(POINT10_SIZE, POINT10_SIZE);
+
+        // The prop bag flows through the scene binder; the default opacity is
+        // already 1, so setting it explicitly also exercises that path.
+        let state = point10_state("Point10 Waveform", json!({"opacity": 1.0}));
+        render_two_frames(&mut compositor, &state);
+
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert!(
+            lit_pixels(&pixels) > 0,
+            "Point10 Waveform (line strips) drew nothing"
+        );
+    }
+
+    #[test]
+    fn point10_instances_are_pruned_when_the_module_leaves_the_state() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(POINT10_SIZE, POINT10_SIZE);
+
+        let mut state = point10_state("Point10 Waveform", json!({}));
+        render_two_frames(&mut compositor, &state);
+        assert!(compositor.point10.contains_key("module-a"));
+
+        // The module id survives in the group but the module is gone, exactly
+        // like `loop.js:385-394`: the instance and its target are pruned.
+        state.modules.clear();
+        render_two_frames(&mut compositor, &state);
+        assert!(compositor.point10.is_empty());
+        assert!(
+            compositor
+                .surfaces
+                .get(&point10_texture_id("module-a"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn interim_audio_payload_replicates_bands_across_lanes_and_cells() {
+        let audio = AudioFrame {
+            bass: 0.5,
+            mid: 0.25,
+            treble: 0.75,
+            beat: 0.4,
+            ..AudioFrame::default()
+        };
+        let payload = interim_band_payload(&audio);
+
+        assert_eq!(payload.sample_rate, INTERIM_SAMPLE_RATE);
+        // Twelve lanes: `damping * 3 + band`, each band replicated.
+        assert_eq!(
+            payload.lanes,
+            [
+                0.5, 0.25, 0.75, // damping 0
+                0.5, 0.25, 0.75, // damping 1
+                0.5, 0.25, 0.75, // damping 2
+                0.5, 0.25, 0.75, // damping 3
+            ]
+        );
+        // Sixteen cells: bass owns 0..=4, mid 5..=9, treble 10..=15
+        // (`band_of_cell`).
+        assert_eq!(&payload.cells[0..5], &[0.5; 5]);
+        assert_eq!(&payload.cells[5..10], &[0.25; 5]);
+        assert_eq!(&payload.cells[10..16], &[0.75; 6]);
+        // `useAgc: false` must not silence the scenes: `raw` mirrors the bands.
+        assert_eq!(payload.raw.lanes, payload.lanes);
+        assert_eq!(payload.raw.cells, payload.cells);
+        assert_eq!(payload.beat, 0.4);
+        // Wave/FFT stay zeroed until M6, but the byte spectrum keeps the
+        // analyser's 1024 bins so scenes take the "silence" branch.
+        assert_eq!(payload.freq_mag, [0.0; AUDIO_SAMPLES]);
+        assert!(payload.wave.iter().all(|sample| *sample == 0.0));
+        assert_eq!(payload.byte_frequency_data, vec![0_u8; AUDIO_SAMPLES]);
     }
 }

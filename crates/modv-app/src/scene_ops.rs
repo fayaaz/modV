@@ -2743,6 +2743,66 @@ mod tests {
     }
 
     #[test]
+    fn apply_scene_materialises_point10_modules() {
+        let mut store = Store::new();
+        seed_scene(
+            &mut store,
+            json!({
+                "id": "scene-point10",
+                "name": "Point10 scene",
+                "groups": [{
+                    "id": "doc-p10",
+                    "name": "Effects",
+                    "hidden": false,
+                    "modules": ["doc-waveform"],
+                    "enabled": 1,
+                    "alpha": 1,
+                    "inherit": true,
+                    "inheritFrom": -1,
+                    "pipeline": false,
+                    "clearing": true,
+                    "compositeOperation": "normal",
+                }],
+                "modules": {
+                    "doc-waveform": {
+                        "$id": "doc-waveform",
+                        "$moduleName": "Point10 Waveform",
+                        "meta": { "name": "Point10 Waveform", "enabled": true },
+                        "props": { "opacity": 4.0, "speed": 2.0 },
+                        "data": {},
+                        "$props": {},
+                    },
+                },
+            }),
+        );
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-point10" }))
+            .expect("applyScene dispatches");
+
+        let group = store
+            .state()
+            .groups
+            .iter()
+            .find(|group| group.name == "Effects")
+            .expect("Effects group");
+        let module_id = &group.modules[0];
+        let module = store.state().modules.get(module_id).expect("module exists");
+        assert_eq!(module.module_name, "Point10 Waveform");
+        assert_eq!(module.status, Vec::<Value>::new(), "registered, no error");
+        // The registry meta survives the apply (the snapshot merges on top).
+        assert_eq!(module.meta["type"], json!("2d"));
+        assert_eq!(module.meta["category"], json!("3d-scenes"));
+        assert_eq!(module.meta["author"], json!("Point10"));
+        // Scene props are coerced against the Point10 schema: `opacity` is
+        // strict-clamped to its 0..1 range, `speed` keeps its saved value and
+        // the untouched levers keep their defaults.
+        assert_eq!(module.props["opacity"], json!(1.0));
+        assert_eq!(module.props["speed"], json!(2.0));
+        assert_eq!(module.props["gain"], json!(1.0));
+        assert_eq!(module.props["height"], json!(1.0));
+    }
+
+    #[test]
     fn apply_scene_replaces_previous_groups_and_keeps_gallery_and_non_scene() {
         let mut store = Store::new();
         store
