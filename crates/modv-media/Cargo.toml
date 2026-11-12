@@ -6,4 +6,14 @@ license.workspace = true
 description = "modV engine — see docs/rust-hybrid.md"
 
 [dependencies]
+# OSC wire protocol (WS-11). `rosc` replaces the Node-only `node-osc`.
+rosc = "0.11.4"
+# Runtime loading of libndi (WS-11). libndi is NOT a link-time dependency: it is
+# absent from CI images and most user machines, so `ndi.rs` dlopen()s it and
+# reports `NdiError::Unavailable` when it cannot be found.
+libloading = "0.8.9"
+# Engine state is JSON-shaped (`serde_json::Value` for `osc.data`,
+# serialisable MIDI device state for the delta stream).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 rustfft = "6.4.1"
