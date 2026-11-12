@@ -189,7 +189,26 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       documented M7 gap until a sandboxed evaluator/ABI lands
 - [ ] Camera/screen/video capture (GStreamer)
 
-## M7 — Parity and release — pending
+## Known gaps (M7 sign-off)
+
+- **Engine stays opt-in (`MODV_ENGINE=1`).** WS-10 media capture (cameras,
+  screen/portal capture, video files via GStreamer) has not been ported; Web
+  Audio capture still lives in the renderer. Camera/Screen/Video modules
+  therefore render their legacy inputs only in the default renderer.
+- Expression assignments (the JS `new Function` per input) are not evaluated
+  by the engine; no default Scene uses them. JS plugins (`preprocessFrame`
+  hooks) are likewise renderer-only.
+- Custom/third-party ISF transitions are not available: the six native
+  transitions are ported, the picker filters unknown names to Fade.
+- 7 of 351 ISF corpus shaders still need translation overrides
+  (`docs/isf-corpus-report.md`); they log once and render nothing.
+- The packaged engine links `libpipewire-0.3` for system-audio capture; the
+  AppImage relies on the host providing it (standard on current distros).
+- Shader transitions freeze the outgoing frame and render at full output size
+  (the JS re-renders the outgoing groups and caps the transition target at
+  1920×1080): behaviour parity, not pixel parity.
+
+## M7 — Parity and release — in progress
 
 - [ ] Full e2e green **against the engine default** (currently opt-in); keep
       `MODV_LEGACY_RENDERER` until parity
