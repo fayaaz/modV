@@ -59,7 +59,14 @@ test.describe("engine behaviour parity (MODV_ENGINE=1)", () => {
 
       // 1. Gallery registry: the engine's state/sync must carry every
       // registered module so the Gallery renders tiles (it only exists in the
-      // worker in legacy mode).
+      // worker in legacy mode). `state/sync` arrives shortly after
+      // is-modv-ready, so wait for it instead of sampling once.
+      await page.waitForFunction(
+        () =>
+          Object.keys(window.modV.store.state.modules.registered || {}).length >
+          300,
+        { timeout: 20_000 },
+      );
       const registered = await page.evaluate(
         () =>
           Object.keys(window.modV.store.state.modules.registered || {}).length,

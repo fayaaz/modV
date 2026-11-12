@@ -77,12 +77,15 @@ RUN apt-get update \
       libnotify4 \
       libatspi2.0-0t64 \
       libsecret-1-0 \
+      libpipewire-0.3-0 \
       xvfb \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/electron \
     node node_modules/electron/install.js
 # The Rust engine needs libxkbcommon-x11 at runtime for the X11 fallback
-# (dlopened by winit's xkbcommon-dl); the base image does not ship it.
+# (dlopened by winit's xkbcommon-dl), and libpipewire-0.3 for the native
+# system-audio monitor capture (`modv-media` links it), which the base image
+# does not ship.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libxkbcommon-x11-0 \
     && rm -rf /var/lib/apt/lists/*
