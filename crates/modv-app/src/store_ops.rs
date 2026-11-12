@@ -851,6 +851,14 @@ impl Store {
     /// their mutable state inside the module instance the compositor owns, so
     /// unlike JS there is no module `data` export to copy
     /// (`modules.js:330-338`).
+    /// Insert a Module-owned Input and emit the mirror delta.
+    fn insert_module_input(&mut self, input: Input) {
+        let value = serde_json::to_value(&input).unwrap_or(Value::Null);
+        self.state.inputs.insert(input.id.clone(), input);
+        self.deltas
+            .push("inputs/ADD_INPUT", json!({ "input": value }));
+    }
+
     fn make_active_module(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
         let action = "modules/makeActiveModule";
         let module_name = required_str(params, action, "moduleName")?.to_string();
@@ -865,7 +873,7 @@ impl Store {
             .unwrap_or(false);
         let id = crate::ids::uuid_v4();
 
-        let (meta, props, status) = match self.registry.meta_fields(&module_name) {
+        let (mut meta, props, status, registered) = match self.registry.meta_fields(&module_name) {
             Some(registry_meta) => {
                 let props = self
                     .registry
@@ -875,6 +883,7 @@ impl Store {
                     known_module_meta(registry_meta, &module_meta, is_gallery),
                     props,
                     Vec::new(),
+                    true,
                 )
             }
             None => {
@@ -901,9 +910,66 @@ impl Store {
                         "Module \"{module_name}\" is not registered. VmodV will skip this while rendering"
                     ),
                 })];
-                (Value::Object(meta), json!({}), status)
+                (Value::Object(meta), json!({}), status, false)
             }
         };
+
+        // `modules.js:284-318` + `initialiseModuleProperties`: a real active
+        // Module owns one Input per prop and three meta Inputs (alpha/enabled/
+        // compositeOperation), with the ids recorded in `$props`/`meta`. The
+        // UI builds the Inspector controls from those ids, so without them a
+        // Gallery drop created a Module with no controls ("shows empty").
+        let mut dollar_props = Map::new();
+        if let Some(prop_defaults) = props.as_object() {
+            for (prop, default_value) in prop_defaults {
+                let schema = self.registry.prop_schema(&module_name, prop);
+                let mut descriptor = Map::new();
+                if let Some(schema) = &schema {
+                    descriptor.insert("type".to_string(), json!(schema.type_));
+                    if let Some(min) = schema.min {
+                        descriptor.insert("min".to_string(), json!(min));
+                    }
+                    if let Some(max) = schema.max {
+                        descriptor.insert("max".to_string(), json!(max));
+                    }
+                }
+                descriptor.insert("default".to_string(), default_value.clone());
+
+                // Gallery modules are renderer-only tiles in the legacy
+                // worker; JS skips their Inputs (`isGallery` in
+                // `initialiseModuleProperties`). A real Scene Module gets one.
+                if registered && !is_gallery {
+                    let input_id = crate::ids::uuid_v4();
+                    let input = Input {
+                        id: input_id.clone(),
+                        type_: "action".to_string(),
+                        data: json!({ "moduleId": id, "prop": prop }),
+                        get_location: Some(format!("modules.active[\"{id}\"].props[\"{prop}\"]")),
+                        location: Some("modules/updateProp".to_string()),
+                    };
+                    self.insert_module_input(input);
+                    descriptor.insert("id".to_string(), json!(input_id));
+                }
+                dollar_props.insert(prop.clone(), Value::Object(descriptor));
+            }
+        }
+
+        if registered && !is_gallery {
+            for key in crate::scene_ops::MODULE_META_INPUTS {
+                let input_id = crate::ids::uuid_v4();
+                let input = Input {
+                    id: input_id.clone(),
+                    type_: "action".to_string(),
+                    data: json!({ "id": id, "metaKey": key }),
+                    get_location: Some(format!("modules.active[\"{id}\"].meta.{key}")),
+                    location: Some("modules/updateMeta".to_string()),
+                };
+                self.insert_module_input(input);
+                if let Some(meta) = meta.as_object_mut() {
+                    meta.insert(format!("{key}InputId"), json!(input_id));
+                }
+            }
+        }
 
         let module = ModuleInstance {
             id: id.clone(),
@@ -911,7 +977,7 @@ impl Store {
             meta,
             props,
             data: json!({}),
-            dollar_props: json!({}),
+            dollar_props: Value::Object(dollar_props),
             status,
             extra: Map::new(),
         };
@@ -3822,6 +3888,85 @@ mod tests {
     }
 
     #[test]
+    fn make_active_module_creates_prop_and_meta_inputs() {
+        let mut store = Store::new();
+        store.drain_deltas();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Bands"}))
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().expect("module id").to_string();
+        let props = module["$props"].as_object().expect("$props object");
+        assert!(!props.is_empty(), "Bands owns prop descriptors");
+
+        for (prop, descriptor) in props {
+            let input_id = descriptor["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{prop} has an input id"));
+            let input = store
+                .state()
+                .inputs
+                .get(input_id)
+                .unwrap_or_else(|| panic!("{prop} input exists"));
+            assert_eq!(input.data["moduleId"], json!(id));
+            assert_eq!(input.data["prop"], json!(prop));
+            assert_eq!(
+                input.get_location.as_deref(),
+                Some(format!("modules.active[\"{id}\"].props[\"{prop}\"]").as_str())
+            );
+        }
+
+        for key in ["alpha", "enabled", "compositeOperation"] {
+            let input_id = module["meta"]
+                .get(format!("{key}InputId"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{key} input id in meta"));
+            let input = store
+                .state()
+                .inputs
+                .get(input_id)
+                .unwrap_or_else(|| panic!("{key} input exists"));
+            assert_eq!(input.data["id"], json!(id));
+            assert_eq!(input.data["metaKey"], json!(key));
+            assert_eq!(input.location.as_deref(), Some("modules/updateMeta"));
+        }
+
+        // Inputs arrive before the module, exactly like the JS action's
+        // `inputs/addInput` dispatches before `ADD_ACTIVE_MODULE`.
+        let deltas = store.drain_deltas();
+        assert!(deltas.len() > props.len() + 3);
+        assert_eq!(deltas[deltas.len() - 1].r#type, "modules/ADD_ACTIVE_MODULE");
+        assert!(
+            deltas[..deltas.len() - 1]
+                .iter()
+                .all(|delta| delta.r#type == "inputs/ADD_INPUT")
+        );
+    }
+
+    #[test]
+    fn make_active_module_gallery_skips_inputs() {
+        let mut store = Store::new();
+        store.drain_deltas();
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Bands", "moduleMeta": {"isGallery": true}}),
+            )
+            .expect("makeActiveModule dispatches");
+        let props = module["$props"].as_object().expect("$props object");
+        assert!(!props.is_empty());
+        assert!(
+            props
+                .values()
+                .all(|descriptor| descriptor.get("id").is_none())
+        );
+        assert!(module["meta"].get("alphaInputId").is_none());
+        assert!(store.state().inputs.is_empty());
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/ADD_ACTIVE_MODULE");
+    }
+
+    #[test]
     fn make_active_module_known_uses_registry_props_and_meta() {
         let mut store = Store::new();
         let module = store
@@ -3844,7 +3989,10 @@ mod tests {
         assert_eq!(module["meta"]["isGallery"], json!(false));
         assert_eq!(module["props"]["u_ringWidth"], json!(0.05));
         assert_eq!(module["data"], json!({}));
-        assert_eq!(module["$props"], json!({}));
+        // The Module owns a descriptor (and an Input id) for every prop.
+        assert_eq!(module["$props"]["u_ringWidth"]["default"], json!(0.05));
+        assert_eq!(module["$props"]["u_ringWidth"]["type"], json!("float"));
+        assert!(module["$props"]["u_ringWidth"]["id"].is_string());
         assert!(module["$status"].as_array().unwrap().is_empty());
 
         let id = module["$id"].as_str().expect("id");
@@ -3882,7 +4030,8 @@ mod tests {
 
         // `data` is empty: the module instance owns that state (documented).
         assert_eq!(module["data"], json!({}));
-        assert_eq!(module["$props"], json!({}));
+        assert_eq!(module["$props"]["amount"]["default"], json!(10));
+        assert!(module["$props"]["amount"]["id"].is_string());
         assert!(module["$status"].as_array().unwrap().is_empty());
     }
 
@@ -5334,27 +5483,44 @@ mod tests {
             .map(|mutation| serde_json::to_value(mutation).unwrap())
             .collect();
 
-        assert_eq!(deltas.len(), 9);
+        // group, 4 inputs (Bands' one prop + three meta), module, plus the
+        // mutations below.
+        assert_eq!(deltas.len(), 13);
         assert_eq!(deltas[0]["type"], json!("groups/ADD_GROUP"));
         assert_eq!(deltas[0]["payload"]["group"], group);
-        assert_eq!(deltas[1]["type"], json!("modules/ADD_ACTIVE_MODULE"));
-        assert_eq!(deltas[1]["payload"]["module"], module);
+        for index in 0..4 {
+            assert_eq!(deltas[1 + index]["type"], json!("inputs/ADD_INPUT"));
+            assert!(
+                deltas[1 + index]["payload"]["input"]["id"].is_string(),
+                "every input carries its id"
+            );
+        }
         assert_eq!(
-            deltas[2],
+            deltas[1]["payload"]["input"]["data"]["prop"],
+            json!("u_ringWidth")
+        );
+        assert_eq!(
+            deltas[2]["payload"]["input"]["data"]["metaKey"],
+            json!("alpha")
+        );
+        assert_eq!(deltas[5]["type"], json!("modules/ADD_ACTIVE_MODULE"));
+        assert_eq!(deltas[5]["payload"]["module"], module);
+        assert_eq!(
+            deltas[6],
             json!({
                 "type": "groups/ADD_MODULE_TO_GROUP",
                 "payload": {"moduleId": module_id, "groupId": group_id, "position": 0}
             })
         );
         assert_eq!(
-            deltas[3],
+            deltas[7],
             json!({
                 "type": "groups/UPDATE_GROUP_BY_KEY",
                 "payload": {"groupId": group_id, "key": "alpha", "data": 0.5}
             })
         );
         assert_eq!(
-            deltas[4],
+            deltas[8],
             json!({
                 "type": "modules/UPDATE_ACTIVE_MODULE_PROP",
                 "payload": {
@@ -5365,22 +5531,22 @@ mod tests {
             })
         );
         assert_eq!(
-            deltas[5],
+            deltas[9],
             json!({
                 "type": "modules/UPDATE_ACTIVE_MODULE_META",
                 "payload": {"id": module_id, "metaKey": "alpha", "data": 1}
             })
         );
         assert_eq!(
-            deltas[6],
+            deltas[10],
             json!({
                 "type": "modules/UPDATE_ACTIVE_MODULE",
                 "payload": {"id": module_id, "key": "data", "value": {}}
             })
         );
-        assert_eq!(deltas[7]["type"], json!("groups/REMOVE_MODULE_FROM_GROUP"));
-        assert_eq!(deltas[8]["type"], json!("modules/REMOVE_ACTIVE_MODULE"));
-        assert_eq!(deltas[8]["payload"], json!({"moduleId": module_id}));
+        assert_eq!(deltas[11]["type"], json!("groups/REMOVE_MODULE_FROM_GROUP"));
+        assert_eq!(deltas[12]["type"], json!("modules/REMOVE_ACTIVE_MODULE"));
+        assert_eq!(deltas[12]["payload"], json!({"moduleId": module_id}));
     }
 
     #[test]

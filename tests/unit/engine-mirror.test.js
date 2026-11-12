@@ -124,7 +124,7 @@ describe("engine → JS mirror parity", () => {
 
   test("the fixtures are the emitted shape", () => {
     expect(Array.isArray(deltas)).toBe(true);
-    expect(deltas.length).toBe(19);
+    expect(deltas.length).toBe(36);
     for (const delta of deltas) {
       expect(Object.keys(delta).sort()).toEqual(["payload", "type"]);
       expect(typeof delta.type).toBe("string");
@@ -179,13 +179,21 @@ describe("engine → JS mirror parity", () => {
     expect(store.state.modules.active["module-3"].props.amount).toBe(300);
   });
 
-  test("inputs and expressions stay empty in both stores", () => {
-    // The scripted session never creates inputs/expressions, so both sides must
-    // hold the same empty collections.
-    expect(preset.inputs.inputs).toEqual({});
+  test("module inputs and expression defaults match in both stores", () => {
+    // Each live Module now owns an input per prop plus the three meta
+    // controls (alpha/enabled/compositeOperation), so the scripted session
+    // creates 17 of them; the JS mirror must replay the same records.
+    expect(Object.keys(preset.inputs.inputs)).toHaveLength(17);
     expect(preset.inputs.inputLinks).toEqual({});
     expect(store.state.inputs.inputs).toEqual(preset.inputs.inputs);
     expect(store.state.inputs.inputLinks).toEqual(preset.inputs.inputLinks);
+
+    // The engine still emits an input record with the module's getLocation so
+    // the Inspector can bind each control to its own input.
+    const first = Object.values(preset.inputs.inputs)[0];
+    expect(first.getLocation).toMatch(
+      /^modules\.active\["module-\d+"\]\.(props|meta)/,
+    );
 
     expect(preset.expressions.assignments).toEqual({});
     expect(store.state.expressions.assignments).toEqual(

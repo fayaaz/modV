@@ -54,6 +54,66 @@
     }
   },
   {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-1",
+        "type": "action",
+        "data": {
+          "moduleId": "module-1",
+          "prop": "u_ringWidth"
+        },
+        "getLocation": "modules.active[\"module-1\"].props[\"u_ringWidth\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-2",
+        "type": "action",
+        "data": {
+          "id": "module-1",
+          "metaKey": "alpha"
+        },
+        "getLocation": "modules.active[\"module-1\"].meta.alpha",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-3",
+        "type": "action",
+        "data": {
+          "id": "module-1",
+          "metaKey": "enabled"
+        },
+        "getLocation": "modules.active[\"module-1\"].meta.enabled",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-4",
+        "type": "action",
+        "data": {
+          "id": "module-1",
+          "metaKey": "compositeOperation"
+        },
+        "getLocation": "modules.active[\"module-1\"].meta.compositeOperation",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
     "type": "modules/ADD_ACTIVE_MODULE",
     "payload": {
       "module": {
@@ -74,14 +134,70 @@
           "alpha": 1,
           "enabled": false,
           "compositeOperation": "normal",
-          "isGallery": false
+          "isGallery": false,
+          "alphaInputId": "input-2",
+          "enabledInputId": "input-3",
+          "compositeOperationInputId": "input-4"
         },
         "props": {
           "u_ringWidth": 0.05
         },
         "data": {},
-        "$props": {},
+        "$props": {
+          "u_ringWidth": {
+            "type": "float",
+            "min": 0.01,
+            "max": 0.5,
+            "default": 0.05,
+            "id": "input-1"
+          }
+        },
         "$status": []
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-5",
+        "type": "action",
+        "data": {
+          "id": "module-2",
+          "metaKey": "alpha"
+        },
+        "getLocation": "modules.active[\"module-2\"].meta.alpha",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-6",
+        "type": "action",
+        "data": {
+          "id": "module-2",
+          "metaKey": "enabled"
+        },
+        "getLocation": "modules.active[\"module-2\"].meta.enabled",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-7",
+        "type": "action",
+        "data": {
+          "id": "module-2",
+          "metaKey": "compositeOperation"
+        },
+        "getLocation": "modules.active[\"module-2\"].meta.compositeOperation",
+        "location": "modules/updateMeta"
       }
     }
   },
@@ -100,12 +216,165 @@
           "alpha": 1,
           "enabled": false,
           "compositeOperation": "normal",
-          "isGallery": false
+          "isGallery": false,
+          "alphaInputId": "input-5",
+          "enabledInputId": "input-6",
+          "compositeOperationInputId": "input-7"
         },
         "props": {},
         "data": {},
         "$props": {},
         "$status": []
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-8",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "amount"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"amount\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-9",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "speed"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"speed\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-10",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "wrap"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"wrap\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-11",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "size"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"size\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-12",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "intensity"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"intensity\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-13",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "soundType"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"soundType\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-14",
+        "type": "action",
+        "data": {
+          "moduleId": "module-3",
+          "prop": "color"
+        },
+        "getLocation": "modules.active[\"module-3\"].props[\"color\"]",
+        "location": "modules/updateProp"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-15",
+        "type": "action",
+        "data": {
+          "id": "module-3",
+          "metaKey": "alpha"
+        },
+        "getLocation": "modules.active[\"module-3\"].meta.alpha",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-16",
+        "type": "action",
+        "data": {
+          "id": "module-3",
+          "metaKey": "enabled"
+        },
+        "getLocation": "modules.active[\"module-3\"].meta.enabled",
+        "location": "modules/updateMeta"
+      }
+    }
+  },
+  {
+    "type": "inputs/ADD_INPUT",
+    "payload": {
+      "input": {
+        "id": "input-17",
+        "type": "action",
+        "data": {
+          "id": "module-3",
+          "metaKey": "compositeOperation"
+        },
+        "getLocation": "modules.active[\"module-3\"].meta.compositeOperation",
+        "location": "modules/updateMeta"
       }
     }
   },
@@ -127,7 +396,10 @@
           "alpha": 1,
           "enabled": false,
           "compositeOperation": "normal",
-          "isGallery": false
+          "isGallery": false,
+          "alphaInputId": "input-15",
+          "enabledInputId": "input-16",
+          "compositeOperationInputId": "input-17"
         },
         "props": {
           "amount": 10,
@@ -154,7 +426,66 @@
           }
         },
         "data": {},
-        "$props": {},
+        "$props": {
+          "amount": {
+            "type": "int",
+            "min": 1.0,
+            "max": 300.0,
+            "default": 10,
+            "id": "input-8"
+          },
+          "speed": {
+            "type": "float",
+            "min": 0.0,
+            "max": 20.0,
+            "default": 2.0,
+            "id": "input-9"
+          },
+          "wrap": {
+            "type": "bool",
+            "default": false,
+            "id": "input-10"
+          },
+          "size": {
+            "type": "int",
+            "min": 1.0,
+            "max": 50.0,
+            "default": 2,
+            "id": "input-11"
+          },
+          "intensity": {
+            "type": "int",
+            "min": 0.0,
+            "max": 30.0,
+            "default": 15,
+            "id": "input-12"
+          },
+          "soundType": {
+            "type": "bool",
+            "default": false,
+            "id": "input-13"
+          },
+          "color": {
+            "type": "tween",
+            "default": {
+              "data": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  255,
+                  255,
+                  255
+                ]
+              ],
+              "duration": 10000,
+              "easing": "linear"
+            },
+            "id": "input-14"
+          }
+        },
         "$status": []
       }
     }

@@ -384,6 +384,7 @@ fn string_at(value: &Value, key: &str, action: &str) -> Result<String, FixtureEr
 fn collect_ids(deltas: &[Mutation]) -> Result<Vec<(String, String)>, FixtureError> {
     let mut groups: Vec<String> = Vec::new();
     let mut modules: Vec<String> = Vec::new();
+    let mut inputs: Vec<String> = Vec::new();
 
     for delta in deltas {
         match delta.r#type.as_str() {
@@ -403,16 +404,25 @@ fn collect_ids(deltas: &[Mutation]) -> Result<Vec<(String, String)>, FixtureErro
                     modules.push(id);
                 }
             }
+            "inputs/ADD_INPUT" => {
+                let id = string_at(&delta.payload["input"], "id", "inputs/ADD_INPUT payload")?;
+                if !inputs.contains(&id) {
+                    inputs.push(id);
+                }
+            }
             _ => {}
         }
     }
 
-    let mut mapping = Vec::with_capacity(groups.len() + modules.len());
+    let mut mapping = Vec::with_capacity(groups.len() + modules.len() + inputs.len());
     for (index, id) in groups.into_iter().enumerate() {
         mapping.push((id, format!("group-{}", index + 1)));
     }
     for (index, id) in modules.into_iter().enumerate() {
         mapping.push((id, format!("module-{}", index + 1)));
+    }
+    for (index, id) in inputs.into_iter().enumerate() {
+        mapping.push((id, format!("input-{}", index + 1)));
     }
     Ok(mapping)
 }
@@ -439,7 +449,18 @@ fn substitute_ids(value: &mut Value, map: &HashMap<String, String>) {
         Value::String(text) => {
             if let Some(placeholder) = map.get(text.as_str()) {
                 *text = placeholder.clone();
+                return;
             }
+            // Input `getLocation` strings embed the module id
+            // (`modules.active["<uuid>"].props[...]`), so replace generated
+            // ids inside strings too, not just whole-string values.
+            let mut replaced = text.clone();
+            for (generated, placeholder) in map {
+                if replaced.contains(generated) {
+                    replaced = replaced.replace(generated, placeholder);
+                }
+            }
+            *text = replaced;
         }
         Value::Array(entries) => {
             for entry in entries {
@@ -522,12 +543,29 @@ mod tests {
     /// The exact delta sequence the committed fixtures contain. Pinned so a
     /// shape/order change in the session is a visible test failure rather than
     /// a silently stale fixture file.
-    const EXPECTED_TYPES: [&str; 19] = [
+    const EXPECTED_TYPES: [&str; 36] = [
         "groups/ADD_GROUP",
         "groups/ADD_GROUP",
         "groups/ADD_GROUP",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
         "modules/ADD_ACTIVE_MODULE",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
         "modules/ADD_ACTIVE_MODULE",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
+        "inputs/ADD_INPUT",
         "modules/ADD_ACTIVE_MODULE",
         "modules/ADD_ACTIVE_MODULE",
         "groups/ADD_MODULE_TO_GROUP",
@@ -601,8 +639,9 @@ mod tests {
         );
         assert_eq!(snapshot["renderOrder"], json!([0, 2, 1]));
 
-        // Empty subsections keep their canonical default shapes.
-        assert_eq!(snapshot["inputs"]["inputs"], json!({}));
+        // Each live Module owns one Input per prop plus the three meta
+        // controls (the unregistered module created none and was removed).
+        assert_eq!(snapshot["inputs"]["inputs"].as_object().unwrap().len(), 17);
         assert_eq!(snapshot["inputs"]["inputLinks"], json!({}));
         assert_eq!(snapshot["expressions"]["assignments"], json!({}));
         assert_eq!(snapshot["tweens"], json!([]));
@@ -659,11 +698,15 @@ mod tests {
             .map(|(_generated, placeholder)| placeholder.as_str())
             .collect();
         assert_eq!(
-            placeholders,
-            vec![
+            &placeholders[..7],
+            &[
                 "group-1", "group-2", "group-3", "module-1", "module-2", "module-3", "module-4",
             ]
         );
+        assert_eq!(placeholders.len(), 7 + 17);
+        for (index, placeholder) in placeholders[7..].iter().enumerate() {
+            assert_eq!(*placeholder, format!("input-{}", index + 1));
+        }
         for (generated, placeholder) in &fixture.ids {
             assert!(looks_like_uuid(generated), "{generated} is a UUID");
             assert_ne!(generated, placeholder);

@@ -143,7 +143,7 @@ const GROUP_CONTROL_INPUTS: &[(&str, &str)] = &[
 ];
 
 /// The three Module meta controls that own an input (`modules.js:291-318`).
-const MODULE_META_INPUTS: &[&str] = &["alpha", "enabled", "compositeOperation"];
+pub(crate) const MODULE_META_INPUTS: &[&str] = &["alpha", "enabled", "compositeOperation"];
 
 /// Module props preferred for the automatic bass link
 /// (`BASS_PROP_PREFERENCE`, `scenes.js:157-178`).
