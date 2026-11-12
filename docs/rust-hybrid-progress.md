@@ -21,6 +21,19 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
   bass 0.85 / mid 0.48 / treble 0.30, beat envelope 1.0, tempo 160 BPM, lane
   spread 0.42 (`MODV_AUDIO_FIXTURE=… cargo test -p modv-media --test
   audio_stream_fixture`).
+- Packaged-engine smoke (CDP, `MODV_ENGINE=1`): the Gallery renders all **424**
+  registered modules (37 shader + 15 2D + 21 Point10 + 351 ISF) with engine
+  thumbnails; Scene hover previews paint the hovered cell; BPM tweens animate
+  (Chromantic Line `smoothing` 0.252 → 0.209 over 0.9 s); the status bar shows
+  live FPS/size and the detected BPM.
+- **End-to-end music reaction with engine-owned capture**: playing the
+  noiseblock radio stream to the host sink and launching with
+  `MODV_AUDIO_SOURCE=pipewire` logs "audio source pipewire owns capture" and
+  ignores the renderer pump; over 2.5 s the engine bands move
+  (bass 0.73→0.30→0.73, mid 0.58→0.84) at **160 BPM** and the linked
+  Chromatic Line gain tracks it (1.217–1.269).
+- Headless benchmark (packaged engine, 1280×720, 600 frames):
+  **5885 fps**, p99 0.332 ms.
 - `make lint`: clean (one pre-existing warning in an untouched component).
 - e2e: **143/143 pass** against the packaged AppImage, including the
   engine-mode spec (preview frames publish, engine kill survived and
