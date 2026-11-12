@@ -34,6 +34,10 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
   Chromatic Line gain tracks it (1.217–1.269).
 - Headless benchmark (packaged engine, 1280×720, 600 frames):
   **5885 fps**, p99 0.332 ms.
+- Final packaged build (all review fixes, Point10 textures bundled): the
+  engine logs **zero** asset fallbacks, runs at 107 fps at 1080×720 with the
+  status bar live, and the live radio still drives Boxy (140 BPM, bass 0.35,
+  linked gain moving). Full e2e **144/144** on this build.
 - `make lint`: clean (one pre-existing warning in an untouched component).
 - e2e: **144/144 pass** against the packaged AppImage — the full legacy suite
   plus the engine-mode specs (`engineSkeleton`: preview frames publish, engine
@@ -208,10 +212,19 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
   so those shaders log once and render nothing. The corpus gate now asserts a
   checked-in baseline (≥95 %) instead of only `translated > 0`.
 - The packaged engine links `libpipewire-0.3` for system-audio capture; the
-  AppImage relies on the host providing it (standard on current distros).
+  AppImage relies on the host providing it (standard on current distros). The
+  `.deb` depends on the distro's package set; `MODV_ENGINE=0` (the default)
+  never launches the engine, so the legacy renderer still runs without it.
+- Engine-mode UI marks Output Window, MIDI and OSC as unavailable; plugins and
+  local-font panels only get the boot warning, and the BPM panel's MIDI source
+  remains selectable (it cannot work without MIDI).
 - Shader transitions freeze the outgoing frame and render at full output size
   (the JS re-renders the outgoing groups and caps the transition target at
   1920×1080): behaviour parity, not pixel parity.
+- Remaining P3 review items (defensive slicing, preset null-hole tolerance,
+  hostile `sceneRow` decode, hex timings, `stroke_text` mask re-uploads, final
+  delta flush, windowless supervisor parking) are listed at the end of
+  `docs/rust-hybrid-review.md`.
 
 ## M7 — Parity and release — in progress
 
