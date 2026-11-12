@@ -98,6 +98,7 @@ RUN apt-get update \
       libasound2-dev \
       libudev-dev \
       libpipewire-0.3-dev \
+      libclang-dev \
       libxkbcommon-dev \
       libgl1-mesa-dev \
       libwayland-dev \
