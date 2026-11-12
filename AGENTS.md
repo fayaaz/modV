@@ -41,6 +41,46 @@ Workflow for every change:
 - Keep regression tests for bugs fixed; the failing test must reproduce the reported behaviour before the fix.
 - Tests must be committed alongside the change — a change without its test is incomplete.
 
+
+## Rust hybrid engine (`MODV_ENGINE=1`, opt-in)
+
+`docs/rust-hybrid.md` is the porting plan; `docs/rust-hybrid-progress.md` tracks
+it. The engine lives in the `crates/` cargo workspace (`make engine`,
+`make engine-test`, `make engine-lint`, `make engine-run`) and the legacy worker
+renderer stays the default until the plan's M7.
+
+- Crates: `modv-engine` (state model, props/inputs, SWAP, presets, scene timing/
+  rows/capture/playlists, default-scene data), `modv-render` (wgpu device/surface,
+  texture pool, frame graph, canvas blend WGSL), `modv-renderers` (shader
+  modules in WGSL, ISF parser/translator/runtime, 2D canvas facade + modules,
+  Point10 infrastructure), `modv-media` (audio bands/tempo/phrase/features,
+  BeatDetektor, MIDI clock, OSC, NDI), `modv-ipc` (control socket framing +
+  VMP1 preview ring), `modv-app` (the `modv-engine` binary: winit loop, store,
+  GPU compositor, supervisor).
+- `make engine` writes `crates/target/release/modv-engine`; `electron-builder.yml`
+  ships it via `extraResources` as `resources/modv-engine`. In development the
+  Electron supervisor resolves the same path.
+- Supervised by `src/main/engine-supervisor.js` (spawn, heartbeat watchdog,
+  restart budget, snapshot restore). `src/main/engine-ipc.js` exposes
+  `engine/commit|dispatch|snapshot|preview|get-state` to `window.engine`
+  (`src/preload/index.js`), and `src/renderer/src/application/engine-client.js`
+  replays `state/delta` records into the same Vuex mirror store the worker
+  used. Groups/modules render through the engine compositor; previews flow over
+  the shared-memory ring.
+- Tests: `cargo test --workspace` (GPU tests run on lavapipe and skip without an
+  adapter), `make engine-lint` (clippy `-D warnings` + fmt), and the Vitest
+  mirror parity test `tests/unit/engine-mirror.test.js` (replays committed
+  `tests/fixtures/engine/*.json`). The e2e spec
+  `tests/e2e/spec/engine/engineSkeleton.spec.js` launches the packaged app with
+  `MODV_ENGINE=1` and asserts preview frames, kill-survival/restart and that the
+  renderer creates no WebGL/WebGPU context.
+- Gotchas: naga's GLSL frontend only accepts `#version 440/450/460` and needs
+  `spv-in` or `wgsl-in` enabled alongside `glsl-in` (see
+  `docs/isf-translation-notes.md`); WGSL uniform arrays need 16-byte strides
+  (`array<f32, N>` is rejected — use `vec4<f32>`); the X11 fallback needs
+  `libxkbcommon-x11` at runtime (the engine preflights it and the Docker
+  toolchain installs it).
+
 ## Architecture (three execution contexts)
 
 - **Electron main**: `src/main/index.js` (entry; Chromium switches + single-instance lock), `src/main/window-prefs.js` (BrowserWindow prefs + IPC handlers), `src/main/menu-bar.js`, `src/main/media-manager/` (file watching + read/save handlers for presets, isf, video, image, palette, scene), `src/main/shutdown.js` (quit coordinator), `src/main/system-audio.js` (PulseAudio/PipeWire capture IPC).

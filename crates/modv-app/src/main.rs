@@ -77,6 +77,11 @@ fn main() -> ExitCode {
         };
     }
 
+    if let Some(problem) = x11_backend_problem() {
+        eprintln!("engine: ERROR {problem}");
+        return ExitCode::FAILURE;
+    }
+
     match window::run(cli, engine, adapter) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -84,4 +89,43 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Preflight for the X11 fallback: winit loads `libxkbcommon-x11` at runtime
+/// (via xkbcommon-dl) and panics with an unhelpful backtrace when it is
+/// missing. Detect the situation up front and fail with an actionable line.
+///
+/// Only applies when the session is X11: the Wayland path needs
+/// `libxkbcommon` only, which is a hard dependency of the windowing stack.
+#[cfg(target_os = "linux")]
+fn x11_backend_problem() -> Option<String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_none() {
+        return None;
+    }
+
+    for name in ["libxkbcommon-x11.so.0", "libxkbcommon-x11.so"] {
+        let Ok(candidate) = std::ffi::CString::new(name) else {
+            continue;
+        };
+        // SAFETY: dlopen() with a valid NUL-terminated name; the handle from
+        // dlopen is closed immediately and never dereferenced.
+        let handle =
+            unsafe { libc::dlopen(candidate.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+        if !handle.is_null() {
+            // SAFETY: `handle` came from dlopen above.
+            unsafe { libc::dlclose(handle) };
+            return None;
+        }
+    }
+
+    Some(
+        "the X11 fallback requires libxkbcommon-x11 (e.g. the libxkbcommon-x11-0 \
+         package); install it or run the engine under Wayland"
+            .to_string(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn x11_backend_problem() -> Option<String> {
+    None
 }
