@@ -12,10 +12,15 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1107 tests pass** (modv-app 131, modv-engine 365,
-  modv-ipc 32, modv-media 131, modv-render 21, modv-renderers 427).
-- Vitest: **939 tests pass** (includes the engine mirror-parity replay and the
-  preview-client helpers).
+- Rust workspace: **1279 tests pass** (modv-app 166, modv-engine 365,
+  modv-ipc 32, modv-media 160, modv-render 21, modv-renderers 535).
+- Vitest: **947 tests pass** (includes the engine mirror-parity replay, the
+  preview-client helpers and the engine audio payload shape).
+- Real-music analyser check (opt-in fixture): 12 s of the noiseblock radio
+  stream decoded to 48 kHz mono, 1199 analysis frames — bands peak at
+  bass 0.85 / mid 0.48 / treble 0.30, beat envelope 1.0, tempo 160 BPM, lane
+  spread 0.42 (`MODV_AUDIO_FIXTURE=… cargo test -p modv-media --test
+  audio_stream_fixture`).
 - `make lint`: clean (one pre-existing warning in an untouched component).
 - e2e: **143/143 pass** against the packaged AppImage, including the
   engine-mode spec (preview frames publish, engine kill survived and
@@ -84,7 +89,7 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       in the compositor; Ball renders through the packaged preview (CDP)
 - [x] Palette tween colours advance on the frame clock
 
-## M4 — Point10 — partial (13 of 25 scenes)
+## M4 — Point10 — partial (18 of 25 scenes)
 
 - [x] Scene trait/SceneContext, AudioBridge + P10Audio, shared particle
       alpha/sprite + random, postfx chain (UnrealBloom/OutputPass/ShaderPass/
@@ -99,7 +104,10 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       match), GlassLens (raymarched glass over an internal Chromatic Wave
       backdrop), Mycelium, AroundPlus — shared asset loader with procedural
       fallbacks, phrase-colour helpers
-- [x] Batch 4 in flight: UltraHDR, MirrorCube, ColorCube, Boxy, SoundCube
+- [x] Batch 4: UltraHDR (torus-knot morph + analytic mirror BRDF), MirrorCube
+      (ping-pong feedback), ColorCube (512 instances), Boxy (panorama env +
+      `preserveBloomAlpha`), SoundCube (16-bit trail); shared cube mesh and
+      p9 shading helpers
 - [ ] Remaining 7 scenes (HollowCube, AttractorParticles, DvdRoom,
       GeometricTunnel SSAO, RollingFire/SmokeRoom, LatentBackrooms)
 - [ ] Golden images (optional; behaviour parity is the priority), warm
@@ -116,13 +124,16 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [x] Performance runtime: start/stop/tick, per-row dwell, crossfade ghosts,
       row-fade blending assigned to both group ids, Fade for manual changes,
       event-driven deltas
-- [ ] Scene-preview frames for the UI hover previews (≥ 25 fps)
+- [ ] Scene-preview frames for the UI hover previews (≥ 25 fps) — engine
+      `preview/scene` endpoint + Scenes.vue engine branch in flight
 - [x] Gallery/output previews in the UI: the main panel blits the composited
       preview ring; gallery tiles poll `preview/module`, which the supervisor
       queues (`Reply::Deferred`) and the window loop answers up to 4/frame
       from an isolated LRU-cached module instance (shader/2D/Point10/ISF)
+- [ ] Scene hover previews through `preview/scene` (in flight)
 - [ ] ISF shader scene transitions (Fade is the runtime transition for now)
-- [ ] Rename/removal migration for default Scenes on version bumps
+- [ ] Rename/removal migration for default Scenes on version bumps (engine
+      migration table + tests in flight; app hydration call pending)
 
 ## M6 — Media — partial
 
@@ -130,12 +141,18 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [x] Meyda feature extractors, BeatDetektor, MIDI clock → BPM (43 tests)
 - [x] OSC server, raw MIDI ingestion, NDI send/receive via runtime FFI
       (51 tests; NDI needs the SDK at runtime)
+- [x] Audio analysis parity in Rust: `AudioAnalyser` (2048 Blackman FFT,
+      bands/lanes/cells/AGC, tempo/phrase/BeatDetektor, Meyda, smoothing)
+      with a 24-frame JS reference fixture within 1 % and a real-music check
+- [x] Audio capture primitives: cpal input devices and a native PipeWire
+      monitor stream (replaces `pw-record`), bounded queues, `AudioFeed`
+- [x] Renderer → engine audio feed: the pump forwards the full payload and
+      beats; the engine drives shader/2D/ISF/Point10 audio
+- [x] Engine-side input-link evaluation: getter/state/mutation links,
+      smoothing, min/max, meta inputs, `inputs/*` actions, 10 Hz deltas
+- [ ] Engine-owned capture wiring (AudioFeed + source selection in the engine
+      loop; the renderer pump stays as the default source until then)
 - [ ] Camera/screen/video capture (GStreamer)
-- [ ] Audio capture: cpal input devices + native PipeWire monitor (in flight)
-- [ ] Engine audio feed + input-link evaluation (in flight: the renderer pump
-      forwards the full band/lane/cell/wave/FFT payload; the engine stores it,
-      drives shader/2D/ISF/Point10 audio and evaluates getter/state/mutation
-      links with throttled deltas)
 
 ## M7 — Parity and release — pending
 
