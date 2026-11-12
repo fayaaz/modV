@@ -1543,6 +1543,7 @@ dependencies = [
  "libc",
  "modv-engine",
  "modv-ipc",
+ "modv-media",
  "modv-render",
  "modv-renderers",
  "serde",

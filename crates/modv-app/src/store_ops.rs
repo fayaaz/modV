@@ -38,7 +38,9 @@
 //!   `modules/removeActiveModule` — `modules.js:564-587`, `:858-888`, `:715`.
 //! * `meyda/SET_BANDS` — the renderer's audio pump commits the AGC bands
 //!   (`meyda.js:88-96`); the engine stores them in [`Store::audio`] for the
-//!   compositor. No engine-side analysis yet (WS-9 / M6).
+//!   compositor. When the engine owns capture (`--audio-source
+//!   pipewire|input`, WS-9) the renderer's frames are ignored instead —
+//!   [`Store::set_engine_audio`] is then the authoritative writer.
 //!
 //! ## Known gaps (documented, not silent)
 //!
@@ -81,6 +83,7 @@ use modv_engine::engine_state::{
 use modv_engine::inputs::{Input, InputLink};
 use modv_engine::preset::{PresetError, create_preset_from_state, load_preset_into_state};
 use modv_engine::props::{PropSchema, coerce_prop_value};
+use modv_media::audio::analyser::AudioSnapshot;
 use modv_renderers::two_d::AudioFrame;
 
 use crate::input_links::{
@@ -158,10 +161,22 @@ pub struct Store {
     /// The current audio frame handed to modules and shader uniforms.
     ///
     /// Filled by `meyda/SET_BANDS` from the renderer's audio pump (see
-    /// [`Store::set_bands`]). The renderer owns the analysis (WS-9); the
-    /// engine stores the full payload — bands, damping lanes, the 16-cell
-    /// grid, wave, FFT magnitudes, sample rate and the Meyda scalars.
+    /// [`Store::set_bands`]), or by [`Store::set_engine_audio`] when the engine
+    /// owns capture (WS-9). Either way the engine stores the full payload —
+    /// bands, damping lanes, the 16-cell grid, wave, FFT magnitudes, sample
+    /// rate and the Meyda scalars.
     audio: AudioFrame,
+    /// Whether the engine owns audio capture/analysis (WS-9).
+    ///
+    /// While set, the renderer's `meyda/SET_BANDS`, `beats/SET_BPM` and
+    /// `beats/SET_KICK` writes are ignored (logged once) so the engine's
+    /// analyser stays authoritative and the mirror is not churned with
+    /// conflicting tempo/meter writes. Cleared by
+    /// [`Store::disable_engine_audio`] when a capture feed fails and the
+    /// renderer takes over again.
+    engine_audio_active: bool,
+    /// Throttled mirror publish for engine-owned audio (≤ 10 Hz).
+    engine_meter: EngineMeter,
     /// The tempo/kick state the Input Link evaluator reads (`beats.bpm`,
     /// `beats.kick`).
     beats: BeatsState,
@@ -183,6 +198,20 @@ struct LinkDeltaState {
     /// The newest un-emitted delta payload (with its mutation type, flushed on
     /// quit).
     pending: Option<(&'static str, Value)>,
+}
+
+/// Mirror-meter publish state for engine-owned audio (WS-9).
+///
+/// The renderer's UI meter reads `meyda/SET_BANDS` + `beats/*` from its mirror
+/// store. When the engine owns capture it must publish those back, but not at
+/// 60 Hz — one `meyda/SET_BANDS` per [`LINK_DELTA_INTERVAL`] keeps the meters
+/// live at ~10 Hz, with the newest payload flushed on quit.
+#[derive(Clone, Debug, Default)]
+struct EngineMeter {
+    /// Timestamp (`Store::set_engine_audio`'s `now`) of the last publish.
+    last_emit: Option<Duration>,
+    /// The newest un-emitted meter payload (flushed on quit).
+    pending: Option<Value>,
 }
 
 impl Default for Store {
@@ -239,6 +268,8 @@ impl Store {
             tweens: modv_engine::tweens::TweenSet::new(),
             fps: 60.0,
             audio: AudioFrame::default(),
+            engine_audio_active: false,
+            engine_meter: EngineMeter::default(),
             beats: BeatsState::default(),
             link_smoothing: HashMap::new(),
             link_deltas: HashMap::new(),
@@ -912,7 +943,17 @@ impl Store {
     /// corrupt the live grid. Arrays shorter than their target are padded with
     /// zeros; longer ones are truncated. No delta is emitted — the renderer's
     /// mirror computed these values itself.
+    ///
+    /// While [`Store::engine_audio_active`] is set (the engine owns capture,
+    /// WS-9) the frame is ignored: the engine's analyser is authoritative, and
+    /// letting the renderer's (usually silent or absent) graph overwrite it
+    /// would stall every audio-reactive module. The first ignored frame logs
+    /// once so a misconfigured deployment is visible in the engine log.
     fn set_bands(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        if self.reject_renderer_audio_write("meyda/SET_BANDS") {
+            return Ok(Value::Null);
+        }
+
         // The renderer sends the bands object as the payload; accept a
         // `{ bands: {...} }` wrapper too.
         let bands = params
@@ -1024,17 +1065,21 @@ impl Store {
     }
 
     /// `beats/SET_BPM`: store the reported tempo (echoed to the mirror).
+    ///
+    /// Ignored while the engine owns capture ([`Store::set_engine_audio`] is
+    /// then the tempo source), preferring a silent no-op over an ever-changing
+    /// tempo that would rebuild every BPM tween each frame.
     fn set_bpm(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        if self.reject_renderer_audio_write("beats/SET_BPM") {
+            return Ok(Value::Null);
+        }
+
         let bpm = params
             .get("bpm")
             .and_then(Value::as_f64)
             .filter(|bpm| bpm.is_finite() && *bpm >= 0.0);
         if let Some(bpm) = bpm {
-            if (self.beats.bpm - bpm).abs() > f64::EPSILON {
-                self.beats.bpm = bpm;
-                self.update_tween_bpm(bpm);
-                self.deltas.push("beats/SET_BPM", json!({ "bpm": bpm }));
-            }
+            self.store_bpm(bpm);
         }
         Ok(Value::Null)
     }
@@ -1052,15 +1097,145 @@ impl Store {
     }
 
     /// `beats/SET_KICK`: store the kick flag (echoed to the mirror).
+    ///
+    /// Ignored while the engine owns capture, like [`Self::set_bpm`].
     fn set_kick(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        if self.reject_renderer_audio_write("beats/SET_KICK") {
+            return Ok(Value::Null);
+        }
+
         let Some(kick) = params.get("kick").map(|value| bool_value(value, false)) else {
             return Ok(Value::Null);
         };
-        if self.beats.kick != kick {
-            self.beats.kick = kick;
-            self.deltas.push("beats/SET_KICK", json!({ "kick": kick }));
-        }
+        self.store_kick(kick);
         Ok(Value::Null)
+    }
+
+    /// Store a tempo, rebuilding BPM tween durations and echoing one delta
+    /// (only when it actually moved). Returns whether the tempo changed.
+    ///
+    /// Non-finite/negative values are rejected, so an analyser without a
+    /// confident estimate can pass `None`/garbage without corrupting the
+    /// tween clock.
+    fn store_bpm(&mut self, bpm: f64) -> bool {
+        if !bpm.is_finite() || bpm < 0.0 || (self.beats.bpm - bpm).abs() <= f64::EPSILON {
+            return false;
+        }
+
+        self.beats.bpm = bpm;
+        self.update_tween_bpm(bpm);
+        self.deltas.push("beats/SET_BPM", json!({ "bpm": bpm }));
+        true
+    }
+
+    /// Store the kick flag, echoing one delta when it flips. Returns whether
+    /// the flag changed.
+    fn store_kick(&mut self, kick: bool) -> bool {
+        if self.beats.kick == kick {
+            return false;
+        }
+
+        self.beats.kick = kick;
+        self.deltas.push("beats/SET_KICK", json!({ "kick": kick }));
+        true
+    }
+
+    /// Whether a renderer audio write must be dropped because the engine owns
+    /// capture. Logs the first ignored write per mutation type (no allocation
+    /// once the warning has fired, so a 60 Hz renderer pump stays cheap).
+    fn reject_renderer_audio_write(&mut self, action: &'static str) -> bool {
+        if !self.engine_audio_active {
+            return false;
+        }
+
+        if !self.warned.contains(action) {
+            self.warned.insert(action.to_string());
+            eprintln!(
+                "engine: WARN ignoring the renderer's {action} while engine audio capture owns the analysis"
+            );
+        }
+
+        true
+    }
+
+    /// Apply one engine-owned analysis frame (WS-9 capture end state).
+    ///
+    /// This is the authoritative write when `--audio-source` is not
+    /// `renderer`: the window loop pumps the [`crate::audio::open_feed`] feed
+    /// each frame and calls this before Input Links are evaluated, so the
+    /// compositor, props and links see the engine's analysis in the same
+    /// frame. The call:
+    ///
+    /// 1. maps the [`AudioSnapshot`] onto [`Store::audio`]
+    ///    ([`crate::audio::snapshot_to_frame`]) and marks the engine as the
+    ///    audio owner (renderer writes are dropped from then on);
+    /// 2. publishes the analyser's confident tempo through
+    ///    [`Self::store_bpm`] (deltas only on change, so tween durations are
+    ///    rebuilt once per tempo change rather than per frame);
+    /// 3. publishes the kick flag through [`Self::store_kick`] (delta only on
+    ///    a flip);
+    /// 4. throttles `meyda/SET_BANDS` to the mirror so the UI meters keep
+    ///    moving without one control-socket write per frame.
+    ///
+    /// `kick` is the BeatDetektor flag from
+    /// [`modv_media::audio::analyser::AudioAnalyser::kick`] — not derived from
+    /// the beat envelope — and `now` is the loop's monotonic clock for the
+    /// meter throttle.
+    pub fn set_engine_audio(&mut self, snapshot: &AudioSnapshot, kick: bool, now: Duration) {
+        self.engine_audio_active = true;
+        self.audio = crate::audio::snapshot_to_frame(snapshot);
+
+        if let Some(bpm) = snapshot.bpm {
+            self.store_bpm(f64::from(bpm));
+        }
+        self.store_kick(kick);
+        self.publish_engine_meter(now);
+    }
+
+    /// Hand audio ownership back to the renderer's pump.
+    ///
+    /// The window loop calls this when a capture feed errors out: the last
+    /// engine frame stays in [`Store::audio`] (renderers keep drawing) until
+    /// the renderer's next `meyda/SET_BANDS` replaces it.
+    pub fn disable_engine_audio(&mut self) {
+        if !self.engine_audio_active {
+            return;
+        }
+
+        self.engine_audio_active = false;
+        self.engine_meter.pending = None;
+        eprintln!("engine: INFO audio ownership returned to the renderer's pump");
+    }
+
+    /// Whether the engine owns audio capture/analysis (WS-9).
+    pub fn engine_audio_active(&self) -> bool {
+        self.engine_audio_active
+    }
+
+    /// Publish the current bands to the UI mirror at ≤ 10 Hz (WS-9).
+    ///
+    /// The payload is exactly what the mirror's `SET_BANDS` mutation reads
+    /// (`{ bass, mid, treble, cells }`), matching the renderer pump's own
+    /// commit, so the meters read the same shape from either source.
+    fn publish_engine_meter(&mut self, now: Duration) {
+        let payload = json!({
+            "bass": self.audio.bass,
+            "mid": self.audio.mid,
+            "treble": self.audio.treble,
+            "cells": self.audio.cells.to_vec(),
+        });
+
+        let due = self
+            .engine_meter
+            .last_emit
+            .is_none_or(|last| now.saturating_sub(last) >= LINK_DELTA_INTERVAL);
+        if due {
+            self.engine_meter.last_emit = Some(now);
+            self.engine_meter.pending = None;
+            self.deltas.push("meyda/SET_BANDS", payload);
+        } else {
+            self.engine_meter.pending = Some(payload);
+        }
     }
 
     /// Current tempo in BPM (0 until the beat detector reports one).
@@ -1677,13 +1852,18 @@ impl Store {
     }
 
     /// Emit any deltas the throttle held back. Called when the engine is about
-    /// to snapshot/save, so the renderer mirror sees the final link values.
+    /// to snapshot/save, so the renderer mirror sees the final link values
+    /// (and the final engine-owned meter bands, WS-9).
     pub fn flush_link_deltas(&mut self) {
         for entry in self.link_deltas.values_mut() {
             let Some((delta_type, payload)) = entry.pending.take() else {
                 continue;
             };
             self.deltas.push(delta_type, payload);
+        }
+
+        if let Some(payload) = self.engine_meter.pending.take() {
+            self.deltas.push("meyda/SET_BANDS", payload);
         }
     }
 
@@ -3224,6 +3404,190 @@ mod tests {
             .dispatch("beats/setBpm", json!({"bpm": 90, "source": "tap"}))
             .expect("setBpm dispatches");
         assert_eq!(store.bpm(), 128.0);
+    }
+
+    /// A real analyser frame (silent) for the engine-owned audio tests: the
+    /// snapshot shape belongs to `modv-media`, so building it through the
+    /// analyser (instead of a hand-rolled literal) keeps these tests honest
+    /// when the payload grows.
+    fn engine_snapshot() -> modv_media::audio::analyser::AudioSnapshot {
+        modv_media::audio::analyser::AudioAnalyser::new(48_000.0).frame(0.0)
+    }
+
+    /// The delta types in issue order.
+    fn delta_types(store: &mut Store) -> Vec<String> {
+        store
+            .drain_deltas()
+            .into_iter()
+            .map(|delta| delta.r#type)
+            .collect()
+    }
+
+    #[test]
+    fn engine_audio_frame_becomes_the_stored_audio_frame() {
+        let mut store = Store::new();
+        assert!(!store.engine_audio_active());
+
+        let mut snapshot = engine_snapshot();
+        snapshot.bands = [0.6, 0.4, 0.3];
+        snapshot.cells = [0.25; 16];
+        snapshot.lanes = [0.5; 12];
+        snapshot.beat = 0.2;
+        snapshot.sample_rate = 48_000.0;
+        snapshot.features.rms = 0.3;
+        store.set_engine_audio(&snapshot, false, Duration::ZERO);
+
+        assert!(store.engine_audio_active());
+        assert_eq!(store.audio().bass, 0.6);
+        assert_eq!(store.audio().mid, 0.4);
+        assert_eq!(store.audio().treble, 0.3);
+        assert_eq!(store.audio().cells, [0.25; 16]);
+        assert_eq!(store.audio().lanes, [0.5; 12]);
+        assert_eq!(store.audio().beat, 0.2);
+        assert_eq!(store.audio().sample_rate, 48_000.0);
+        assert_eq!(store.audio().features.rms, 0.3);
+    }
+
+    #[test]
+    fn renderer_bands_are_accepted_until_engine_audio_starts() {
+        let mut store = Store::new();
+        store
+            .dispatch("meyda/SET_BANDS", json!({"bass": 0.5, "mid": 0.25}))
+            .expect("renderer bands");
+
+        assert_eq!(store.audio().bass, 0.5);
+        assert_eq!(store.audio().mid, 0.25);
+    }
+
+    #[test]
+    fn engine_audio_ignores_renderer_bands_and_tempo() {
+        let mut store = Store::new();
+        let mut snapshot = engine_snapshot();
+        snapshot.bands = [0.6, 0.4, 0.3];
+        snapshot.bpm = Some(128.0);
+        store.set_engine_audio(&snapshot, true, Duration::ZERO);
+        store.drain_deltas();
+
+        // The renderer's pump keeps running in engine mode; its frames (usually
+        // silence, because the engine owns the device) must not win.
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({"bass": 0.9, "mid": 0.9, "treble": 0.9, "cells": [1.0]}),
+            )
+            .expect("ignored bands");
+        store
+            .dispatch("beats/setBpm", json!({"bpm": 90, "source": "beatdetektor"}))
+            .expect("ignored bpm");
+        store
+            .dispatch("beats/SET_KICK", json!({"kick": false}))
+            .expect("ignored kick");
+
+        assert_eq!(store.audio().bass, 0.6, "engine bands stay authoritative");
+        assert_eq!(store.audio().mid, 0.4);
+        assert_eq!(store.bpm(), 128.0, "engine tempo stays authoritative");
+        assert!(store.kick(), "engine kick stays authoritative");
+        assert!(
+            store.drain_deltas().is_empty(),
+            "ignored writes emit nothing"
+        );
+    }
+
+    #[test]
+    fn engine_audio_publishes_bpm_and_kick_only_on_change() {
+        let mut store = Store::new();
+        let mut snapshot = engine_snapshot();
+        snapshot.bpm = Some(120.0);
+
+        store.set_engine_audio(&snapshot, true, Duration::ZERO);
+        assert_eq!(
+            delta_types(&mut store),
+            vec!["beats/SET_BPM", "beats/SET_KICK", "meyda/SET_BANDS"]
+        );
+        assert_eq!(store.bpm(), 120.0);
+        assert!(store.kick());
+
+        // The same tempo/kick a frame later: no beats deltas, only the
+        // throttled meter is due at 100 ms.
+        store.set_engine_audio(&snapshot, true, Duration::from_millis(100));
+        assert_eq!(delta_types(&mut store), vec!["meyda/SET_BANDS"]);
+
+        // A tempo change (and a kick release) is published once.
+        let mut changed = engine_snapshot();
+        changed.bpm = Some(128.0);
+        store.set_engine_audio(&changed, false, Duration::from_millis(200));
+        assert_eq!(
+            delta_types(&mut store),
+            vec!["beats/SET_BPM", "beats/SET_KICK", "meyda/SET_BANDS"]
+        );
+        assert_eq!(store.bpm(), 128.0);
+        assert!(!store.kick());
+
+        // An unconfident estimate (`None`) keeps the last tempo.
+        store.set_engine_audio(&engine_snapshot(), false, Duration::from_millis(300));
+        assert_eq!(store.bpm(), 128.0);
+        assert_eq!(delta_types(&mut store), vec!["meyda/SET_BANDS"]);
+    }
+
+    #[test]
+    fn engine_audio_meter_deltas_are_throttled_to_ten_hertz() {
+        let mut store = Store::new();
+        let mut snapshot = engine_snapshot();
+        snapshot.bands = [0.5, 0.0, 0.0];
+
+        // A 60 Hz pump over 250 ms: publishes at 0, 100 and 200 ms only.
+        let mut published = 0;
+        for frame in 0..16 {
+            let now = Duration::from_millis(frame * 16);
+            let mut frame_snapshot = snapshot.clone();
+            frame_snapshot.bands[0] = frame as f32 / 16.0;
+            store.set_engine_audio(&frame_snapshot, false, now);
+            published += delta_types(&mut store)
+                .iter()
+                .filter(|delta| delta.as_str() == "meyda/SET_BANDS")
+                .count();
+        }
+
+        assert_eq!(published, 3, "one publish per 100 ms, not per frame");
+        // The newest value is held until the next slot and flushed on quit.
+        store.flush_link_deltas();
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "meyda/SET_BANDS");
+        assert_eq!(deltas[0].payload["bass"], json!(15.0 / 16.0));
+        assert!(deltas[0].payload["cells"].is_array());
+    }
+
+    #[test]
+    fn engine_audio_tempo_rebuilds_tween_durations() {
+        let mut store = Store::new();
+        store.state.tweens = json!([modv_engine::scene_link_defaults::default_link_tween(
+            "t1", None
+        )]);
+        store.reload_tweens();
+
+        let mut snapshot = engine_snapshot();
+        snapshot.bpm = Some(120.0);
+        store.set_engine_audio(&snapshot, false, Duration::ZERO);
+
+        // `updateBpm` writes `calculatedBpm * data.length` for a per-row
+        // duration: (3600 / 120) * 32 * 2.
+        assert_eq!(store.state().tweens[0]["duration"], json!(1920));
+    }
+
+    #[test]
+    fn disabling_engine_audio_hands_ownership_back_to_the_renderer() {
+        let mut store = Store::new();
+        store.set_engine_audio(&engine_snapshot(), false, Duration::ZERO);
+        assert!(store.engine_audio_active());
+
+        store.disable_engine_audio();
+        assert!(!store.engine_audio_active());
+
+        store
+            .dispatch("meyda/SET_BANDS", json!({"bass": 0.75}))
+            .expect("renderer bands after fallback");
+        assert_eq!(store.audio().bass, 0.75);
     }
 
     /// A preset with one module, one action input and one getter link.

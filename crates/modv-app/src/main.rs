@@ -4,6 +4,7 @@
 //! compositor: windowed rendering of the engine state, control socket,
 //! snapshot/restore and the shared-memory preview ring.
 
+mod audio;
 mod cli;
 mod compositor;
 mod fixtures;
@@ -29,6 +30,13 @@ fn main() -> ExitCode {
 
     let cli = cli::parse();
 
+    // WS-9: device enumeration is a pure host query — answer it before any GPU,
+    // window or socket work so `--list-audio-devices` works headless and in CI.
+    if cli.list_audio_devices {
+        audio::print_devices();
+        return ExitCode::SUCCESS;
+    }
+
     // Fixture emission is a pure store session: no GPU device, no window and no
     // control socket are touched, so it runs before `Engine::new`.
     if let Some(dir) = &cli.emit_fixtures {
@@ -43,6 +51,12 @@ fn main() -> ExitCode {
 
     if cli.socket.is_some() && cli.headless {
         eprintln!("engine: note — the control socket is only polled in windowed mode");
+    }
+    if cli.audio_source.engine_owned() && (cli.headless || cli.screenshot.is_some()) {
+        eprintln!(
+            "engine: note — --audio-source {} is only wired in windowed mode; headless renders against --audio-fixture",
+            cli.audio_source.as_str()
+        );
     }
 
     let engine = match Engine::new(&EngineConfig::default()) {

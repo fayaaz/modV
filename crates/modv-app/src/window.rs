@@ -10,9 +10,16 @@
 //! M2 removed the M0 `ChromaticLine`/`SyntheticSine` demo from this path: the
 //! window now renders whatever the store describes (an empty state presents
 //! the near-black clear). `--audio-fixture` is still parsed for the M0
-//! headless/report path but has no effect here — the audio frame comes from
-//! the store, where the renderer's audio pump writes the full analyser payload
-//! (`meyda/SET_BANDS`, WS-9).
+//! headless/report path but has no effect here.
+//!
+//! Audio is owned by exactly one side. With the default `--audio-source
+//! renderer` the renderer's audio pump commits the full analyser payload
+//! (`meyda/SET_BANDS`, WS-9) and the engine only stores it. With
+//! `--audio-source pipewire|input` the engine opens an
+//! [`modv_media::audio::engine::AudioFeed`] before the loop, pumps it each
+//! frame before Input Links are evaluated, and pushes the analysis into the
+//! store ([`Store::set_engine_audio`]); a capture failure logs once, stops the
+//! feed and hands ownership back to the renderer instead of killing the loop.
 //!
 //! Each frame also dispatches `scenes/tick` with the real frame delta before
 //! rendering (`worker/loop.js:94-111`), but only while performance mode is
@@ -23,6 +30,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use modv_media::audio::engine::AudioFeed;
 use modv_render::surface::{SurfaceTarget, create_surface};
 use modv_render::wgpu;
 use modv_render::{Engine, FrameReport, FrameStats};
@@ -57,6 +65,8 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
     // Flush the last <100 ms of Input Link deltas so the renderer mirror sees
     // the final values before the socket closes.
     app.store.flush_link_deltas();
+    // Release the engine-owned capture (WS-9) on every exit path.
+    app.stop_engine_audio();
     // Flush the snapshot on any exit path (window close, bench deadline,
     // engine/shutdown) so a supervisor restart restores the last state.
     if let Some(mut supervisor) = app.supervisor.take() {
@@ -93,6 +103,12 @@ struct WindowedApp {
     supervisor: Option<EngineSupervisor>,
     consecutive_timeouts: u32,
     preview_error_logged: bool,
+    /// Engine-owned capture (WS-9): `Some` when `--audio-source` is not
+    /// `renderer`. `None` means the renderer's pump owns the analysis (the
+    /// default, and the fallback when capture could not start).
+    audio_feed: Option<AudioFeed>,
+    /// One-shot guard for the capture-failure log line.
+    audio_error_logged: bool,
 }
 
 // `FrameStats` contains no public Clone; store it in an Option so `finish()`
@@ -157,6 +173,38 @@ impl WindowedApp {
             }
         });
         let socket_failed = cli.socket.is_some() && supervisor.is_none();
+
+        // WS-9: open the engine-owned feed before the loop when the renderer is
+        // not the audio owner. A failure is not fatal: the engine runs with the
+        // renderer's pump (which keeps committing `meyda/SET_BANDS`).
+        let audio_feed = if cli.audio_source.engine_owned() {
+            match crate::audio::open_feed(cli.audio_source, cli.audio_device.as_deref()) {
+                Ok(feed) => {
+                    let device_note = cli
+                        .audio_device
+                        .as_deref()
+                        .map(|device| format!(" (device {device})"))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "engine: INFO audio source {} owns capture{} at {} Hz",
+                        cli.audio_source.as_str(),
+                        device_note,
+                        feed.sample_rate()
+                    );
+                    Some(feed)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "engine: WARN audio source {} unavailable ({error}); falling back to the renderer's audio pump",
+                        cli.audio_source.as_str()
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             bench_deadline: cli.bench_deadline(),
             cli,
@@ -175,6 +223,8 @@ impl WindowedApp {
             supervisor,
             consecutive_timeouts: 0,
             preview_error_logged: false,
+            audio_feed,
+            audio_error_logged: false,
         }
         .with_socket_failure(socket_failed)
     }
@@ -184,6 +234,54 @@ impl WindowedApp {
             self.failed = true;
         }
         self
+    }
+
+    /// Pump the engine-owned feed (WS-9) and publish the frame into the store.
+    ///
+    /// `dt` is the frame delta the loop hands the Scene tick; the analyser uses
+    /// it for its AGC/envelope clocks. The feed's capture source is pumped
+    /// non-blockingly, so a stalled device never delays a frame — it surfaces
+    /// as an error instead, which stops the feed once and hands audio ownership
+    /// back to the renderer's pump (logged once).
+    fn pump_engine_audio(&mut self, dt: Duration) {
+        let Some(feed) = self.audio_feed.as_mut() else {
+            return;
+        };
+
+        let snapshot = feed.frame(dt.as_secs_f32());
+        let kick = feed.analyser().kick();
+        let error = feed.take_error();
+
+        self.store
+            .set_engine_audio(&snapshot, kick, self.start.elapsed());
+
+        let Some(error) = error else {
+            return;
+        };
+
+        if !self.audio_error_logged {
+            self.audio_error_logged = true;
+            eprintln!(
+                "engine: WARN audio capture stopped ({error}); falling back to the renderer's audio pump"
+            );
+        }
+        self.stop_engine_audio();
+        self.store.disable_engine_audio();
+    }
+
+    /// Stop and release the engine-owned capture, if any (idempotent).
+    ///
+    /// Logs only when the engine actually owned the analysis, so a feed that
+    /// failed at startup (ownership already with the renderer) stays quiet.
+    fn stop_engine_audio(&mut self) {
+        let Some(mut feed) = self.audio_feed.take() else {
+            return;
+        };
+
+        feed.stop();
+        if self.store.engine_audio_active() {
+            eprintln!("engine: INFO audio capture stopped");
+        }
     }
 
     /// Build the window, surface and compositor (first `resumed`).
@@ -258,6 +356,13 @@ impl WindowedApp {
         };
         self.last_frame = now;
 
+        // 0. Engine-owned capture (WS-9): pump the feed and publish the frame
+        // into the store before anything reads it. Runs ahead of the control
+        // socket poll on purpose — while the engine owns the audio, renderer
+        // frames committed by the socket are rejected, so the analysis that
+        // drives this frame is the engine's.
+        self.pump_engine_audio(dt_duration);
+
         let Some(engine) = self.engine.as_ref() else {
             return;
         };
@@ -288,10 +393,10 @@ impl WindowedApp {
             }
         }
 
-        // 1c. Evaluate Input Links against the frame the renderer just
-        // committed, then render with the updated props (`worker/loop.js`
-        // runs the link loop before the renderers). `now` is the monotonic
-        // frame clock; it drives the 10 Hz mirror-delta throttle.
+        // 1c. Evaluate Input Links against the frame the engine's feed (or the
+        // renderer's pump) produced, then render with the updated props
+        // (`worker/loop.js` runs the link loop before the renderers). `now` is
+        // the monotonic frame clock; it drives the 10 Hz mirror-delta throttle.
         let audio = self.store.audio().clone();
         self.store.update_input_links(&audio, self.start.elapsed());
         if let Some(supervisor) = &mut self.supervisor {
@@ -302,9 +407,10 @@ impl WindowedApp {
             time_seconds: self.start.elapsed().as_secs_f32(),
             frame_index: self.frames_done,
             date: wall_clock_date(self.start.elapsed().as_secs_f32()),
-            // The renderer's audio pump commits the full analyser payload over
-            // the control socket (`meyda/SET_BANDS`, WS-9), so the store holds
-            // the latest frame: bands, damping lanes, the 16-cell grid, wave,
+            // Either the renderer's audio pump committed the analyser payload
+            // over the control socket (`meyda/SET_BANDS`) or the engine's own
+            // feed just wrote it (`set_engine_audio`, WS-9): the store holds
+            // the latest frame — bands, damping lanes, the 16-cell grid, wave,
             // FFT magnitudes, sample rate and the Meyda scalars.
             audio,
             row_fades: self

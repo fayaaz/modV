@@ -16,6 +16,7 @@ image = "0.25.10"
 libc = "0.2"
 modv-engine = { path = "../modv-engine" }
 modv-ipc = { path = "../modv-ipc" }
+modv-media = { version = "0.1.0", path = "../modv-media" }
 modv-render = { version = "0.1.0", path = "../modv-render" }
 modv-renderers = { version = "0.1.0", path = "../modv-renderers" }
 serde = { version = "1.0.229", features = ["derive"] }
