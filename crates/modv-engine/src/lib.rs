@@ -38,8 +38,11 @@
 //!   (`store/modules/scenes.js` playlist actions).
 //! - [`default_scenes`] — the versioned default Scene data port plus the
 //!   seeding/migration rules (`store/default-scenes.js`).
+//! - [`default_scene_migrations`] — version-keyed rename/removal migrations
+//!   for seeded default Scenes on defaults-version bumps.
 
 pub mod blend;
+pub mod default_scene_migrations;
 pub mod default_scenes;
 pub mod delta;
 pub mod engine_state;

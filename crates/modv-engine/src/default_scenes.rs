@@ -19,6 +19,9 @@
 //!   definitions that changed in the immediately previous defaults version
 //!   (`REFRESHED_DEFAULT_SCENES`).
 //!
+//! The version-keyed rename/removal table for *future* defaults bumps lives in
+//! [`crate::default_scene_migrations`].
+//!
 //! ## Data shape
 //!
 //! A default Scene definition is **not** a Scene document: it has no `id` and
@@ -860,11 +863,7 @@ mod tests {
                     left_items.iter().zip(right_items.iter()).enumerate()
                 {
                     if left_item != right_item {
-                        return first_difference(
-                            left_item,
-                            right_item,
-                            format!("{path}[{index}]"),
-                        );
+                        return first_difference(left_item, right_item, format!("{path}[{index}]"));
                     }
                 }
                 if left_items.len() != right_items.len() {
