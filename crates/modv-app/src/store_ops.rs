@@ -859,7 +859,10 @@ impl Store {
             map.insert("scenes".into(), json!(self.scenes.scenes));
             map.insert("performance".into(), self.scenes.performance.clone());
             map.insert("defaultsSeeded".into(), json!(self.scenes.defaults_seeded));
-            map.insert("defaultsVersion".into(), json!(self.scenes.defaults_version));
+            map.insert(
+                "defaultsVersion".into(),
+                json!(self.scenes.defaults_version),
+            );
             map.insert(
                 "seededDefaultScenes".into(),
                 json!(self.scenes.seeded_default_scenes),
