@@ -111,6 +111,22 @@
 //!    draws every ISF pass with the built-in full-screen triangle, so the
 //!    qualifier is removed rather than forwarded.
 //! 6. In the vertex stage `attribute` → `in`, `varying` → `out`.
+//! 7. A non-`const` global with an initialiser is split into the declaration
+//!    (a private, zero-initialised global) plus an assignment in a generated
+//!    `isf_init_globals()` called before the shader's `main`:
+//!    WGSL has no module-scope initialiser that can read a uniform
+//!    (`Pixelize`'s `float d = min(progress, 1.0 - progress);`).
+//! 8. Functions with `sampler2D` parameters are cloned per actual texture at
+//!    their call sites (the parameter is replaced by the texture's
+//!    `sampler2D(texture, sampler)` pair); naga cannot take a sampler as a
+//!    function argument (`Point10 *`).
+//! 9. A non-void function whose last top-level statement is not a `return`
+//!    gets a deterministic `return <zero>;` appended; WGSL needs a value on
+//!    every path (`Shape Morph`'s `shapeForType`).
+//! 10. `in`/`out`/`varying mat2|mat3|mat4` declarations are split into one
+//!     vector varying per column, matrix assignments write the columns and
+//!     matrix reads rebuild the value; WGSL entry-point IO cannot carry a
+//!     matrix (`v002 Light Leak`).
 //!
 //! # Deliberate coordinate deviation (documented, not hidden)
 //!
@@ -563,7 +579,7 @@ pub fn build_fragment_glsl(doc: &IsfDocument, pass_index: usize) -> String {
     let members = uniform_members(doc);
     let bindings = texture_bindings(doc);
 
-    let mut out = String::with_capacity(body.len() + 4096);
+    let mut out = String::with_capacity(body.source.len() + 4096);
     out.push_str("#version 450\n\n");
     if !declares_identifier(&doc.fragment_source, "PI") {
         out.push_str("#define PI 3.14159265358979323846\n");
@@ -588,8 +604,9 @@ pub fn build_fragment_glsl(doc: &IsfDocument, pass_index: usize) -> String {
     out.push_str(&texture_declarations(&bindings));
     out.push_str(VVSAMPLER_MACROS);
     out.push('\n');
-    out.push_str(&body);
-    out.push_str(&entry_wrapper(doc));
+    out.push_str(&body.source);
+    out.push_str(&global_init_function(&body.global_initialisers));
+    out.push_str(&entry_wrapper(doc, !body.global_initialisers.is_empty()));
     out
 }
 
@@ -638,24 +655,53 @@ fn bool_globals(doc: &IsfDocument) -> String {
 }
 
 /// The bridge between naga's entry point and the shader's `main` when bool
-/// inputs need initialising.
-fn entry_wrapper(doc: &IsfDocument) -> String {
+/// inputs or hoisted global initialisers need running first.
+fn entry_wrapper(doc: &IsfDocument, initialises_globals: bool) -> String {
     let bools: Vec<String> = doc
         .inputs
         .iter()
         .filter(|input| input.type_ == "bool" || input.type_ == "event")
         .map(|input| sanitised_input_name(&input.name))
         .collect();
-    if bools.is_empty() {
+    if bools.is_empty() && !initialises_globals {
         return String::new();
     }
     let mut out = String::new();
-    out.push_str("\nvoid isf_init_inputs() {\n");
-    for name in &bools {
-        out.push_str(&format!("  {name} = (isf_bool_{name} != 0);\n"));
+    if !bools.is_empty() {
+        out.push_str("\nvoid isf_init_inputs() {\n");
+        for name in &bools {
+            out.push_str(&format!("  {name} = (isf_bool_{name} != 0);\n"));
+        }
+        out.push_str("}\n");
+    }
+    out.push_str("void main() {\n");
+    if !bools.is_empty() {
+        out.push_str("  isf_init_inputs();\n");
+    }
+    if initialises_globals {
+        out.push_str("  isf_init_globals();\n");
+    }
+    out.push_str("  isf_user_main();\n}\n");
+    out
+}
+
+/// The function holding the assignments moved out of global declarations.
+///
+/// WGSL has no module-scope initialiser that can reference a uniform, so a
+/// GLSL global such as `float d = min(progress, 1.0);` becomes a private
+/// (zero-initialised) global plus an assignment executed at the top of the
+/// entry point, before the shader's own `main`.
+fn global_init_function(initialisers: &[String]) -> String {
+    if initialisers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nvoid isf_init_globals() {\n");
+    for statement in initialisers {
+        out.push_str("  ");
+        out.push_str(statement);
+        out.push('\n');
     }
     out.push_str("}\n");
-    out.push_str("void main() {\n  isf_init_inputs();\n  isf_user_main();\n}\n");
     out
 }
 
@@ -698,7 +744,7 @@ pub fn build_vertex_glsl(doc: &IsfDocument) -> String {
     let members = uniform_members(doc);
     let bindings = texture_bindings(doc);
 
-    let mut out = String::with_capacity(body.len() + 4096);
+    let mut out = String::with_capacity(body.source.len() + 4096);
     out.push_str("#version 450\n\n");
     if !declares_identifier(doc.vertex_source.as_deref().unwrap_or(""), "PI") {
         out.push_str("#define PI 3.14159265358979323846\n");
@@ -727,8 +773,9 @@ pub fn build_vertex_glsl(doc: &IsfDocument) -> String {
         "  isf_FragNormCoord = vec2((gl_Position.x + 1.0) / 2.0, (gl_Position.y + 1.0) / 2.0);\n",
     );
     out.push_str("}\n\n");
-    out.push_str(&assign_output_locations(&body, 1));
-    out.push_str(&entry_wrapper(doc));
+    out.push_str(&assign_output_locations(&body.source, 1));
+    out.push_str(&global_init_function(&body.global_initialisers));
+    out.push_str(&entry_wrapper(doc, !body.global_initialisers.is_empty()));
     out
 }
 
@@ -812,17 +859,29 @@ fn matrix_columns(type_name: &str) -> u32 {
         .clamp(1, 4)
 }
 
+/// A fully rewritten shader body plus the statements that must run before the
+/// shader's own `main` (see [`hoist_global_initialisers`]).
+struct RewrittenBody {
+    /// The rewritten body.
+    source: String,
+    /// Hoisted global assignments, in declaration order.
+    global_initialisers: Vec<String>,
+}
+
 /// Full fragment body rewrite: macro expansion, ES-isms, sampler call-site
 /// substitution and qualifier stripping.
-pub fn rewrite_fragment_body(doc: &IsfDocument) -> String {
+fn rewrite_fragment_body(doc: &IsfDocument) -> RewrittenBody {
     let mut body = rewrite_fragment_source(&doc.fragment_source, &texture_inputs(doc));
     for (original, sanitised) in body_input_renames(doc) {
         body = replace_ident(&body, &original, &sanitised);
     }
-    if has_bool_inputs(doc) {
-        rename_main(&body)
-    } else {
-        body
+    let (mut source, global_initialisers) = hoist_global_initialisers(&body);
+    if has_bool_inputs(doc) || !global_initialisers.is_empty() {
+        source = rename_main(&source);
+    }
+    RewrittenBody {
+        source,
+        global_initialisers,
     }
 }
 
@@ -831,12 +890,15 @@ pub fn rewrite_fragment_source(source: &str, textures: &[String]) -> String {
     let expanded = expand_img_macros(source);
     let rewritten = rewrite_common(&expanded);
     let rewritten = substitute_sampler_arguments(&rewritten, textures);
+    let rewritten = inline_sampler_functions(&rewritten, textures);
     let rewritten = replace_ident(&rewritten, "gl_FragColor", "isf_FragColor");
+    let rewritten = split_matrix_varyings(&rewritten, &["in", "varying"]);
+    let rewritten = append_default_returns(&rewritten);
     strip_qualifiers(&rewritten, &["in", "varying", "uniform"])
 }
 
 /// Vertex body rewrite: qualifiers → desktop 450 spellings.
-pub fn rewrite_vertex_body(doc: &IsfDocument) -> String {
+fn rewrite_vertex_body(doc: &IsfDocument) -> RewrittenBody {
     let mut body = rewrite_vertex_source(
         doc.vertex_source.as_deref().unwrap_or(DEFAULT_VERTEX_BODY),
         &texture_inputs(doc),
@@ -844,10 +906,13 @@ pub fn rewrite_vertex_body(doc: &IsfDocument) -> String {
     for (original, sanitised) in body_input_renames(doc) {
         body = replace_ident(&body, &original, &sanitised);
     }
-    if has_bool_inputs(doc) {
-        rename_main(&body)
-    } else {
-        body
+    let (mut source, global_initialisers) = hoist_global_initialisers(&body);
+    if has_bool_inputs(doc) || !global_initialisers.is_empty() {
+        source = rename_main(&source);
+    }
+    RewrittenBody {
+        source,
+        global_initialisers,
     }
 }
 
@@ -855,9 +920,12 @@ pub fn rewrite_vertex_body(doc: &IsfDocument) -> String {
 pub fn rewrite_vertex_source(source: &str, textures: &[String]) -> String {
     let rewritten = rewrite_common(source);
     let rewritten = substitute_sampler_arguments(&rewritten, textures);
+    let rewritten = inline_sampler_functions(&rewritten, textures);
     let rewritten = replace_ident(&rewritten, "attribute", "in");
     let rewritten = replace_ident(&rewritten, "varying", "out");
-    strip_qualifiers(&rewritten, &["uniform"])
+    let rewritten = strip_qualifiers(&rewritten, &["uniform"]);
+    let rewritten = split_matrix_varyings(&rewritten, &["out"]);
+    append_default_returns(&rewritten)
 }
 
 fn has_bool_inputs(doc: &IsfDocument) -> bool {
@@ -1034,6 +1102,949 @@ fn substitute_in_calls(source: &str, call: &str, textures: &[String]) -> String 
             out.push_str(&rest[start..=end]);
         }
         rest = &rest[end + 1..];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// General source passes
+// ---------------------------------------------------------------------------
+
+/// `true` for a GLSL built-in type name (used to recognise declarations).
+fn is_glsl_type(name: &str) -> bool {
+    matches!(
+        name,
+        "float"
+            | "int"
+            | "uint"
+            | "bool"
+            | "vec2"
+            | "vec3"
+            | "vec4"
+            | "ivec2"
+            | "ivec3"
+            | "ivec4"
+            | "uvec2"
+            | "uvec3"
+            | "uvec4"
+            | "bvec2"
+            | "bvec3"
+            | "bvec4"
+            | "mat2"
+            | "mat3"
+            | "mat4"
+            | "mat2x2"
+            | "mat2x3"
+            | "mat2x4"
+            | "mat3x2"
+            | "mat3x3"
+            | "mat3x4"
+            | "mat4x2"
+            | "mat4x3"
+            | "mat4x4"
+    )
+}
+
+/// Copy of `source` with `//` and `/* … */` comments removed.
+///
+/// Used for analysis only (brace counting, declaration matching); the original
+/// text is what gets emitted.
+fn strip_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index = match source[index..].find('\n') {
+                Some(offset) => index + offset,
+                None => bytes.len(),
+            };
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index = match source[index..].find("*/") {
+                Some(offset) => index + offset + 2,
+                None => bytes.len(),
+            };
+            continue;
+        }
+        let character = source[index..].chars().next().expect("index is in bounds");
+        out.push(character);
+        index += character.len_utf8();
+    }
+    out
+}
+
+/// Net brace nesting change of comment-free source.
+fn brace_delta(source: &str) -> i32 {
+    source.chars().fold(0, |delta, character| match character {
+        '{' => delta + 1,
+        '}' => delta - 1,
+        _ => delta,
+    })
+}
+
+/// A file-scope function definition found by [`function_definitions`].
+#[derive(Clone, Debug)]
+struct FunctionDefinition {
+    /// Byte offset of the return type.
+    start: usize,
+    /// Byte offset of the function name.
+    name_start: usize,
+    /// Function name.
+    name: String,
+    /// Return type as spelled (`void`, `float`, `vec4`, …).
+    return_type: String,
+    /// Parameter list.
+    params: Vec<FunctionParameter>,
+    /// Byte offset of the opening `{`.
+    body_start: usize,
+    /// Byte offset just past the closing `}`.
+    end: usize,
+}
+
+/// One parameter of a [`FunctionDefinition`].
+#[derive(Clone, Debug)]
+struct FunctionParameter {
+    /// The parameter as written (`sampler2D tex`).
+    text: String,
+    /// The parameter's type (`sampler2D`).
+    type_name: String,
+    /// The parameter's name (`tex`).
+    name: String,
+}
+
+impl FunctionParameter {
+    fn is_sampler(&self) -> bool {
+        self.type_name == "sampler2D"
+    }
+}
+
+/// The identifier that ends at `end`, skipping whitespace backwards.
+fn identifier_before(source: &str, end: usize) -> Option<(usize, String)> {
+    let bytes = source.as_bytes();
+    let mut index = end.min(bytes.len());
+    while index > 0 && bytes[index - 1].is_ascii_whitespace() {
+        index -= 1;
+    }
+    let ident_end = index;
+    while index > 0 && is_ident_char(bytes[index - 1] as char) {
+        index -= 1;
+    }
+    if index == ident_end {
+        return None;
+    }
+    Some((index, source[index..ident_end].to_string()))
+}
+
+/// Parse the `type name(params)` header that ends at the `{` at `brace`.
+fn parse_function_header(source: &str, brace: usize) -> Option<FunctionDefinition> {
+    let before = source[..brace].trim_end();
+    let close = before.len().checked_sub(1)?;
+    if !before.ends_with(')') {
+        return None;
+    }
+    let mut nesting = 0usize;
+    let mut open = None;
+    for (index, character) in source[..close].char_indices().rev() {
+        match character {
+            ')' => nesting += 1,
+            '(' => {
+                if nesting == 0 {
+                    open = Some(index);
+                    break;
+                }
+                nesting -= 1;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    let (name_start, name) = identifier_before(source, open)?;
+    let (start, return_type) = identifier_before(source, name_start)?;
+    if return_type != "void" && !is_glsl_type(&return_type) {
+        return None;
+    }
+    // A `{` preceded by an expression (`= foo(…) {`) is not a definition.
+    if matches!(
+        source[..start].trim_end().chars().next_back(),
+        Some('=') | Some(',') | Some('.') | Some(')')
+    ) {
+        return None;
+    }
+    Some(FunctionDefinition {
+        start,
+        name_start,
+        name,
+        return_type,
+        params: parse_parameters(&source[open + 1..close]),
+        body_start: brace,
+        end: brace,
+    })
+}
+
+fn parse_parameters(text: &str) -> Vec<FunctionParameter> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "void" {
+        return Vec::new();
+    }
+    split_args(text)
+        .into_iter()
+        .filter_map(|parameter| {
+            let parameter = parameter.trim();
+            if parameter.is_empty() {
+                return None;
+            }
+            let mut type_name = None;
+            let mut name = None;
+            for word in parameter.split_whitespace() {
+                if matches!(word, "in" | "out" | "inout" | "const") {
+                    continue;
+                }
+                if type_name.is_none() {
+                    type_name = Some(word.to_string());
+                } else if name.is_none() {
+                    let end = word
+                        .find(|character: char| !is_ident_char(character))
+                        .unwrap_or(word.len());
+                    name = Some(word[..end].to_string());
+                }
+            }
+            Some(FunctionParameter {
+                text: parameter.to_string(),
+                type_name: type_name?,
+                name: name?,
+            })
+        })
+        .collect()
+}
+
+/// Offset just past the `}` matching the `{` at `open`, skipping comments.
+fn matching_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index = match source[index..].find('\n') {
+                    Some(offset) => index + offset + 1,
+                    None => bytes.len(),
+                };
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = match source[index..].find("*/") {
+                    Some(offset) => index + offset + 2,
+                    None => bytes.len(),
+                };
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Every file-scope function definition in `source`, in source order.
+fn function_definitions(source: &str) -> Vec<FunctionDefinition> {
+    let bytes = source.as_bytes();
+    let mut definitions = Vec::new();
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    let mut at_line_start = true;
+    while index < bytes.len() {
+        if at_line_start {
+            let mut probe = index;
+            while probe < bytes.len() && (bytes[probe] == b' ' || bytes[probe] == b'\t') {
+                probe += 1;
+            }
+            if probe < bytes.len() && bytes[probe] == b'#' {
+                index = match source[probe..].find('\n') {
+                    Some(offset) => probe + offset + 1,
+                    None => bytes.len(),
+                };
+                continue;
+            }
+            at_line_start = false;
+        }
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index = match source[index..].find('\n') {
+                    Some(offset) => index + offset + 1,
+                    None => bytes.len(),
+                };
+                at_line_start = true;
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = match source[index..].find("*/") {
+                    Some(offset) => index + offset + 2,
+                    None => bytes.len(),
+                };
+                continue;
+            }
+            b'\n' => at_line_start = true,
+            b'{' if depth == 0 => {
+                if let Some(mut definition) = parse_function_header(source, index) {
+                    let Some(end) = matching_brace(source, index) else {
+                        break;
+                    };
+                    definition.end = end;
+                    definitions.push(definition);
+                    index = end;
+                    at_line_start = false;
+                    continue;
+                }
+                depth = 1;
+            }
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    definitions
+}
+
+/// Whether the `name(...)` at `start` is a function prototype (`vec4 f(…)`)
+/// rather than a call: the token before it is a type name.
+fn is_function_prototype(source: &str, start: usize) -> bool {
+    identifier_before(source, start).is_some_and(|(_, word)| is_glsl_type(&word))
+}
+
+/// Resolve a sampler argument to the texture it samples.
+///
+/// Accepts a bare texture name (`startImage`, the source spelling) and the
+/// already-split `sampler2D(isf_tex_startImage, isf_smp_startImage)` form a
+/// previous inline pass produced.
+fn sampler_argument_texture(argument: &str, textures: &[String]) -> Option<String> {
+    let argument = argument.trim();
+    if let Some(texture) = textures.iter().find(|texture| texture.as_str() == argument) {
+        return Some(texture.clone());
+    }
+    let inner = argument.strip_prefix("sampler2D(")?.strip_suffix(')')?;
+    let (texture, _) = inner.split_once(',')?;
+    let texture = texture.trim().strip_prefix("isf_tex_")?;
+    textures
+        .iter()
+        .find(|candidate| candidate.as_str() == texture)
+        .cloned()
+}
+
+/// All `name(...)` call sites in `source`, in source order.
+fn find_calls(source: &str, name: &str) -> Vec<(usize, usize, usize)> {
+    let mut calls = Vec::new();
+    let mut search = 0usize;
+    while let Some(relative) = source[search..].find(name) {
+        let start = search + relative;
+        let after = start + name.len();
+        let before_ok = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !is_ident_char(character));
+        if before_ok && source[after..].starts_with('(') {
+            let args_start = after + 1;
+            if let Some(close) = find_close(&source[args_start..]) {
+                calls.push((start, args_start, args_start + close));
+                search = args_start + close + 1;
+                continue;
+            }
+        }
+        search = after;
+    }
+    calls
+}
+
+/// Inline functions that take a `sampler2D` parameter.
+///
+/// naga's GLSL front-end accepts `sampler2D(isf_tex_x, isf_smp_x)` as a
+/// *sampling call argument* but cannot represent a sampler as a function
+/// parameter. Every call site of such a function is rewritten to a clone with
+/// the parameter removed and the actual texture's `texture`/`sampler` pair
+/// substituted into the body; a sampler function with no call sites (dead
+/// template code, as in `Point10 Banded Swirl`) is deleted. Functions that
+/// cannot be resolved statically (recursion, a call before the definition, an
+/// overloaded name, or an argument that is not a texture) are left untouched
+/// rather than guessed at.
+fn inline_sampler_functions(source: &str, textures: &[String]) -> String {
+    let mut current = source.to_string();
+    loop {
+        let definitions = function_definitions(&current);
+        let candidates: Vec<FunctionDefinition> = definitions
+            .into_iter()
+            .filter(|definition| definition.params.iter().any(FunctionParameter::is_sampler))
+            .collect();
+        if candidates.is_empty() {
+            return current;
+        }
+        // Callees are defined before their callers, so trying the *last*
+        // sampler function first resolves a chain of sampler functions one
+        // level at a time (the outer call site still has a real texture).
+        let mut rewritten = None;
+        for definition in candidates.iter().rev() {
+            if let Some(next) = inline_one_sampler_function(&current, definition, textures)
+                && next != current
+            {
+                rewritten = Some(next);
+                break;
+            }
+        }
+        match rewritten {
+            Some(next) => current = next,
+            None => return current,
+        }
+    }
+}
+
+/// Rewrite every call of one sampler-taking `definition`.
+///
+/// Returns `None` when a call cannot be resolved (an unknown sampler argument,
+/// recursion or a call before the definition), so the caller can try another
+/// function instead of leaving a half-rewritten shader.
+fn inline_one_sampler_function(
+    source: &str,
+    definition: &FunctionDefinition,
+    textures: &[String],
+) -> Option<String> {
+    let sampler_positions: Vec<usize> = definition
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter.is_sampler())
+        .map(|(index, _)| index)
+        .collect();
+    let calls: Vec<(usize, usize, usize)> = find_calls(source, &definition.name)
+        .into_iter()
+        .filter(|(start, _, _)| *start != definition.name_start)
+        .filter(|(start, _, _)| !is_function_prototype(source, *start))
+        .collect();
+    // Recursion, or a call before the definition (which would need a forward
+    // declaration), cannot be inlined safely.
+    if calls.iter().any(|(start, _, _)| {
+        (*start >= definition.start && *start < definition.end) || *start < definition.start
+    }) {
+        return None;
+    }
+
+    let mut resolved = Vec::with_capacity(calls.len());
+    for (start, args_start, close) in &calls {
+        let args = split_args(&source[*args_start..*close]);
+        let mut sampler_names = Vec::with_capacity(sampler_positions.len());
+        for position in &sampler_positions {
+            let argument = args.get(*position)?.trim();
+            sampler_names.push(sampler_argument_texture(argument, textures)?);
+        }
+        let mut remaining = Vec::with_capacity(args.len() - sampler_positions.len());
+        for (index, argument) in args.iter().enumerate() {
+            if !sampler_positions.contains(&index) {
+                remaining.push(argument.trim().to_string());
+            }
+        }
+        resolved.push((*start, *close + 1, sampler_names, remaining));
+    }
+
+    // One clone per distinct sampler tuple.
+    let mut clones: Vec<(String, String, String)> = Vec::new();
+    let mut replacements = Vec::with_capacity(resolved.len());
+    for (start, end, sampler_names, remaining) in resolved {
+        let key = sampler_names.join("|");
+        let clone_name = match clones.iter().find(|(existing, _, _)| *existing == key) {
+            Some((_, name, _)) => name.clone(),
+            None => {
+                let suffix = sampler_names
+                    .iter()
+                    .map(|texture| {
+                        texture
+                            .chars()
+                            .map(|character| {
+                                if is_ident_char(character) {
+                                    character
+                                } else {
+                                    '_'
+                                }
+                            })
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let name = format!("{}_isf_{suffix}", definition.name);
+                let mut body = source[definition.body_start..definition.end].to_string();
+                for (parameter, texture) in definition
+                    .params
+                    .iter()
+                    .filter(|parameter| parameter.is_sampler())
+                    .zip(sampler_names.iter())
+                {
+                    body = replace_ident(
+                        &body,
+                        &parameter.name,
+                        &format!("sampler2D(isf_tex_{texture}, isf_smp_{texture})"),
+                    );
+                }
+                let parameters: Vec<String> = definition
+                    .params
+                    .iter()
+                    .filter(|parameter| !parameter.is_sampler())
+                    .map(|parameter| parameter.text.clone())
+                    .collect();
+                let text = format!(
+                    "{} {name}({}) {body}",
+                    definition.return_type,
+                    parameters.join(", ")
+                );
+                clones.push((key, name.clone(), text));
+                name
+            }
+        };
+        replacements.push((
+            start,
+            end,
+            format!("{clone_name}({})", remaining.join(", ")),
+        ));
+    }
+
+    let clone_source = clones
+        .iter()
+        .map(|(_, _, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut edits = vec![(definition.start, definition.end, clone_source)];
+    edits.extend(replacements);
+    Some(apply_edits(source, edits))
+}
+
+/// Apply non-overlapping `(start, end, replacement)` edits to `source`.
+fn apply_edits(source: &str, mut edits: Vec<(usize, usize, String)>) -> String {
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for (start, end, replacement) in edits {
+        if start < cursor || end > source.len() || start > end {
+            continue;
+        }
+        out.push_str(&source[cursor..start]);
+        out.push_str(&replacement);
+        cursor = end;
+    }
+    out.push_str(&source[cursor..]);
+    out
+}
+
+/// Append `return <zero>;` to non-void functions whose last top-level
+/// statement is not a return.
+///
+/// WGSL (and naga's validator) requires a value on every path; GLSL is the
+/// same but its compilers accept the fall-through with a warning, which is what
+/// `Shape Morph`'s `shapeForType` relies on. The zero value is deterministic
+/// and comes from the declared type; functions whose type has no obvious zero
+/// (a struct, `sampler2D`) are left alone.
+fn append_default_returns(source: &str) -> String {
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    for definition in function_definitions(source) {
+        if definition.return_type == "void" {
+            continue;
+        }
+        let Some(zero) = zero_value(&definition.return_type) else {
+            continue;
+        };
+        let body = &source[definition.body_start + 1..definition.end - 1];
+        if ends_with_return(body) {
+            continue;
+        }
+        insertions.push((definition.end - 1, format!("\n  return {zero};\n")));
+    }
+    let mut out = source.to_string();
+    for (position, text) in insertions.into_iter().rev() {
+        out.insert_str(position, &text);
+    }
+    out
+}
+
+/// The WGSL/GLSL zero spelling for a return type.
+fn zero_value(type_name: &str) -> Option<String> {
+    match type_name {
+        "float" => Some("0.0".to_string()),
+        "int" => Some("0".to_string()),
+        "uint" => Some("0u".to_string()),
+        "bool" => Some("false".to_string()),
+        "mat2" | "mat3" | "mat4" => Some(format!("{type_name}(0.0)")),
+        _ => {
+            for (prefix, zero) in [
+                ("vec", "0.0"),
+                ("ivec", "0"),
+                ("uvec", "0u"),
+                ("bvec", "false"),
+            ] {
+                if let Some(size) = type_name.strip_prefix(prefix)
+                    && matches!(size, "2" | "3" | "4")
+                {
+                    return Some(format!("{type_name}({zero})"));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Whether the last top-level statement of a function body is a `return`.
+fn ends_with_return(body: &str) -> bool {
+    let mut depth = 0i32;
+    let mut statement_start = 0usize;
+    let mut last_statement: Option<(usize, usize)> = None;
+    for (index, character) in body.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    last_statement = Some((statement_start, index + 1));
+                    statement_start = index + 1;
+                }
+            }
+            ';' if depth == 0 => {
+                last_statement = Some((statement_start, index + 1));
+                statement_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let Some((start, end)) = last_statement else {
+        return false;
+    };
+    body[start..end]
+        .trim_start()
+        .strip_prefix("return")
+        .is_some_and(|rest| {
+            rest.starts_with(|character: char| {
+                character.is_whitespace() || character == ';' || character == '('
+            })
+        })
+}
+
+/// Split `in`/`out`/`varying mat2|mat3|mat4` declarations into per-column
+/// vector varyings.
+///
+/// WGSL entry-point IO cannot carry a matrix: naga rejects `out mat2 rotmat`
+/// (`v002 Light Leak`'s vertex sidecar). Each column becomes its own varying
+/// (which consumes the same number of locations, see [`count_declarators`]);
+/// matrix assignments write the columns and matrix reads rebuild the value.
+fn split_matrix_varyings(source: &str, qualifiers: &[&str]) -> String {
+    let mut matrices: Vec<(String, usize)> = Vec::new();
+    let mut out = String::with_capacity(source.len());
+    let mut depth = 0i32;
+    for line in source.split_inclusive('\n') {
+        let code = strip_comments(line);
+        if depth == 0
+            && let Some((qualifier, columns, name)) = parse_matrix_varying(code.trim(), qualifiers)
+        {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let column_type = match columns {
+                2 => "vec2",
+                3 => "vec3",
+                _ => "vec4",
+            };
+            for column in 0..columns {
+                out.push_str(indent);
+                out.push_str(qualifier);
+                out.push(' ');
+                out.push_str(column_type);
+                out.push(' ');
+                out.push_str(&format!("{name}_{column};\n"));
+            }
+            matrices.push((name, columns));
+            continue;
+        }
+        out.push_str(line);
+        depth += brace_delta(&code);
+    }
+    let mut result = out;
+    for (name, columns) in &matrices {
+        let Some(rewritten) = rewrite_matrix_assignments(&result, name, *columns) else {
+            // An assignment not at statement level cannot be split without
+            // rewriting arbitrary expressions; leave the shader as it was.
+            return source.to_string();
+        };
+        result = rewritten;
+        let reconstructed = format!(
+            "mat{columns}({})",
+            (0..*columns)
+                .map(|column| format!("{name}_{column}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        result = replace_ident(&result, name, &reconstructed);
+    }
+    result
+}
+
+fn parse_matrix_varying<'a>(
+    declaration: &str,
+    qualifiers: &[&'a str],
+) -> Option<(&'a str, usize, String)> {
+    for qualifier in qualifiers {
+        let Some(rest) = strip_keyword(declaration, qualifier) else {
+            continue;
+        };
+        let Some(declaration) = rest.trim_end().strip_suffix(';') else {
+            continue;
+        };
+        let mut words = declaration.split_whitespace();
+        let type_name = words.next()?;
+        let name = words.next()?;
+        if words.next().is_some() {
+            continue;
+        }
+        let columns = match type_name {
+            "mat2" => 2,
+            "mat3" => 3,
+            "mat4" => 4,
+            _ => continue,
+        };
+        if name.is_empty() || !name.chars().all(is_ident_char) {
+            continue;
+        }
+        return Some((qualifier, columns, name.to_string()));
+    }
+    None
+}
+
+/// Rewrite statement-level `m = <expression>;` assignments of a split matrix
+/// varying into per-column writes, keeping the expression evaluated once.
+///
+/// Returns `None` when an assignment is not a statement of its own (for
+/// example inside a `for` header), where the split cannot be proved correct.
+fn rewrite_matrix_assignments(source: &str, name: &str, columns: usize) -> Option<String> {
+    let reconstructed = format!(
+        "mat{columns}({})",
+        (0..columns)
+            .map(|column| format!("{name}_{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    let mut temporaries = 0usize;
+    loop {
+        let Some(position) = find_identifier(rest, name) else {
+            out.push_str(rest);
+            return Some(out);
+        };
+        let after_name = position + name.len();
+        let after = &rest[after_name..];
+        let spaces = after.len() - after.trim_start().len();
+        let candidate = &after[spaces..];
+        if candidate.starts_with('=') && !candidate.starts_with("==") {
+            let prefix = strip_comments(&rest[..position]);
+            let prefix = prefix.trim_end();
+            if !(prefix.is_empty()
+                || prefix.ends_with(';')
+                || prefix.ends_with('{')
+                || prefix.ends_with('}'))
+            {
+                return None;
+            }
+            let equals = after_name + spaces;
+            if let Some(offset) = rest[equals..].find(';') {
+                let semicolon = equals + offset;
+                let rhs = rest[equals + 1..semicolon].trim();
+                out.push_str(&rest[..position]);
+                out.push_str(&format!("{{ mat{columns} isf_mat_{temporaries} = "));
+                out.push_str(&replace_ident(rhs, name, &reconstructed));
+                out.push_str("; ");
+                for column in 0..columns {
+                    out.push_str(&format!(
+                        "{name}_{column} = isf_mat_{temporaries}[{column}]; "
+                    ));
+                }
+                out.push('}');
+                temporaries += 1;
+                rest = &rest[semicolon + 1..];
+                continue;
+            }
+        }
+        out.push_str(&rest[..after_name]);
+        rest = &rest[after_name..];
+    }
+}
+
+/// Offset of the first whole-identifier occurrence of `name`.
+fn find_identifier(source: &str, name: &str) -> Option<usize> {
+    let mut search = 0usize;
+    while let Some(relative) = source[search..].find(name) {
+        let start = search + relative;
+        let after = start + name.len();
+        let before_ok = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !is_ident_char(character));
+        let after_ok = source[after..]
+            .chars()
+            .next()
+            .is_none_or(|character| !is_ident_char(character));
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        search = after;
+    }
+    None
+}
+
+/// Split file-scope declarations whose initialiser naga cannot represent and
+/// move the initialisation into a generated function.
+///
+/// WGSL globals are initialised with constant expressions only; naga parses a
+/// GLSL initialiser such as `float d = min(progress, 1.0);` but (correctly)
+/// rejects the module. The declaration keeps its name and type (a private,
+/// zero-initialised global) and the assignment runs at the top of the entry
+/// point, in declaration order, so a global that reads another one still sees
+/// the same value. Declarations inside `#if` blocks are skipped: moving the
+/// assignment out of the guard could reference a name that was never declared
+/// (a module-scope initialiser inside a guard that reads a hoisted global would
+/// see its zero value; no corpus shader does that).
+fn hoist_global_initialisers(source: &str) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(source.len() + 64);
+    let mut initialisers = Vec::new();
+    let mut depth = 0i32;
+    let mut conditionals = 0usize;
+    let mut lines = source.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        let code = strip_comments(line);
+        let trimmed = code.trim();
+        if trimmed.starts_with("#if") {
+            conditionals += 1;
+        } else if trimmed.starts_with("#endif") {
+            conditionals = conditionals.saturating_sub(1);
+        }
+        let candidate =
+            depth == 0 && conditionals == 0 && !trimmed.is_empty() && !trimmed.starts_with('#');
+        if !candidate {
+            out.push_str(line);
+            depth += brace_delta(&code);
+            continue;
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        let mut statement = String::from(line);
+        loop {
+            let code = strip_comments(&statement);
+            if code.contains(';') || code.contains('{') {
+                break;
+            }
+            match lines.next() {
+                Some(next) => statement.push_str(next),
+                None => break,
+            }
+        }
+        let code = strip_comments(&statement);
+        if !code.contains('{')
+            && let Some((declaration, assignments)) = rewrite_global_declaration(code.trim())
+        {
+            out.push_str(indent);
+            out.push_str(&declaration);
+            out.push('\n');
+            initialisers.extend(assignments);
+            continue;
+        }
+        out.push_str(&statement);
+        depth += brace_delta(&code);
+    }
+    (out, initialisers)
+}
+
+/// Rewrite one `type a = expr, b;` statement into `type a, b;` plus the
+/// assignments for each initialised declarator.
+///
+/// Returns `None` when the statement is not a plain non-`const` declaration or
+/// when it contains an array initialiser, leaving the original text intact.
+fn rewrite_global_declaration(code: &str) -> Option<(String, Vec<String>)> {
+    let statement = code.strip_suffix(';')?;
+    if statement.contains('{') || statement.contains('}') || statement.contains(';') {
+        return None;
+    }
+    let mut words = statement.split_whitespace();
+    let type_name = words.next()?;
+    if type_name == "const" || !is_glsl_type(type_name) {
+        return None;
+    }
+    let rest = statement[type_name.len()..].trim_start();
+    let mut names = Vec::new();
+    let mut assignments = Vec::new();
+    for declarator in split_args(rest) {
+        let declarator = declarator.trim();
+        if declarator.is_empty() {
+            return None;
+        }
+        let (left, right) = match split_assignment(declarator) {
+            Some((left, right)) => (left.trim(), Some(right.trim())),
+            None => (declarator, None),
+        };
+        let (name, suffix) = split_array_suffix(left)?;
+        if suffix.is_some() {
+            return None;
+        }
+        names.push(name.to_string());
+        if let Some(right) = right {
+            if right.is_empty() || right.contains('{') || right.contains(';') {
+                return None;
+            }
+            assignments.push(format!("{name} = {right};"));
+        }
+    }
+    if assignments.is_empty() {
+        return None;
+    }
+    Some((format!("{type_name} {};", names.join(", ")), assignments))
+}
+
+/// Split at the first top-level `=` that is not part of `==`, `<=`, `>=` or
+/// `!=`.
+fn split_assignment(source: &str) -> Option<(&str, &str)> {
+    let bytes = source.as_bytes();
+    let mut depth = 0i32;
+    for (index, character) in source.char_indices() {
+        match character {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '=' if depth == 0 => {
+                let before = index.checked_sub(1).map(|position| bytes[position]);
+                if matches!(before, Some(b'=') | Some(b'<') | Some(b'>') | Some(b'!')) {
+                    continue;
+                }
+                if bytes.get(index + 1) == Some(&b'=') {
+                    continue;
+                }
+                return Some((&source[..index], &source[index + 1..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a declarator into its identifier and optional `[size]` suffix.
+fn split_array_suffix(declaration: &str) -> Option<(&str, Option<&str>)> {
+    let declaration = declaration.trim();
+    let end = declaration
+        .find(|character: char| !is_ident_char(character))
+        .unwrap_or(declaration.len());
+    let name = &declaration[..end];
+    if name.is_empty() || !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let suffix = declaration[end..].trim();
+    if suffix.is_empty() {
+        Some((name, None))
+    } else if suffix.starts_with('[') && suffix.ends_with(']') {
+        Some((name, Some(suffix)))
+    } else {
+        None
     }
 }
 
@@ -1989,6 +3000,229 @@ void main(void) {
             out.contains("textureLod(sampler2D(isf_tex_inputImage, isf_smp_inputImage), uv, 0.0)")
         );
         assert!(out.contains("texture(other, uv)"), "unknown names stay put");
+    }
+
+    #[test]
+    fn sampler_parameters_are_cloned_per_actual_texture() {
+        let textures = vec!["startImage".to_string(), "endImage".to_string()];
+        let source = r#"
+            vec4 SampleWithBorder(vec4 border, sampler2D tex, vec2 uv) {
+                if (uv.x < 0.0) return border;
+                return texture(tex, uv);
+            }
+            void main() {
+                vec4 a = SampleWithBorder(vec4(0.0), startImage, uv);
+                vec4 b = SampleWithBorder(vec4(1.0), endImage, uv);
+            }
+        "#;
+        let out = inline_sampler_functions(source, &textures);
+        assert!(
+            !out.contains("sampler2D tex"),
+            "the sampler parameter is gone: {out}"
+        );
+        assert!(
+            out.contains("SampleWithBorder_isf_startImage(vec4 border, vec2 uv)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("SampleWithBorder_isf_endImage(vec4 border, vec2 uv)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("texture(sampler2D(isf_tex_startImage, isf_smp_startImage), uv)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("= SampleWithBorder_isf_startImage(vec4(0.0), uv)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("= SampleWithBorder_isf_endImage(vec4(1.0), uv)"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("SampleWithBorder(vec4"),
+            "no call keeps the sampler argument: {out}"
+        );
+    }
+
+    #[test]
+    fn an_uncalled_sampler_function_is_removed() {
+        let textures = vec!["startImage".to_string()];
+        let source = r#"
+            vec4 Unused(vec4 border, sampler2D tex, vec2 uv) { return texture(tex, uv); }
+            void main() { gl_FragColor = texture(startImage, uv); }
+        "#;
+        let out = inline_sampler_functions(source, &textures);
+        assert!(!out.contains("sampler2D"), "{out}");
+        assert!(!out.contains("Unused"), "{out}");
+        assert!(out.contains("void main()"), "{out}");
+    }
+
+    #[test]
+    fn a_sampler_argument_that_is_not_a_texture_is_left_alone() {
+        let textures = vec!["startImage".to_string()];
+        let source = r#"
+            vec4 Sample(vec4 border, sampler2D tex, vec2 uv) { return texture(tex, uv); }
+            void main() { gl_FragColor = Sample(vec4(0.0), other, uv); }
+        "#;
+        let out = inline_sampler_functions(source, &textures);
+        assert_eq!(out, source, "an unknown sampler argument is not guessed at");
+    }
+
+    #[test]
+    fn nested_sampler_functions_are_inlined_through_the_split_form() {
+        let textures = vec!["startImage".to_string()];
+        let source = r#"
+            vec4 Inner(vec4 border, sampler2D tex, vec2 uv) { return texture(tex, uv); }
+            vec4 Outer(sampler2D tex, vec2 uv) { return Inner(vec4(0.0), tex, uv); }
+            void main() { gl_FragColor = Outer(startImage, uv); }
+        "#;
+        let out = inline_sampler_functions(source, &textures);
+        assert!(!out.contains("sampler2D tex"), "{out}");
+        assert!(out.contains("Inner_isf_startImage(vec4(0.0), uv)"), "{out}");
+        assert!(out.contains("Outer_isf_startImage(uv)"), "{out}");
+    }
+
+    #[test]
+    fn non_constant_global_initialisers_move_into_the_entry_point() {
+        let shader = r#"/*{ "INPUTS": [
+            { "NAME": "progress", "TYPE": "float" },
+            { "NAME": "steps", "TYPE": "float" }
+        ] }*/
+        float d = min(progress, 1.0 - progress);
+        float dist = steps > 0.0 ? ceil(d * float(steps)) / float(steps) : d;
+        vec2 squareSize = 2.0 * dist / vec2(4.0);
+        void main() { gl_FragColor = vec4(squareSize, dist, 1.0); }"#;
+        let glsl = build_fragment_glsl(&doc(shader), 0);
+        assert!(glsl.contains("float d;"), "{glsl}");
+        assert!(glsl.contains("float dist;"), "{glsl}");
+        assert!(glsl.contains("vec2 squareSize;"), "{glsl}");
+        assert!(!glsl.contains("float d = min("), "{glsl}");
+        let init = glsl
+            .find("void isf_init_globals() {")
+            .expect("initialiser function");
+        let d = glsl[init..].find("d = min(progress, 1.0 - progress);");
+        let dist = glsl[init..].find("dist = steps > 0.0");
+        let square = glsl[init..].find("squareSize = 2.0 * dist");
+        assert!(
+            d.is_some() && dist.is_some() && square.is_some(),
+            "all three assignments are hoisted: {glsl}"
+        );
+        assert!(
+            d < dist && dist < square,
+            "declaration order is kept: {glsl}"
+        );
+        assert!(
+            glsl.contains("  isf_init_globals();\n  isf_user_main();"),
+            "{glsl}"
+        );
+        assert!(!glsl.contains("void main() { gl_FragColor"), "{glsl}");
+    }
+
+    #[test]
+    fn constant_global_initialisers_stay_at_file_scope() {
+        let shader = r#"const float pi = 3.14159;
+        const vec4 tint = vec4(1.0);
+        void main() { gl_FragColor = tint * pi; }"#;
+        let glsl = build_fragment_glsl(&doc(shader), 0);
+        assert!(glsl.contains("const float pi = 3.14159;"), "{glsl}");
+        assert!(!glsl.contains("isf_init_globals"), "{glsl}");
+        assert!(!glsl.contains("isf_user_main"), "{glsl}");
+        assert!(glsl.contains("void main() {"), "{glsl}");
+    }
+
+    #[test]
+    fn globals_are_not_hoisted_out_of_a_preprocessor_branch() {
+        let shader = r#"#if __VERSION__ <= 120
+        float legacy = 1.0;
+        #else
+        float legacy = 2.0;
+        #endif
+        void main() { gl_FragColor = vec4(legacy); }"#;
+        let glsl = build_fragment_glsl(&doc(shader), 0);
+        assert!(!glsl.contains("isf_init_globals"), "{glsl}");
+    }
+
+    #[test]
+    fn non_void_functions_get_a_default_return() {
+        let source = r#"
+            float f(float x) { if (x > 0.0) return x; }
+            vec4 g(vec4 c) { if (c.a > 0.5) return c; }
+            int h(int x) { for (int i = 0; i < x; i++) { x += i; } }
+            void main() {}
+        "#;
+        let out = append_default_returns(source);
+        assert!(
+            out.contains("if (x > 0.0) return x; \n  return 0.0;"),
+            "{out}"
+        );
+        assert!(out.contains("return vec4(0.0);"), "{out}");
+        assert!(out.contains("return 0;"), "{out}");
+        assert!(
+            !out.contains("void main() {\n  return"),
+            "void functions are untouched: {out}"
+        );
+    }
+
+    #[test]
+    fn a_function_that_always_returns_is_not_given_dead_code() {
+        let source = "float f(float x) { return x; }";
+        assert_eq!(append_default_returns(source), source);
+        // A trailing `if/else` whose branches both return still gets the
+        // deterministic default: proving every branch returns needs a control
+        // flow analysis, and unreachable `return` statements are legal.
+        let source = "float f(float x) { if (x > 0.0) { return x; } else { return -x; } }";
+        assert!(append_default_returns(source).contains("return 0.0;"));
+    }
+
+    #[test]
+    fn an_unknown_return_type_is_not_given_a_guess() {
+        let source = "struct S { float x; };\nS make() { S value; }";
+        assert_eq!(append_default_returns(source), source);
+    }
+
+    #[test]
+    fn matrix_varyings_split_into_columns() {
+        let shader = r#"/*{ "INPUTS": [ { "NAME": "angle", "TYPE": "float" } ] }*/
+        void main() { gl_FragColor = vec4(angle); }"#;
+        let vertex = r#"
+varying mat2 rotmat;
+void main() {
+    isf_vertShaderInit();
+    float theta = radians(angle);
+    float c = cos(theta);
+    float s = sin(theta);
+    rotmat = mat2(c, s, -s, c);
+}"#;
+        let document = parse_isf(shader, Some(vertex)).expect("parses");
+        let glsl = build_vertex_glsl(&document);
+        assert!(
+            glsl.contains("layout(location = 1) out vec2 rotmat_0;"),
+            "{glsl}"
+        );
+        assert!(
+            glsl.contains("layout(location = 2) out vec2 rotmat_1;"),
+            "{glsl}"
+        );
+        assert!(!glsl.contains("out mat2"), "{glsl}");
+        assert!(
+            glsl.contains(
+                "isf_mat_0 = mat2(c, s, -s, c); rotmat_0 = isf_mat_0[0]; rotmat_1 = isf_mat_0[1];"
+            ),
+            "{glsl}"
+        );
+    }
+
+    #[test]
+    fn a_fragment_matrix_varying_is_rebuilt_at_its_use_site() {
+        let source = r#"varying mat2 rotmat;
+        void main() { vec2 point = (isf_FragNormCoord - 0.5) * rotmat + 0.5; }"#;
+        let out = rewrite_fragment_source(source, &[]);
+        assert!(out.contains("vec2 rotmat_0;"), "{out}");
+        assert!(out.contains("vec2 rotmat_1;"), "{out}");
+        assert!(out.contains("mat2(rotmat_0, rotmat_1)"), "{out}");
+        assert!(!out.contains("mat2 rotmat;"), "{out}");
     }
 
     #[test]

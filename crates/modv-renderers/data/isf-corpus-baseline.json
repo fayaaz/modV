@@ -1,5 +1,7 @@
 {
   "_comment": "Checked-in ISF corpus baseline (crates/modv-renderers/src/isf/translate.rs, CorpusBaseline). `translated`/`overridden`/`failed` are fragment shader file stems; `vertex_failed` lists .vs sidecars. The corpus test asserts exact equality plus the >=95% pass rate, so a naga upgrade or preprocessor change that moves any shader fails loudly instead of silently rewriting docs/isf-corpus-report.md. Regenerate with CorpusBaseline::from_report after reviewing a real change (and update the markdown report by hand).",
+  "failed": [],
+  "overridden": [],
   "total": 351,
   "translated": [
     "ASCII Art",
@@ -176,8 +178,10 @@
     "Pinch",
     "Pinwheel",
     "Pixel Shifter",
+    "Pixelize",
     "Pixellate",
     "Plexus",
+    "Point10 Banded Swirl",
     "Point10 Blinds",
     "Point10 Block",
     "Point10 Circle Reveal",
@@ -199,8 +203,11 @@
     "Point10 Shockwave",
     "Point10 Shrink",
     "Point10 SlideIn",
+    "Point10 Smooth Swirl Grid",
+    "Point10 Swirl",
     "Point10 Swirl Grid",
     "Point10 Water",
+    "Point10 Wave",
     "Polar Function",
     "Polka Dots Curtain",
     "Poly Star",
@@ -242,6 +249,8 @@
     "Set Alpha",
     "Shake",
     "Shape Mask",
+    "Shape Morph Feedback Mask",
+    "Shape Morph Wrap",
     "Sharpen Luminance",
     "Sharpen RGB",
     "Shockwave",
@@ -347,18 +356,6 @@
     "v002-CRT-Displacement",
     "v002-CRT-Mask"
   ],
-  "overridden": [],
-  "failed": [
-    "Pixelize",
-    "Point10 Banded Swirl",
-    "Point10 Smooth Swirl Grid",
-    "Point10 Swirl",
-    "Point10 Wave",
-    "Shape Morph Feedback Mask",
-    "Shape Morph Wrap"
-  ],
-  "vertex_total": 36,
-  "vertex_failed": [
-    "v002 Light Leak"
-  ]
+  "vertex_failed": [],
+  "vertex_total": 36
 }

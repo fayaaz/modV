@@ -920,12 +920,12 @@ impl CorpusReport {
              would rewrite `.r` swizzles for inputs named `r`), and \
              `_<name>_flip` is an `int` because WGSL forbids `bool` in a \
              uniform block.\n\
-             - The remaining failures are the known-hard corners that need \
-             hand-written WGSL overrides (see `src/isf/overrides/README.md`): \
-             non-constant global initialisers (`Pixelize`), `sampler2D` \
-             function parameters (`Point10 *`), a non-void function with a \
-             path that returns nothing (`Shape Morph *`), and a `mat2` vertex \
-             varying (`v002 Light Leak`).\n\
+             - The four naga gaps the corpus used to trip over are handled by \
+             general rewrite passes: non-constant global initialisers are moved \
+             into `isf_init_globals()`, `sampler2D` function parameters are \
+             cloned per actual texture, a non-void function with a \
+             fall-through path gets a deterministic default return, and matrix \
+             varyings are split into per-column vectors.\n\
              - Fragment-declared `in`/`varying` lines become zero-initialised \
              private globals: the runtime always draws the built-in \
              full-screen triangle, so unbound sidecar varyings (the corpus' \
@@ -1629,6 +1629,104 @@ fn main() -> @location(0) vec4<f32> {
             .expect("WGSL");
         assert_valid_wgsl(&wgsl);
         assert!(wgsl.contains("@builtin(position)"));
+    }
+
+    #[test]
+    fn pixelize_style_global_initialisers_translate() {
+        // GLSL globals initialised from uniforms (`Pixelize`): naga parses the
+        // declaration but cannot represent a non-constant global initialiser.
+        let shader = r#"/*{ "INPUTS": [
+            { "NAME": "progress", "TYPE": "float" },
+            { "NAME": "steps", "TYPE": "float" }
+        ] }*/
+        float d = min(progress, 1.0 - progress);
+        float dist = steps > 0.0 ? ceil(d * float(steps)) / float(steps) : d;
+        vec2 squareSize = 2.0 * dist / vec2(20.0);
+        void main() {
+            vec2 p = dist > 0.0 ? (floor(isf_FragNormCoord / squareSize) + 0.5) * squareSize : isf_FragNormCoord;
+            gl_FragColor = vec4(p, dist, 1.0);
+        }"#;
+        let wgsl = translate_fragment(&doc(shader), 0)
+            .expect("translates")
+            .wgsl
+            .expect("WGSL");
+        assert_valid_wgsl(&wgsl);
+        assert!(wgsl.contains("isf_init_globals"), "{wgsl}");
+    }
+
+    #[test]
+    fn sampler2d_function_parameters_translate() {
+        // naga cannot take a sampler as a function parameter (`Point10 *`).
+        let shader = r#"/*{ "INPUTS": [ { "NAME": "startImage", "TYPE": "image" } ] }*/
+        vec4 SampleWithBorder(vec4 border, sampler2D tex, vec2 uv) {
+            vec2 t = abs(clamp(uv, 0.0, 1.0) - uv);
+            if (t.x > 0.0 || t.y > 0.0) { return border; }
+            return texture2D(tex, uv);
+        }
+        void main() {
+            gl_FragColor = SampleWithBorder(vec4(0.0), startImage, isf_FragNormCoord);
+        }"#;
+        let translated = translate_fragment(&doc(shader), 0).expect("translates");
+        let wgsl = translated.wgsl.expect("WGSL");
+        assert_valid_wgsl(&wgsl);
+        assert!(wgsl.contains("textureSample"), "{wgsl}");
+        assert!(
+            !translated.glsl.contains("sampler2D tex"),
+            "{}",
+            translated.glsl
+        );
+    }
+
+    #[test]
+    fn a_non_void_function_with_a_fall_through_path_translates() {
+        // `Shape Morph`'s `shapeForType` returns nothing when no branch matches.
+        let shader = r#"/*{ "INPUTS": [ { "NAME": "mode", "TYPE": "long" } ] }*/
+        float pick(vec2 st, int shape) {
+            if (shape == 0) { return length(st - 0.5) * 2.0; }
+            else if (shape == 1) { return max(abs(st.x), abs(st.y)); }
+        }
+        vec4 pickColour(vec4 colour) {
+            if (colour.a > 0.5) { return colour; }
+        }
+        void main() {
+            gl_FragColor = pickColour(vec4(pick(isf_FragNormCoord, mode), 0.0, 0.0, 1.0));
+        }"#;
+        let wgsl = translate_fragment(&doc(shader), 0)
+            .expect("translates")
+            .wgsl
+            .expect("WGSL");
+        assert_valid_wgsl(&wgsl);
+    }
+
+    #[test]
+    fn matrix_sidecar_varyings_translate() {
+        // WGSL entry-point IO cannot carry a matrix (`v002 Light Leak`).
+        let shader = r#"/*{ "INPUTS": [ { "NAME": "angle", "TYPE": "float" } ] }*/
+        in mat2 rotmat;
+        void main() {
+            vec2 point = ((isf_FragNormCoord - 0.5) * rotmat) + 0.5;
+            gl_FragColor = vec4(point, 0.0, 1.0);
+        }"#;
+        let vertex = r#"#if __VERSION__ <= 120
+varying mat2 rotmat;
+#else
+out mat2 rotmat;
+#endif
+void main() {
+    isf_vertShaderInit();
+    float theta = radians(angle);
+    float c = cos(theta);
+    float s = sin(theta);
+    rotmat = mat2(c, s, -s, c);
+}"#;
+        let document = parse_isf(shader, Some(vertex)).expect("parses");
+        let translated = translate_vertex(&document).expect("translates");
+        let wgsl = translated.wgsl.expect("WGSL");
+        assert_valid_wgsl(&wgsl);
+        assert!(wgsl.contains("@vertex"), "{wgsl}");
+        // The companion fragment rebuilds the matrix from the split columns.
+        let fragment = translate_fragment(&document, 0).expect("fragment translates");
+        assert_valid_wgsl(&fragment.wgsl.expect("WGSL"));
     }
 
     #[test]
