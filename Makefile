@@ -1,6 +1,9 @@
 APP_VERSION ?= $(shell sed -n 's/^  "version": "\([^"]*\)".*/\1/p' package.json | head -n 1)
 DOCKER_BUILD_ARGS ?=
 DIST_DIR ?= dist
+# Set ENGINE_MODE=1 to run the app against the Rust engine (MODV_ENGINE=1)
+# instead of the legacy worker renderer; used by `make dev`.
+ENGINE_MODE ?= 0
 
 DOCKER ?= docker
 TOOLCHAIN_IMAGE ?= modv-toolchain:local
@@ -145,7 +148,7 @@ install: docker-deps
 	$(DOCKER) run --rm -v "$(NODE_MODULES_VOLUME):/app/node_modules" "$(TOOLCHAIN_IMAGE)" \
 		chown -R "$(HOST_UID):$(HOST_GID)" /app/node_modules
 
-dev: DOCKER_RUN_ARGS += $(GUI_RUN_ARGS) -e NO_SANDBOX=1
+dev: DOCKER_RUN_ARGS += $(GUI_RUN_ARGS) -e NO_SANDBOX=1 $(if $(filter 1,$(ENGINE_MODE)),-e MODV_ENGINE=1,)
 dev: docker-node-modules
 	$(call run-yarn,dev $(ARGS))
 
@@ -194,10 +197,10 @@ define run-cargo
 endef
 
 engine: docker-cargo-volume
-	$(call run-cargo,build --release)
+	$(call run-cargo,build --release $(ARGS))
 
 engine-test: docker-cargo-volume
-	$(call run-cargo,test)
+	$(call run-cargo,test $(ARGS))
 
 engine-lint: docker-cargo-volume
 	$(call run-cargo,clippy --all-targets -- -D warnings)
