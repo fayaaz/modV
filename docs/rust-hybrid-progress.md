@@ -35,9 +35,11 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 - Headless benchmark (packaged engine, 1280×720, 600 frames):
   **5885 fps**, p99 0.332 ms.
 - `make lint`: clean (one pre-existing warning in an untouched component).
-- e2e: **143/143 pass** against the packaged AppImage, including the
-  engine-mode spec (preview frames publish, engine kill survived and
-  restarted, renderer creates no WebGL/WebGPU context).
+- e2e: **144/144 pass** against the packaged AppImage — the full legacy suite
+  plus the engine-mode specs (`engineSkeleton`: preview frames publish, engine
+  kill survived and restarted, renderer creates no WebGL/WebGPU context;
+  `engineParity`: 424 registered modules, audio-link min/max, Point10
+  transparency, output preview pixels).
 - Packaged-engine smoke (CDP against the AppImage, `MODV_ENGINE=1`): the UI
   mirror receives all **59 seeded Scenes** via `state/sync`; applying the
   default Scene "Lone Chrome" builds the Foreground group + Point10 Chromatic
