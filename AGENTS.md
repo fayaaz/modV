@@ -79,7 +79,27 @@ renderer stays the default until the plan's M7.
   `docs/isf-translation-notes.md`); WGSL uniform arrays need 16-byte strides
   (`array<f32, N>` is rejected — use `vec4<f32>`); the X11 fallback needs
   `libxkbcommon-x11` at runtime (the engine preflights it and the Docker
-  toolchain installs it).
+  toolchain installs it). The engine links `libpipewire-0.3` for the native
+  system-audio monitor (`--audio-source pipewire`), so the packaged AppImage
+  needs that runtime library on the host (the Docker toolchain/e2e image
+  installs `libpipewire-0.3-0`; the `.deb` picks it up from the distro).
+- Audio: the renderer's pump sends the full band/lane/cell/wave/FFT payload to
+  `meyda/SET_BANDS` by default; `--audio-source pipewire|input[:device]`
+  (`MODV_AUDIO_SOURCE`) switches the engine to owning capture + analysis via
+  `modv-media`'s `AudioFeed`, ignores the renderer's writes (warned once) and
+  republishes UI meter bands at 10 Hz. `--list-audio-devices` prints cpal
+  devices. Input Links evaluate getters (`meyda/getFeature`), state paths
+  (`beats.kick`, `tweens.tweens[id].value[n]`, MIDI) and kick mutations, with
+  a 10 Hz mirror-delta throttle.
+- Tweens: `crates/modv-engine/src/tweens.rs` ports anime.js `buildFrames`
+  (BPM durations, loop/alternate, steps, the penner easings) with a Node
+  reference fixture; the store rebuilds on `beats/SET_BPM` and `fps/SET_FPS`
+  and link reads advance a tween once, like `dataTypes.tween.get`.
+- Previews: the main panel reads the VMP1 preview ring; Gallery tiles and
+  Scene hover cells use deferred `preview/module` and `preview/scene`
+  requests (supervisor queue, answered ≤4/frame after present from isolated
+  LRU-cached instances). `state/sync` carries the `registered` module map so
+  the engine-mode Gallery is populated.
 
 ## Architecture (three execution contexts)
 
