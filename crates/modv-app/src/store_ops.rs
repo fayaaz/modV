@@ -359,7 +359,11 @@ impl Store {
 
         match action {
             "groups/createGroup" => self.create_group(params),
+            "groups/removeGroup" => self.remove_group_action(params),
+            "groups/UPDATE_GROUP" => self.update_group(params),
             "groups/UPDATE_GROUP_BY_KEY" => self.update_group_by_key(params),
+            "groups/REMOVE_GROUP" => self.remove_group_mutation(params),
+            "groups/REPLACE_GROUP_MODULES" => self.replace_group_modules(params),
             "groups/ADD_MODULE_TO_GROUP" => self.add_module_to_group(params),
             "groups/REMOVE_MODULE_FROM_GROUP" => self.remove_module_from_group(params),
             "groups/REPLACE_GROUPS" => self.replace_groups(params),
@@ -639,6 +643,122 @@ impl Store {
             action,
             json!({ "moduleId": module_id, "groupId": group_id }),
         );
+        Ok(Value::Null)
+    }
+
+    /// `groups/UPDATE_GROUP` (`groups.js:544-557`).
+    ///
+    /// The UI commits this mutation for every Group control (alpha, enabled,
+    /// name, hidden, inherit, clearing, composite operation, …). The merge is
+    /// key-generic exactly like the JS: serialize the Group, overwrite the
+    /// supplied keys, deserialize back through the typed schema (unknown keys
+    /// land in `extra`).
+    fn update_group(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let action = "groups/UPDATE_GROUP";
+        let group_id = required_str(params, action, "groupId")?.to_string();
+        let Some(data) = params.get("data").and_then(Value::as_object) else {
+            return Err(invalid(action, "missing \"data\" object"));
+        };
+
+        let Some(index) = self
+            .state
+            .groups
+            .iter()
+            .position(|group| group.id == group_id)
+        else {
+            self.warn_once(
+                format!("missing-group:{group_id}"),
+                &format!("engine: WARN {action}: no such group {group_id}"),
+            );
+            return Ok(Value::Null);
+        };
+
+        let mut value = serde_json::to_value(&self.state.groups[index])
+            .map_err(|error| invalid(action, format!("group did not serialise: {error}")))?;
+        let Some(object) = value.as_object_mut() else {
+            return Err(invalid(action, "group did not serialise to an object"));
+        };
+        for (key, item) in data {
+            object.insert(key.clone(), item.clone());
+        }
+        let group: Group = serde_json::from_value(value)
+            .map_err(|error| invalid(action, format!("group did not decode: {error}")))?;
+        self.state.groups[index] = group;
+
+        self.deltas
+            .push(action, json!({ "groupId": group_id, "data": data }));
+        Ok(Value::Null)
+    }
+
+    /// `groups/REPLACE_GROUP_MODULES` (`groups.js:502-509`): replace the
+    /// Group's module id list (Gallery/Group reordering).
+    fn replace_group_modules(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let action = "groups/REPLACE_GROUP_MODULES";
+        let group_id = required_str(params, action, "groupId")?.to_string();
+        let Some(modules) = params.get("modules").and_then(Value::as_array) else {
+            return Err(invalid(action, "missing \"modules\" array"));
+        };
+        let modules: Vec<String> = modules
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+
+        let Some(group) = self.state.find_group_mut(&group_id) else {
+            self.warn_once(
+                format!("missing-group:{group_id}"),
+                &format!("engine: WARN {action}: no such group {group_id}"),
+            );
+            return Ok(Value::Null);
+        };
+        group.modules = modules.clone();
+
+        self.deltas
+            .push(action, json!({ "groupId": group_id, "modules": modules }));
+        Ok(Value::Null)
+    }
+
+    /// `groups/removeGroup` (`groups.js:204-208`): clean the Group-owned
+    /// inputs, then remove the Group.
+    fn remove_group_action(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let group_id = required_str(params, "groups/removeGroup", "groupId")?.to_string();
+        let Some(group) = self.state.groups.iter().find(|group| group.id == group_id) else {
+            return Ok(Value::Null);
+        };
+        let input_ids = [
+            group.alpha_input_id.clone(),
+            group.enabled_input_id.clone(),
+            group.clearing_input_id.clone(),
+            group.inherit_input_id.clone(),
+            group.composite_operation_input_id.clone(),
+            group.pipeline_input_id.clone(),
+        ];
+        for input_id in input_ids.into_iter().flatten() {
+            let mut link_params = Map::new();
+            link_params.insert("inputId".to_string(), json!(input_id));
+            self.remove_input_link(&link_params)?;
+            let mut input_params = Map::new();
+            input_params.insert("inputId".to_string(), json!(input_id));
+            input_params.insert("silent".to_string(), json!(true));
+            self.remove_input_action(&input_params)?;
+        }
+
+        let mut remove = Map::new();
+        remove.insert("id".to_string(), json!(group_id));
+        self.remove_group_mutation(&remove)
+    }
+
+    /// `groups/REMOVE_GROUP` (`groups.js:465-472`).
+    fn remove_group_mutation(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let Some(id) = params.get("id").and_then(Value::as_str) else {
+            return Ok(Value::Null);
+        };
+        let Some(index) = self.state.groups.iter().position(|group| group.id == id) else {
+            return Ok(Value::Null);
+        };
+        self.state.groups.remove(index);
+
+        self.deltas.push("groups/REMOVE_GROUP", json!({ "id": id }));
         Ok(Value::Null)
     }
 
@@ -3368,6 +3488,90 @@ mod tests {
             .expect("no-op dispatches");
         assert_eq!(result, Value::Null);
         assert_eq!(store.pending_delta_count(), 0);
+    }
+
+    #[test]
+    fn update_group_merges_every_supplied_key_and_emits_the_delta() {
+        let (mut store, id) = store_with_group("Effects");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "groups/UPDATE_GROUP",
+                json!({
+                    "groupId": id,
+                    "data": { "alpha": 0.42, "enabled": 0, "name": "Renamed" }
+                }),
+            )
+            .expect("UPDATE_GROUP dispatches");
+
+        let group = store.state().find_group(&id).expect("group");
+        assert!((group.alpha - 0.42).abs() < 1e-9);
+        assert_eq!(group.enabled, 0);
+        assert_eq!(group.name, "Renamed");
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "groups/UPDATE_GROUP");
+        assert_eq!(deltas[0].payload["groupId"], json!(id));
+    }
+
+    #[test]
+    fn replace_group_modules_reorders_the_group() {
+        let (mut store, id) = store_with_group("Effects");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "groups/REPLACE_GROUP_MODULES",
+                json!({ "groupId": id, "modules": ["b", "a"] }),
+            )
+            .expect("REPLACE_GROUP_MODULES dispatches");
+
+        assert_eq!(
+            store.state().find_group(&id).expect("group").modules,
+            vec!["b".to_string(), "a".to_string()]
+        );
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas[0].r#type, "groups/REPLACE_GROUP_MODULES");
+    }
+
+    #[test]
+    fn remove_group_cleans_its_inputs_and_removes_it() {
+        let (mut store, id) = store_with_group("Effects");
+        // The engine's createGroup does not synthesise the six control inputs
+        // (the JS action does); bind one explicitly so the cleanup path runs.
+        store
+            .dispatch(
+                "groups/UPDATE_GROUP",
+                json!({ "groupId": id, "data": { "alphaInputId": "input-a" } }),
+            )
+            .expect("bind alpha input");
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({ "id": "input-a", "type": "commit" }),
+            )
+            .expect("input");
+        assert_eq!(store.state().inputs.len(), 1);
+        store.drain_deltas();
+
+        store
+            .dispatch("groups/removeGroup", json!({ "groupId": id }))
+            .expect("removeGroup dispatches");
+
+        assert!(store.state().find_group(&id).is_none());
+        assert!(store.state().inputs.is_empty());
+        let deltas = store.drain_deltas();
+        assert!(
+            deltas
+                .iter()
+                .any(|delta| delta.r#type == "groups/REMOVE_GROUP")
+        );
+        assert!(
+            deltas
+                .iter()
+                .any(|delta| delta.r#type == "inputs/REMOVE_INPUT")
+        );
     }
 
     #[test]

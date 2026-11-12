@@ -12,10 +12,11 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1777 tests pass** (modv-app 283, modv-engine 438,
-  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 758).
-- Vitest: **947 tests pass** (includes the engine mirror-parity replay, the
-  preview-client helpers and the engine audio payload shape).
+- Rust workspace: **1785 tests pass** (modv-app 288, modv-engine 438,
+  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 760).
+- Vitest: **1118 tests pass** across 89 files (engine mirror-parity replay,
+  preview/read helpers, supervisor restart budget, preload scoping, sync
+  replay, plugin host, engine media controller and payload shapes).
 - Real-music analyser check (opt-in fixture): 12 s of the noiseblock radio
   stream decoded to 48 kHz mono, 1199 analysis frames — bands peak at
   bass 0.85 / mid 0.48 / treble 0.30, beat envelope 1.0, tempo 160 BPM, lane
