@@ -103,6 +103,109 @@ pub fn clamp_preview_dimension(value: u32) -> u32 {
     value.clamp(1, MAX_PREVIEW_DIMENSION)
 }
 
+/// Fill an RGBA8 texture with the preview test card.
+///
+/// Effects need *something* to filter: the legacy Gallery renders a filter
+/// over "nothing" and shows a blank tile. Thumbnails instead feed a colourful
+/// UV gradient + checker grid (with a white border), so fisheye/CRT/bloom-style
+/// effects visibly transform it. Rows are padded to the 256-byte
+/// `COPY_BYTES_PER_ROW_ALIGNMENT`.
+fn write_preview_pattern(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) {
+    let _ = device;
+    let row_bytes = (width * 4) as usize;
+    let stride = row_bytes.div_ceil(256) * 256;
+    let mut data = vec![0u8; stride * height as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let u = x as f32 / width.max(1) as f32;
+            let v = y as f32 / height.max(1) as f32;
+            let checker = ((x / 16) + (y / 16)) % 2 == 0;
+            let border = x < 2 || y < 2 || x + 2 >= width || y + 2 >= height;
+            let (r, g, b) = if border {
+                (255, 255, 255)
+            } else {
+                (
+                    (u * 255.0) as u8,
+                    (v * 255.0) as u8,
+                    if checker { 230 } else { 48 },
+                )
+            };
+            let offset = y as usize * stride + x as usize * 4;
+            data[offset..offset + 4].copy_from_slice(&[r, g, b, 255]);
+        }
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(stride as u32),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// Fill the two 512 × 2 ISF audio textures with a synthetic frame so
+/// audio-reactive shaders animate in a thumbnail (a silent live frame would
+/// leave them black). Row 0 and 1 are identical (mono), like the live pair.
+fn write_preview_audio(queue: &wgpu::Queue, wave: &wgpu::Texture, fft: &wgpu::Texture) {
+    const WIDTH: u32 = 512;
+    let mut wave_data = Vec::with_capacity((WIDTH * 2 * 4) as usize);
+    let mut fft_data = Vec::with_capacity((WIDTH * 2 * 4) as usize);
+    for x in 0..WIDTH {
+        let sample = ((x as f32 / 16.0).sin() * 0.5 + 0.5) * 255.0;
+        let spectrum = (255.0 * (-(x as f32) / 90.0).exp()).clamp(0.0, 255.0);
+        wave_data.extend_from_slice(&[sample as u8, sample as u8, sample as u8, 255]);
+        fft_data.extend_from_slice(&[spectrum as u8, spectrum as u8, spectrum as u8, 255]);
+    }
+    for data in [&wave_data, &fft_data] {
+        // Two identical rows.
+        let mut rows = Vec::with_capacity(data.len() * 2);
+        rows.extend_from_slice(data);
+        rows.extend_from_slice(data);
+        let texture = if std::ptr::eq(data, &wave_data) {
+            wave
+        } else {
+            fft
+        };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rows,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 4),
+                rows_per_image: Some(2),
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
 /// Why a preview request could not be answered.
 ///
 /// Both preview kinds share this type: `preview/module` produces
@@ -261,6 +364,10 @@ enum PreviewState {
     Isf {
         /// The compiled passes, uniforms and buffers.
         compiled: CompiledIsf,
+        /// Full-size test card bound to every `image` input.
+        input: OutputTexture,
+        /// Synthetic `audio`/`audioFFT` pair when the shader declares them.
+        audio: Option<(OutputTexture, OutputTexture)>,
         /// Clock of the previous request, for `TIMEDELTA`.
         last_time: Option<f32>,
     },
@@ -305,15 +412,13 @@ pub struct ModulePreviews {
     executor: Executor,
     /// Textures registered for those composites; emptied after each one.
     surfaces: TextureSurfaces,
-    /// 1 × 1 transparent texture bound to every ISF `image` input.
-    dummy_image: OutputTexture,
     /// Cache, most recently used first.
     slots: Vec<PreviewSlot>,
 }
 
 impl ModulePreviews {
-    /// Build the isolated renderer (one extra shader renderer, one ISF
-    /// runtime and the small dummy texture — no output-sized allocations).
+    /// Build the isolated renderer (one extra shader renderer and one ISF
+    /// runtime; the per-slot test cards are output-sized).
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let shader = ShaderRenderer::new(device.clone(), queue.clone(), TARGET_FORMAT);
         let isf_runtime = IsfRuntime::new(device.clone(), queue.clone(), ISF_PIPELINE_CACHE);
@@ -332,8 +437,6 @@ impl ModulePreviews {
             border_color: None,
         });
         let executor = Executor::new(device, queue);
-        let dummy_image = create_output_texture(device, "modv-preview-image-input", 1, 1);
-        clear_texture(device, queue, &dummy_image.texture, "preview-dummy-clear");
 
         Self {
             device: device.clone(),
@@ -343,7 +446,6 @@ impl ModulePreviews {
             sampler,
             executor,
             surfaces: TextureSurfaces::new(),
-            dummy_image,
             slots: Vec::new(),
         }
     }
@@ -468,12 +570,7 @@ impl ModulePreviews {
                     width,
                     height,
                 );
-                clear_texture(
-                    &self.device,
-                    &self.queue,
-                    &input.texture,
-                    "preview-shader-input-clear",
-                );
+                write_preview_pattern(&self.device, &self.queue, &input.texture, width, height);
                 PreviewState::Shader { pipeline, input }
             }
             ModuleKind::TwoD => {
@@ -528,8 +625,38 @@ impl ModulePreviews {
                     .isf_runtime
                     .compile(&definition.document, &definition.name, TARGET_FORMAT)
                     .map_err(|error| PreviewError::Render(error.to_string()))?;
+                let input = create_output_texture(
+                    &self.device,
+                    &format!("modv-preview-isf-input-{module_name}"),
+                    width,
+                    height,
+                );
+                write_preview_pattern(&self.device, &self.queue, &input.texture, width, height);
+                let needs_audio = definition
+                    .document
+                    .inputs
+                    .iter()
+                    .any(|input| input.type_ == "audio" || input.type_ == "audioFFT");
+                let audio = needs_audio.then(|| {
+                    let wave = create_output_texture(
+                        &self.device,
+                        &format!("modv-preview-isf-wave-{module_name}"),
+                        512,
+                        2,
+                    );
+                    let fft = create_output_texture(
+                        &self.device,
+                        &format!("modv-preview-isf-fft-{module_name}"),
+                        512,
+                        2,
+                    );
+                    write_preview_audio(&self.queue, &wave.texture, &fft.texture);
+                    (wave, fft)
+                });
                 PreviewState::Isf {
                     compiled,
+                    input,
+                    audio,
                     last_time: None,
                 }
             }
@@ -565,7 +692,6 @@ impl ModulePreviews {
             sampler,
             executor,
             surfaces,
-            dummy_image,
             slots,
         } = self;
 
@@ -739,6 +865,8 @@ impl ModulePreviews {
             }
             PreviewState::Isf {
                 compiled,
+                input,
+                audio: preview_audio,
                 last_time,
             } => {
                 let definition = registry.isf_definition(module_name).ok_or_else(|| {
@@ -753,15 +881,14 @@ impl ModulePreviews {
                 };
                 *last_time = Some(frame.time_seconds);
 
-                // No group canvas exists for a thumbnail: every `image` input
-                // samples one transparent 1 × 1 dummy (the runtime's own
-                // fallback shape), so the module renders over "nothing".
+                // No group canvas exists for a thumbnail: filters sample the
+                // test card so an effect is visible instead of a blank tile.
                 let image_inputs: Vec<(&str, &wgpu::TextureView)> = definition
                     .document
                     .inputs
                     .iter()
                     .filter(|input| input.type_ == "image")
-                    .map(|input| (input.name.as_str(), &dummy_image.view))
+                    .map(|decl| (decl.name.as_str(), &input.view))
                     .collect();
                 let values = isf_values(&definition.document, props);
                 let uniforms = IsfFrameUniforms {
@@ -779,9 +906,13 @@ impl ModulePreviews {
                         uniforms,
                         &values,
                         &image_inputs,
-                        // Audio inputs stay on the runtime's transparent
-                        // dummy until the engine audio feed lands (WS-9/M6).
-                        &[],
+                        // Audio-reactive filters get a synthetic spectrum so
+                        // a thumbnail animates even when the live frame is
+                        // silent.
+                        &preview_audio
+                            .as_ref()
+                            .map(|(wave, fft)| vec![("audio", &wave.view), ("audioFFT", &fft.view)])
+                            .unwrap_or_default(),
                     )
                     .map_err(|error| PreviewError::Render(error.to_string()))?;
             }

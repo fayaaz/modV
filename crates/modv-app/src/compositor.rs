@@ -3972,26 +3972,28 @@ mod tests {
     }
 
     #[test]
-    fn module_preview_renders_a_shader_over_a_transparent_input() {
+    fn module_preview_feeds_effects_a_visible_test_card() {
         let Some(engine) = try_engine() else {
             return;
         };
         let registry = ModuleRegistry::builtin();
         let mut compositor = Compositor::new(&engine.device, &engine.queue);
 
+        // Point10 Invert inverts the test card instead of an empty input, so a
+        // tile shows the effect rather than opaque white/black.
         let pixels = compositor
             .render_module_preview(&registry, "Point10 Invert", 48, 32)
             .expect("shader preview renders");
         assert_eq!(pixels.len(), (48 * 32 * 4) as usize);
-        // The shader pass clears its target to opaque black; Invert turns the
-        // transparent input into opaque white (`c = 1 - canvas`, and the
-        // mainImage wrapper forces alpha 1).
-        for (index, chunk) in pixels.chunks_exact(4).enumerate() {
-            assert!(
-                chunk[0] >= 250 && chunk[1] >= 250 && chunk[2] >= 250 && chunk[3] >= 250,
-                "pixel {index} is {chunk:?}, expected opaque white"
-            );
-        }
+        let first = &pixels[0..3];
+        assert!(
+            pixels.chunks_exact(4).any(|chunk| chunk[0..3] != first[..]),
+            "the inverted test card is uniform"
+        );
+        assert!(
+            pixels.chunks_exact(4).any(|chunk| chunk[3] > 0),
+            "the effect preview is fully transparent"
+        );
 
         // The isolated renderer never touches the live module state.
         assert!(compositor.slots.is_empty());
@@ -4065,10 +4067,18 @@ mod tests {
         let pixels = compositor
             .render_module_preview(&registry, "Color Invert", 32, 32)
             .expect("ISF preview renders");
-        // A filter over a transparent 1×1 input may be fully transparent, so
-        // the frame *shape* is the contract here: exactly one tightly packed
-        // RGBA8 frame at the requested size.
         assert_eq!(pixels.len(), (32 * 32 * 4) as usize);
+        // Filters sample the test card, so the thumbnail is non-uniform and
+        // (for an invert over an opaque card) opaque.
+        let first = &pixels[0..3];
+        assert!(
+            pixels.chunks_exact(4).any(|chunk| chunk[0..3] != first[..]),
+            "the ISF filter preview is uniform/blank"
+        );
+        assert!(
+            pixels.chunks_exact(4).all(|chunk| chunk[3] > 0),
+            "Color Invert over an opaque card should be opaque"
+        );
     }
 
     #[test]
