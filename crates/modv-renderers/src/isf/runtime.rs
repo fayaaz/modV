@@ -16,9 +16,12 @@
 //!    into this frame; within a frame, pass N+1 reads the *previous* frame's
 //!    pass N output, not this frame's. That one-frame lag is in the
 //!    JavaScript renderer and is preserved here.
-//! 3. If the final pass wrote to a target, that buffer is blitted to the
+//! 3. If the **final** pass wrote to a target, that buffer is blitted to the
 //!    destination (`paintToScreen`) — sampling the just-written texture,
-//!    because the flip happens first.
+//!    because the flip happens first. If the final pass is implicit it
+//!    already rendered into the destination, so *no* blit happens: a
+//!    pre-final buffer is never painted over the result (30 corpus shaders
+//!    end in an implicit pass).
 //!
 //! # Buffer formats (`float-buffer-support.js`)
 //!
@@ -60,11 +63,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use super::parser::{IsfDocument, IsfPass};
+use super::props::truthy;
 use super::source::{
     self, SizeVars, TextureBinding, UniformKind, UniformLayout, UniformSource, evaluate_size,
     uniform_layout, uniform_members,
 };
-use super::translate::{self, TranslateError};
+use super::translate::{self, ShaderOrigin, TranslateError};
 
 /// Uniform-buffer stride per pass. 256 bytes is
 /// `wgpu::Limits::default().min_uniform_buffer_offset_alignment`, so dynamic
@@ -126,16 +130,35 @@ fn fs_main(input: BlitOut) -> @location(0) vec4<f32> {
 "#;
 
 /// Per-frame clock values, from `ISFRenderer.setDateUniforms`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IsfFrameUniforms {
     /// `TIME` — seconds since the engine started.
     pub time: f32,
     /// `TIMEDELTA` — seconds since the previous frame.
     pub time_delta: f32,
-    /// `FRAMEINDEX` — the JavaScript starts at 1 (`frameIndex += 1`).
+    /// `FRAMEINDEX` — 1-based frame counter.
+    ///
+    /// `ISFRenderer` initialises `frameIndex = 0` and does `frameIndex += 1`
+    /// *before* the first draw (`setDateUniforms`, `ISFRenderer.js:402-418`),
+    /// so the first presented frame sees `1`. [`Default`] matches that first
+    /// frame rather than starting at 0, and callers feeding a 0-based frame
+    /// number (the engine's own `FrameInfo::frame_index`) must add one.
     pub frame_index: i32,
     /// `DATE` — `[year, month 1-based, day, seconds since midnight]`.
     pub date: [f32; 4],
+}
+
+impl Default for IsfFrameUniforms {
+    /// The first frame, as the JavaScript renderer presents it: time 0 and
+    /// `FRAMEINDEX` 1.
+    fn default() -> Self {
+        Self {
+            time: 0.0,
+            time_delta: 0.0,
+            frame_index: 1,
+            date: [0.0; 4],
+        }
+    }
 }
 
 /// A coerced ISF input value for one frame.
@@ -162,6 +185,19 @@ impl IsfValue {
             IsfValue::Bool(value) => Some(if value { 1.0 } else { 0.0 }),
             IsfValue::Vec2(_) | IsfValue::Vec4(_) => None,
         }
+    }
+
+    /// Coerce a prop / preset / input-link JSON value for a `bool` or `event`
+    /// input.
+    ///
+    /// This is JavaScript `!!value` ([`truthy`]), not `Value::as_bool()`:
+    /// a numeric `1`, the string `"1"` and the string `"false"` are all
+    /// **true**, `0`, `""` and `null` are false. `Value::as_bool()` returns
+    /// `None` for every non-boolean, so `as_bool().unwrap_or(false)` used to
+    /// turn every numeric `1` into `false` (R-26). Engine prop coercion must
+    /// use this helper.
+    pub fn coerce_bool(value: Option<&serde_json::Value>) -> IsfValue {
+        IsfValue::Bool(value.is_some_and(truthy))
     }
 }
 
@@ -270,15 +306,14 @@ impl<K: PartialEq, V> BoundedCache<K, V> {
             entry.2 = self.clock;
             return;
         }
-        if self.entries.len() >= self.capacity {
-            if let Some((index, _)) = self
+        if self.entries.len() >= self.capacity
+            && let Some((index, _)) = self
                 .entries
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, (_, _, used))| *used)
-            {
-                self.entries.remove(index);
-            }
+        {
+            self.entries.remove(index);
         }
         self.entries.push((key, value, self.clock));
     }
@@ -453,7 +488,11 @@ pub struct CompiledIsf {
     pub uniform_stride: u64,
     /// The format pipelines were compiled for.
     pub target_format: wgpu::TextureFormat,
-    /// The pass that paints to the destination (the last pass with a target).
+    /// The device's `max_texture_dimension_2d`, used to clamp pass sizes.
+    pub max_texture_dimension: u32,
+    /// The buffer painted to the destination after the passes: `Some` only
+    /// when the **final** pass declares a `TARGET` (an implicit final pass
+    /// already renders into the destination, so nothing is blitted).
     pub last_target: Option<usize>,
     pass_pipelines: Vec<wgpu::RenderPipeline>,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -472,13 +511,15 @@ impl fmt::Debug for CompiledIsf {
 }
 
 impl CompiledIsf {
-    /// Evaluate a pass target size for this frame.    ///
+    /// Evaluate a pass target size for this frame.
+    ///
     /// `None` for the implicit destination pass (`target.is_none()`) — its
     /// size is the destination size.
     pub fn evaluate_pass_size(
         &self,
         pass_index: usize,
         target_size: [u32; 2],
+        uniforms: IsfFrameUniforms,
         values: &IsfValues,
     ) -> Result<Option<[u32; 2]>, IsfRuntimeError> {
         let pass = self
@@ -496,7 +537,13 @@ impl CompiledIsf {
         // JS initialises every uniform to its DEFAULT at load).
         let mut merged = self.default_values.clone();
         merged.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
-        let vars = size_vars(target_size, &merged);
+        let vars = size_vars(
+            target_size,
+            pass_index,
+            uniforms,
+            &merged,
+            self.max_texture_dimension,
+        );
         let width = evaluate_size(&pass.width_expr, &vars).map_err(|error| {
             IsfRuntimeError::InvalidPassSize {
                 pass: pass_index,
@@ -518,14 +565,25 @@ impl CompiledIsf {
     }
 }
 
-fn size_vars(target_size: [u32; 2], values: &IsfValues) -> SizeVars {
+fn size_vars(
+    target_size: [u32; 2],
+    pass_index: usize,
+    uniforms: IsfFrameUniforms,
+    values: &IsfValues,
+    max_dimension: u32,
+) -> SizeVars {
     SizeVars {
         width: target_size[0] as f64,
         height: target_size[1] as f64,
+        time: f64::from(uniforms.time),
+        time_delta: f64::from(uniforms.time_delta),
+        frame_index: f64::from(uniforms.frame_index),
+        pass_index: pass_index as f64,
         inputs: values
             .iter()
             .filter_map(|(name, value)| value.as_f64().map(|value| (name.clone(), value)))
             .collect(),
+        max_dimension,
     }
 }
 
@@ -659,10 +717,13 @@ impl IsfRuntime {
 
     /// Compile `doc` for `target_format`.
     ///
-    /// Translation uses [`translate::translate_named_with_overrides`], so
-    /// `<name>.wgsl` overrides apply. The pipeline is cached in the runtime's
-    /// bounded LRU; the returned [`CompiledIsf`] owns its buffers and uniform
-    /// buffer and keeps a cloned pipeline handle.
+    /// Translation uses [`translate::translate_named_with_overrides`] with
+    /// [`ShaderOrigin::External`]: `<name>.wgsl` overrides apply only when the
+    /// shader body matches the fingerprint manifest, so a user media shader
+    /// that shares a corpus name does not silently inherit corpus behaviour.
+    /// The pipeline is cached in the runtime's bounded LRU; the returned
+    /// [`CompiledIsf`] owns its buffers and uniform buffer and keeps a cloned
+    /// pipeline handle.
     pub fn compile(
         &mut self,
         doc: &IsfDocument,
@@ -673,11 +734,14 @@ impl IsfRuntime {
             name,
             doc,
             Some(&translate::default_overrides_dir()),
+            ShaderOrigin::External,
         )?;
         let wgsl = translated
             .wgsl
             .ok_or_else(|| IsfRuntimeError::MissingEntryPoint(name.to_string()))?;
-        if !wgsl.contains("fn main") {
+        // A real parse + entry-point lookup, not `wgsl.contains("fn main")`:
+        // a comment could satisfy a substring check (R-26).
+        if !translate::has_fragment_main(&wgsl)? {
             return Err(IsfRuntimeError::MissingEntryPoint(name.to_string()));
         }
 
@@ -835,7 +899,12 @@ impl IsfRuntime {
             mapped_at_creation: false,
         });
 
-        let last_target = passes.iter().rev().find_map(|pass| pass.target);
+        // Only the **final** pass decides the paint-to-screen blit: `ISFRenderer.draw`
+        // resets `lastTarget = null` on every implicit pass, so a shader that
+        // ends with an implicit pass already rendered into the destination and
+        // must not have a pre-final buffer blitted over it (R-1: 30 corpus
+        // shaders have the `[{TARGET: …}, {…}, {}]` shape).
+        let last_target = passes.last().and_then(|pass| pass.target);
         let default_values = default_values(doc);
 
         // A pipeline is fixed to one colour-target format, and the
@@ -869,6 +938,7 @@ impl IsfRuntime {
             uniform_buffer,
             uniform_stride,
             target_format,
+            max_texture_dimension: self.device.limits().max_texture_dimension_2d.max(1),
             last_target,
             pass_pipelines,
             bind_group_layout,
@@ -939,6 +1009,7 @@ impl IsfRuntime {
     /// * `input_images` — `(NAME, view)` for `image` inputs. A missing name
     ///   binds a 1×1 transparent dummy.
     /// * `audio_textures` — `(NAME, view)` for `audio`/`audioFFT` inputs.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         compiled: &mut CompiledIsf,
@@ -954,7 +1025,7 @@ impl IsfRuntime {
         // 1. Size every buffer for this frame.
         for index in 0..compiled.passes.len() {
             if let Some([width, height]) =
-                compiled.evaluate_pass_size(index, target_size, values)?
+                compiled.evaluate_pass_size(index, target_size, uniforms, values)?
             {
                 let target = compiled.passes[index].target.expect("target was Some");
                 compiled.buffers[target].ensure_size(&self.device, width, height);
@@ -1091,7 +1162,10 @@ impl IsfRuntime {
             buffer.flip();
         }
 
-        // 7. Paint the final target to the destination.
+        // 7. Paint the final target to the destination. An implicit final pass
+        //    already rendered straight into it, so there is nothing to paint
+        //    (`last_target` is `None`) and a pre-final buffer is never blitted
+        //    over the result.
         if let Some(target) = compiled.last_target {
             let source = compiled.buffers[target].read_view();
             self.blit(&mut encoder, source, target_view, compiled.target_format);
@@ -1217,12 +1291,7 @@ fn default_values(doc: &IsfDocument) -> IsfValues {
                     .or_else(|| input.default.as_f64().map(|value| value as i64))
                     .unwrap_or(0) as i32,
             ),
-            "bool" | "event" => IsfValue::Bool(match &input.default {
-                serde_json::Value::Bool(value) => *value,
-                serde_json::Value::Number(number) => number.as_f64().is_some_and(|v| v != 0.0),
-                serde_json::Value::String(text) => !text.is_empty(),
-                _ => false,
-            }),
+            "bool" | "event" => IsfValue::Bool(truthy(&input.default)),
             "point2D" => {
                 let array = input.default.as_array();
                 IsfValue::Vec2([
@@ -1428,13 +1497,9 @@ mod tests {
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        use std::task::{Context, Poll, Wake};
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: std::sync::Arc<Self>) {}
-        }
-        let waker = std::sync::Arc::new(NoopWaker).into();
-        let mut context = Context::from_waker(&waker);
+        use std::task::{Context, Poll};
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
         let mut future = std::pin::pin!(future);
         loop {
             match future.as_mut().poll(&mut context) {
@@ -1574,20 +1639,39 @@ mod tests {
             )
             .expect("compiles");
         assert_eq!(
+            compiled.last_target, None,
+            "Soft Blur ends with an implicit pass, so nothing is blitted"
+        );
+        assert_eq!(
             compiled
-                .evaluate_pass_size(0, [1280, 720], &IsfValues::new())
+                .evaluate_pass_size(
+                    0,
+                    [1280, 720],
+                    IsfFrameUniforms::default(),
+                    &IsfValues::new(),
+                )
                 .expect("evaluates"),
             Some([25, 14])
         );
         assert_eq!(
             compiled
-                .evaluate_pass_size(1, [1280, 720], &IsfValues::new())
+                .evaluate_pass_size(
+                    1,
+                    [1280, 720],
+                    IsfFrameUniforms::default(),
+                    &IsfValues::new(),
+                )
                 .expect("evaluates"),
             Some([320, 180])
         );
         assert_eq!(
             compiled
-                .evaluate_pass_size(2, [1280, 720], &IsfValues::new())
+                .evaluate_pass_size(
+                    2,
+                    [1280, 720],
+                    IsfFrameUniforms::default(),
+                    &IsfValues::new(),
+                )
                 .expect("evaluates"),
             None,
             "the implicit final pass uses the destination size"
@@ -1604,7 +1688,7 @@ mod tests {
             .expect("compiles");
         assert_eq!(
             compiled
-                .evaluate_pass_size(0, [100, 40], &IsfValues::new())
+                .evaluate_pass_size(0, [100, 40], IsfFrameUniforms::default(), &IsfValues::new(),)
                 .expect("evaluates"),
             Some([50, 40]),
             "the DEFAULT is used when no value is supplied"
@@ -1613,7 +1697,7 @@ mod tests {
         values.insert("scale".into(), IsfValue::Float(0.25));
         assert_eq!(
             compiled
-                .evaluate_pass_size(0, [100, 40], &values)
+                .evaluate_pass_size(0, [100, 40], IsfFrameUniforms::default(), &values,)
                 .expect("evaluates"),
             Some([25, 40])
         );
@@ -1691,7 +1775,7 @@ mod tests {
         let pixels =
             read_texture(runtime.device(), &runtime.queue, &destination).expect("read back");
         // 1.0 - 64/255 = 191/255, 1 - 128/255 = 127, 1 - 192/255 = 63.
-        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
             assert!(
                 (pixel[0] as i16 - 191).abs() <= 1,
                 "pixel {index} r = {}",
@@ -1837,11 +1921,10 @@ mod tests {
         let pixels =
             read_texture(runtime.device(), &runtime.queue, &destination).expect("read back");
         let pixel = &pixels[..4];
-        for channel in 0..3 {
+        for (channel, value) in pixel.iter().take(3).enumerate() {
             assert!(
-                (pixel[channel] as i16 - 2).abs() <= 1,
-                "channel {channel} = {} after two accumulate frames",
-                pixel[channel]
+                (*value as i16 - 2).abs() <= 1,
+                "channel {channel} = {value} after two accumulate frames"
             );
         }
     }
@@ -1973,6 +2056,78 @@ mod tests {
         assert_eq!(&pixels[..4], &[255, 255, 255, 255]);
     }
 
+    /// Regression (R-1): a shader whose **final** pass is implicit must not be
+    /// overwritten by a blit of the last *targeted* buffer.
+    ///
+    /// `ISFRenderer.draw` (`ISFRenderer.js`, `lastTarget` reset on every
+    /// implicit pass) only paints a buffer to the screen when the *final* pass
+    /// declares a `TARGET`; otherwise the implicit final pass already rendered
+    /// straight into the destination. Taking the last targeted pass instead
+    /// (Soft Blur, Glow, Lens Flare, rgbtimeglitch, …) blits the pre-final
+    /// buffer over the result, discarding the final pass.
+    #[test]
+    fn trailing_implicit_final_pass_is_not_overwritten_by_a_blit() {
+        let Some(mut runtime) = try_runtime() else {
+            eprintln!("skipping ISF trailing-implicit test: no adapter");
+            return;
+        };
+        let shader = r#"/*{
+            "PASSES": [ { "TARGET": "tinted" }, { } ]
+        }*/
+        void main() {
+            if (PASSINDEX == 0) {
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            } else {
+                gl_FragColor = IMG_NORM_PIXEL(tinted, isf_FragNormCoord)
+                    + vec4(0.0, 0.0, 1.0, 0.0);
+            }
+        }"#;
+        let document = doc(shader);
+        let mut compiled = runtime
+            .compile(
+                &document,
+                "Trailing Implicit Test",
+                wgpu::TextureFormat::Rgba8Unorm,
+            )
+            .expect("compiles");
+        assert_eq!(compiled.passes.len(), 2);
+        assert_eq!(
+            compiled.last_target, None,
+            "the final pass is implicit, so nothing is painted over the destination"
+        );
+
+        let destination = target(&runtime, 16, wgpu::TextureFormat::Rgba8Unorm);
+        let view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        // Frame 1 fills `tinted`; frame 2's final pass reads it (the vendored
+        // renderer flips buffers once per frame).
+        for frame in 0..2 {
+            runtime
+                .draw(
+                    &mut compiled,
+                    &view,
+                    [16, 16],
+                    IsfFrameUniforms {
+                        frame_index: frame,
+                        ..Default::default()
+                    },
+                    &IsfValues::new(),
+                    &[],
+                    &[],
+                )
+                .expect("draws");
+        }
+
+        let pixels =
+            read_texture(runtime.device(), &runtime.queue, &destination).expect("read back");
+        let pixel = &pixels[..4];
+        assert_eq!(
+            pixel,
+            &[255, 0, 255, 255],
+            "the destination must hold the implicit final pass (red + blue), not \
+             the pre-final buffer (red)"
+        );
+    }
+
     #[test]
     fn clear_false_preserves_the_buffer() {
         let Some(mut runtime) = try_runtime() else {
@@ -2012,6 +2167,84 @@ mod tests {
             (pixels[0] as i16 - 64).abs() <= 1,
             "green channel {}",
             pixels[0]
+        );
+    }
+
+    #[test]
+    fn frame_uniform_defaults_match_the_first_javascript_frame() {
+        // `ISFRenderer` increments `frameIndex` to 1 before the first draw, so
+        // a default-constructed frame is frame 1, not 0 (R-26).
+        let defaults = IsfFrameUniforms::default();
+        assert_eq!(defaults.frame_index, 1);
+        assert_eq!(defaults.time, 0.0);
+        assert_eq!(defaults.time_delta, 0.0);
+    }
+
+    #[test]
+    fn bool_inputs_use_javascript_truthiness() {
+        // `!!value`, not `Value::as_bool()`: numeric 1 and the strings "1" and
+        // "false" are all true (R-26).
+        let one = serde_json::json!(1);
+        let zero = serde_json::json!(0);
+        let text = serde_json::json!("1");
+        let words = serde_json::json!("false");
+        let empty = serde_json::json!("");
+        let nothing = serde_json::Value::Null;
+        assert_eq!(IsfValue::coerce_bool(Some(&one)), IsfValue::Bool(true));
+        assert_eq!(IsfValue::coerce_bool(Some(&zero)), IsfValue::Bool(false));
+        assert_eq!(IsfValue::coerce_bool(Some(&text)), IsfValue::Bool(true));
+        assert_eq!(IsfValue::coerce_bool(Some(&words)), IsfValue::Bool(true));
+        assert_eq!(IsfValue::coerce_bool(Some(&empty)), IsfValue::Bool(false));
+        assert_eq!(IsfValue::coerce_bool(Some(&nothing)), IsfValue::Bool(false));
+        assert_eq!(IsfValue::coerce_bool(None), IsfValue::Bool(false));
+
+        // The document default path agrees.
+        let document = doc(
+            r#"/*{ "INPUTS": [ { "NAME": "on", "TYPE": "bool", "DEFAULT": 1 } ] }*/
+            void main() { gl_FragColor = vec4(on ? 1.0 : 0.0); }"#,
+        );
+        assert_eq!(
+            default_values(&document).get("on"),
+            Some(&IsfValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn pass_sizes_clamp_to_the_device_limit_and_see_runtime_scalars() {
+        let Some(mut runtime) = try_runtime() else {
+            eprintln!("skipping ISF size clamp test: no adapter");
+            return;
+        };
+        let shader = r#"/*{
+            "PASSES": [
+                { "TARGET": "huge", "WIDTH": "$WIDTH * 1000000", "HEIGHT": "$HEIGHT * 1000000" },
+                { "TARGET": "small", "WIDTH": "floor($FRAMEINDEX * 4.0)", "HEIGHT": "$PASSINDEX + 2.0" }
+            ]
+        }*/
+        void main() { gl_FragColor = vec4(1.0); }"#;
+        let document = doc(shader);
+        let compiled = runtime
+            .compile(&document, "Size Clamp", wgpu::TextureFormat::Rgba8Unorm)
+            .expect("compiles");
+        let limit = runtime.device().limits().max_texture_dimension_2d.max(1);
+        assert_eq!(compiled.max_texture_dimension, limit);
+        assert_eq!(
+            compiled
+                .evaluate_pass_size(0, [64, 64], IsfFrameUniforms::default(), &IsfValues::new(),)
+                .expect("evaluates"),
+            Some([limit, limit]),
+            "a gigapixel formula clamps to max_texture_dimension_2d"
+        );
+        let uniforms = IsfFrameUniforms {
+            frame_index: 3,
+            ..IsfFrameUniforms::default()
+        };
+        assert_eq!(
+            compiled
+                .evaluate_pass_size(1, [64, 64], uniforms, &IsfValues::new())
+                .expect("evaluates"),
+            Some([12, 3]),
+            "$FRAMEINDEX and $PASSINDEX are substituted"
         );
     }
 }

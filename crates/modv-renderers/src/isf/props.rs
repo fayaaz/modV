@@ -193,15 +193,20 @@ fn label_of(input: &IsfInput) -> String {
     input.label.clone().unwrap_or_else(|| input.name.clone())
 }
 
-/// JavaScript `Boolean(value)`.
-fn truthy(value: &Value) -> bool {
+/// JavaScript `Boolean(value)` (`!!value`).
+///
+/// Mirrors the JS the engine must match: only `null`, `false`, `0`, `NaN`, `""`
+/// and `undefined` are falsy. In particular `1` and `"1"` are true and `"false"`
+/// is true, which is why `serde_json::Value::as_bool()` is the wrong coercion
+/// for ISF `bool`/`event` props.
+pub fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(value) => *value,
         Value::Number(number) => number.as_f64().is_some_and(|value| value != 0.0),
         Value::String(text) => !text.is_empty(),
-        Value::Array(array) => !array.is_empty(),
-        Value::Object(_) => true,
+        // JavaScript objects and arrays are always truthy, including `[]`/`{}`.
+        Value::Array(_) | Value::Object(_) => true,
     }
 }
 

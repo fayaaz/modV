@@ -355,7 +355,7 @@ fn parse_pass(value: &Value, index: usize) -> Result<IsfPass, IsfParseError> {
     let float = ci_get(object, "FLOAT").is_some_and(truthy);
     // ISF v2 defaults CLEAR to true. `ISFParser` ignores the key entirely
     // (the vendored renderer never clears), but the runtime honours it.
-    let clear = ci_get(object, "CLEAR").map_or(true, truthy);
+    let clear = ci_get(object, "CLEAR").is_none_or(truthy);
     Ok(IsfPass {
         target,
         width,
@@ -392,18 +392,18 @@ fn has_v1_markers(metadata: &Value, fragment: &str, vertex: Option<&str>) -> boo
 /// Returns whether the metadata changed.
 pub fn upgrade_fragment(metadata: &mut Value, passes: &mut [IsfPass], source: &mut String) -> bool {
     let mut changed = false;
-    if let Some(object) = metadata.as_object_mut() {
-        if let Some(Value::Array(names)) = object.remove("PERSISTENT_BUFFERS") {
-            for pass in passes.iter_mut() {
-                let Some(target) = pass.target.as_deref() else {
-                    continue;
-                };
-                if names.iter().any(|name| name.as_str() == Some(target)) {
-                    pass.persistent = true;
-                }
+    if let Some(object) = metadata.as_object_mut()
+        && let Some(Value::Array(names)) = object.remove("PERSISTENT_BUFFERS")
+    {
+        for pass in passes.iter_mut() {
+            let Some(target) = pass.target.as_deref() else {
+                continue;
+            };
+            if names.iter().any(|name| name.as_str() == Some(target)) {
+                pass.persistent = true;
             }
-            changed = true;
         }
+        changed = true;
     }
     let renamed = source.replace("vv_FragNormCoord", "isf_FragNormCoord");
     if renamed != *source {

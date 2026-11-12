@@ -11,13 +11,68 @@ overrides/<shader-name>.wgsl
 `<shader-name>` is the `.fs` file stem exactly as it appears in
 `src/renderer/src/application/renderers/isf/modules/isf`, spaces and case
 included — e.g. `Soft Blur.fs` → `Soft Blur.wgsl`. The lookup is performed by
-`translate_named` / `IsfRuntime::compile`, keyed by the name the caller
-passes, so a shader loaded from a user media folder must use the same name.
-`MODV_ISF_OVERRIDES_DIR` redirects the directory (used by tests).
+`translate_named_with_overrides` / `IsfRuntime::compile`, keyed by the name the
+caller passes.
 
-Overrides are validated with naga's WGSL front-end before use; an invalid
-override is reported as `TranslateError::InvalidOverride` instead of silently
-falling back.
+## Shipping: the directory is embedded in the binary
+
+`build.rs` embeds every `*.wgsl` file in this directory with `include_str!`
+(`isf::translate::EMBEDDED_OVERRIDES`), so a packaged engine carries the
+overrides — there is no data directory next to the executable and
+`electron-builder.yml` needs no extra resource. Adding, editing or deleting an
+override only needs a rebuild; `cargo:rerun-if-changed` tracks the directory.
+
+Lookup order:
+
+1. `MODV_ISF_OVERRIDES_DIR` (or the committed directory in a development
+   checkout), so tests and local experiments can shadow the embedded copy;
+2. the embedded table.
+
+`src/isf/overrides` remains the source of truth; nothing is generated into the
+repository.
+
+## Name collisions: the fingerprint guard
+
+The file stem alone cannot prove that a shader is the corpus shader it is named
+after. An override therefore applies only when
+
+* the shader is known to come from the bundled corpus
+  (`isf::translate::ShaderOrigin::Corpus`, used by the corpus report), or
+* the parsed `IsfDocument::fragment_source` matches the fingerprint recorded for
+  that name in `crates/modv-renderers/data/isf-overrides.json`
+  (`isf::translate::document_fingerprint`, `fnv64:<hex>`), which is how
+  `IsfRuntime::compile` treats every shader.
+
+A user media shader called `Soft Blur.fs` with different source therefore
+translates (or fails) on its own merits instead of silently inheriting corpus
+behaviour. When you add or update an override, add the corpus file's
+fingerprint:
+
+```json
+{
+  "overrides": {
+    "Soft Blur": "fnv64:0123456789abcdef"
+  }
+}
+```
+
+## Validation
+
+An override is parsed and validated with naga, then checked against the exact
+binding contract the runtime generates for that shader: a `@fragment fn main`,
+a `@location(0) vec4<f32>` output, the `IsfUniforms` members in the generated
+order and types, and every texture/sampler binding pair. Anything else is
+reported as `TranslateError::InvalidOverride` when the shader is compiled,
+instead of a wgpu validation panic at pipeline creation. `cargo test -p
+modv-renderers` also asserts that every file here is present in
+`EMBEDDED_OVERRIDES`.
+
+## Rect samplers
+
+`texture2DRect`/`sampler2DRect` are rejected with
+`TranslateError::Unsupported` rather than rewritten to normalised `texture()`.
+They sample in pixel coordinates, so the rewrite produced silently wrong
+output; those shaders need a real `textureLoad` override.
 
 ## The binding contract
 
@@ -73,9 +128,21 @@ exactly the contract the runtime generates for the shader it replaces:
   provided by the built-in vertex stage (`runtime::DEFAULT_VERTEX_WGSL`).
   Do not add further entry-point inputs.
 
+* **`FRAMEINDEX`** is 1-based, as in `ISFRenderer.setDateUniforms`: the
+  renderer increments its counter before the first draw, so the first
+  presented frame sees `1` (not `0`). `IsfFrameUniforms::default()` matches
+  that first frame.
+
+The validator checks the entry point, the `IsfUniforms` member list/order/
+types and every texture/sampler binding pair, so a mismatch is a
+`TranslateError::InvalidOverride` naming the offending member or binding.
+
 Pass semantics are unchanged from ISF: the same module is used for every
-pass, `PASSINDEX` selects the branch, and the final pass with a `TARGET` is
-blitted to the destination by the runtime.
+pass, `PASSINDEX` selects the branch, and the final pass decides the output.
+A final pass **with** a `TARGET` renders into that buffer and the runtime then
+blits it to the destination; an **implicit** final pass (no `TARGET`) renders
+directly to the destination and nothing else is blitted — the same contract as
+`ISFRenderer.draw`, which resets `lastTarget` on every implicit pass.
 
 ## Example
 

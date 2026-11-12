@@ -1,0 +1,4 @@
+{
+  "_comment": "Fingerprints of the corpus shaders the WGSL overrides in src/isf/overrides were written against (see isf/translate.rs, ShaderOrigin::External). Key = override file stem, value = fnv64 of the parsed IsfDocument::fragment_source (`isf::translate::document_fingerprint`). An override only applies to an external (user media) shader when its body hashes to the listed value, so a user shader that shares a corpus name does not inherit corpus behaviour. Corpus-sourced shaders (ShaderOrigin::Corpus) apply overrides by name and do not need an entry here.",
+  "overrides": {}
+}

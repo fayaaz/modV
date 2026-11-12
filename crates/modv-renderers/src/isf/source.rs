@@ -96,6 +96,10 @@
 //! 3. `texture2D` → `texture`, `texture2DProj` → `textureProj`,
 //!    `texture2DLod` → `textureLod`, `texture2DGrad` → `textureGrad`,
 //!    `textureCube` → `texture` (identifier-aware, so `my_texture2D` is safe).
+//!    `texture2DRect`/`sampler2DRect` are **not** rewritten: they sample in
+//!    pixel coordinates, so mapping them to normalised `texture()` would be
+//!    silently wrong. Such shaders are rejected with
+//!    [`super::translate::TranslateError::Unsupported`].
 //! 4. `gl_FragColor` → the declared `isf_FragColor` output.
 //! 5. In the fragment, a shader-declared `in`/`varying`/`uniform` line loses
 //!    its storage qualifier and becomes a plain global (`vec2 x;`), which
@@ -253,15 +257,51 @@ pub struct MemberLayout {
 }
 
 /// Options a size formula is evaluated against.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// The scalar values mirror the uniforms the JavaScript `evaluateSize`
+/// substitutes: `$WIDTH`, `$HEIGHT` and `$<input>`, plus the runtime scalars
+/// `$TIME`, `$TIMEDELTA`, `$FRAMEINDEX` and `$PASSINDEX`. Vector values
+/// (`RENDERSIZE`, `DATE`, `_<texture>_imgSize`) have no scalar spelling and
+/// are rejected as unknown variables, which becomes a per-pass
+/// [`SizeEvalError`] rather than a dead module.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SizeVars {
     /// `$WIDTH` — the destination width in pixels.
     pub width: f64,
     /// `$HEIGHT` — the destination height in pixels.
     pub height: f64,
+    /// `$TIME` — seconds since the engine started.
+    pub time: f64,
+    /// `$TIMEDELTA` — seconds since the previous frame.
+    pub time_delta: f64,
+    /// `$FRAMEINDEX` — the 1-based frame counter.
+    pub frame_index: f64,
+    /// `$PASSINDEX` — the pass being sized.
+    pub pass_index: f64,
     /// `$<inputName>` values (the JavaScript substitutes every uniform's
     /// current value into the formula).
     pub inputs: Vec<(String, f64)>,
+    /// Upper clamp, normally the device's `max_texture_dimension_2d`.
+    pub max_dimension: u32,
+}
+
+/// Conservative upper bound used when no device limit is at hand
+/// (`wgpu::Limits::default().max_texture_dimension_2d`).
+pub const DEFAULT_MAX_TEXTURE_DIMENSION: u32 = 8192;
+
+impl Default for SizeVars {
+    fn default() -> Self {
+        Self {
+            width: 0.0,
+            height: 0.0,
+            time: 0.0,
+            time_delta: 0.0,
+            frame_index: 0.0,
+            pass_index: 0.0,
+            inputs: Vec::new(),
+            max_dimension: DEFAULT_MAX_TEXTURE_DIMENSION,
+        }
+    }
 }
 
 /// The textures a document samples: `image`/`audio`/`audioFFT` inputs in
@@ -399,13 +439,14 @@ fn input_member(input: &IsfInput) -> Option<(String, UniformKind)> {
     Some(member)
 }
 
-/// GLSL 450 keywords naga's lexer recognises as qualifiers/statements.
+/// Words that cannot be used as a GLSL uniform-block member name.
+///
+/// Every name here is prefixed with `isf_input_` in the generated block and in
+/// the shader body — see [`sanitised_input_name`] and [`body_input_renames`].
+/// The *prop* keeps the original name, so presets are unaffected.
 ///
 /// `UltimateSpiral.fs` has an input named `smooth`, which naga tokenises as an
 /// interpolation qualifier, so a block member called `smooth` cannot parse.
-/// Such input names are prefixed with `isf_input_` in the generated block and
-/// in the shader body; the *prop* keeps the original name, so presets are
-/// unaffected.
 pub const RESERVED_INPUT_NAMES: &[&str] = &[
     "layout",
     "in",
@@ -446,6 +487,20 @@ pub const RESERVED_INPUT_NAMES: &[&str] = &[
     "false",
 ];
 
+/// GLSL statement/declaration keywords that a shader body cannot reference as
+/// an identifier.
+///
+/// An input with one of these names still needs a prefixed *declaration*
+/// (`float isf_input_return;`), but its body occurrences are the keywords
+/// themselves: rewriting `return`/`for`/`if` would corrupt every shader that
+/// has a legal-looking input name plus control flow (R-26). Such an input is
+/// unreachable from GLSL source — exactly as it is in the vendored renderer,
+/// where the GLSL compiler rejects the identifier.
+pub const GLSL_STATEMENT_KEYWORDS: &[&str] = &[
+    "if", "else", "switch", "case", "default", "while", "do", "for", "return", "break", "continue",
+    "discard", "struct", "void", "true", "false",
+];
+
 /// The GLSL identifier an input is declared as.
 pub fn sanitised_input_name(name: &str) -> String {
     if RESERVED_INPUT_NAMES.contains(&name) {
@@ -455,11 +510,18 @@ pub fn sanitised_input_name(name: &str) -> String {
     }
 }
 
-/// `(original, sanitised)` pairs for inputs whose name is a reserved word.
-fn input_renames(doc: &IsfDocument) -> Vec<(String, String)> {
+/// `(original, sanitised)` pairs for inputs whose name is a reserved word and
+/// can safely be rewritten in the body.
+///
+/// Statement keywords are excluded: only *declarations* are renamed for those
+/// (see [`GLSL_STATEMENT_KEYWORDS`]).
+fn body_input_renames(doc: &IsfDocument) -> Vec<(String, String)> {
     doc.inputs
         .iter()
         .filter_map(|input| {
+            if GLSL_STATEMENT_KEYWORDS.contains(&input.name.as_str()) {
+                return None;
+            }
             let sanitised = sanitised_input_name(&input.name);
             (sanitised != input.name).then(|| (input.name.clone(), sanitised))
         })
@@ -707,35 +769,54 @@ fn assign_output_locations(body: &str, mut next_location: u32) -> String {
 }
 
 /// Number of vertex-output locations a declaration list consumes.
+///
+/// WGSL gives a matrix one location per column (`mat2` 2, `mat3` 3, `mat4` 4,
+/// `matCxR` C) and an array one location per element, so `mat2 m[3]` consumes
+/// six. Sidecar `out` declarations are numbered from this count; before the
+/// matrix case was handled every matrix was charged a single location.
 fn count_declarators(rest: &str) -> u32 {
     let declaration = rest.trim().trim_end_matches(';');
-    let Some((_, declarators)) = declaration.split_once(char::is_whitespace) else {
+    let Some((type_name, declarators)) = declaration.split_once(char::is_whitespace) else {
         return 0;
     };
+    let per_declarator = matrix_columns(type_name);
     let mut total = 0;
     for declarator in split_args(declarators) {
         let declarator = declarator.trim();
         if declarator.is_empty() {
             continue;
         }
-        let mut count = 1;
-        if let Some(open) = declarator.find('[') {
-            if let Some(close) = declarator[open..].find(']') {
-                if let Ok(size) = declarator[open + 1..open + close].trim().parse::<u32>() {
-                    count = size.max(1);
-                }
-            }
+        let mut count = per_declarator;
+        if let Some(open) = declarator.find('[')
+            && let Some(close) = declarator[open..].find(']')
+            && let Ok(size) = declarator[open + 1..open + close].trim().parse::<u32>()
+        {
+            count = per_declarator.saturating_mul(size.max(1));
         }
         total += count;
     }
     total
 }
 
+/// The number of interface locations a type occupies (`mat3` → 3, anything
+/// else → 1).
+fn matrix_columns(type_name: &str) -> u32 {
+    let name = type_name.strip_prefix('d').unwrap_or(type_name);
+    let Some(rest) = name.strip_prefix("mat") else {
+        return 1;
+    };
+    rest.split('x')
+        .next()
+        .and_then(|columns| columns.parse::<u32>().ok())
+        .unwrap_or(1)
+        .clamp(1, 4)
+}
+
 /// Full fragment body rewrite: macro expansion, ES-isms, sampler call-site
 /// substitution and qualifier stripping.
 pub fn rewrite_fragment_body(doc: &IsfDocument) -> String {
     let mut body = rewrite_fragment_source(&doc.fragment_source, &texture_inputs(doc));
-    for (original, sanitised) in input_renames(doc) {
+    for (original, sanitised) in body_input_renames(doc) {
         body = replace_ident(&body, &original, &sanitised);
     }
     if has_bool_inputs(doc) {
@@ -760,7 +841,7 @@ pub fn rewrite_vertex_body(doc: &IsfDocument) -> String {
         doc.vertex_source.as_deref().unwrap_or(DEFAULT_VERTEX_BODY),
         &texture_inputs(doc),
     );
-    for (original, sanitised) in input_renames(doc) {
+    for (original, sanitised) in body_input_renames(doc) {
         body = replace_ident(&body, &original, &sanitised);
     }
     if has_bool_inputs(doc) {
@@ -799,7 +880,10 @@ fn rewrite_common(source: &str) -> String {
     let out = replace_ident(&out, "texture2DProj", "textureProj");
     let out = replace_ident(&out, "texture2DLod", "textureLod");
     let out = replace_ident(&out, "texture2DGrad", "textureGrad");
-    let out = replace_ident(&out, "texture2DRect", "texture");
+    // `texture2DRect`/`sampler2DRect` are deliberately *not* mapped: they take
+    // pixel coordinates, so sampling them with normalised `texture()` would be
+    // silently wrong. `translate::translate_fragment` rejects those shaders
+    // with `TranslateError::Unsupported` instead.
     let out = replace_ident(&out, "texture2D", "texture");
     replace_ident(&out, "textureCube", "texture")
 }
@@ -817,11 +901,11 @@ fn strip_qualifiers(source: &str, qualifiers: &[&str]) -> String {
         let indent_len = line.len() - trimmed.len();
         let mut replaced = None;
         for qualifier in qualifiers {
-            if let Some(rest) = strip_keyword(trimmed, qualifier) {
-                if rest.trim_end().ends_with(';') {
-                    replaced = Some(format!("{}{}", &line[..indent_len], rest));
-                    break;
-                }
+            if let Some(rest) = strip_keyword(trimmed, qualifier)
+                && rest.trim_end().ends_with(';')
+            {
+                replaced = Some(format!("{}{}", &line[..indent_len], rest));
+                break;
             }
         }
         match replaced {
@@ -863,6 +947,24 @@ pub fn replace_ident(source: &str, from: &str, to: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Whether `name` appears in `source` as a whole identifier.
+///
+/// `contains_ident("my_texture2DRect", "texture2DRect")` is `false`.
+pub fn contains_ident(source: &str, name: &str) -> bool {
+    let mut rest = source;
+    while let Some(position) = rest.find(name) {
+        let (before, after_start) = rest.split_at(position);
+        let after = &after_start[name.len()..];
+        let before_ok = before.chars().next_back().is_none_or(|c| !is_ident_char(c));
+        let after_ok = after.chars().next().is_none_or(|c| !is_ident_char(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -1121,8 +1223,9 @@ impl std::error::Error for SizeEvalError {}
 
 /// Port of `ISFRenderer.evaluateSize` (`ISFRenderer.js:404-421`).
 ///
-/// Substitutes `$WIDTH`, `$HEIGHT` and every `$<input>` value, then evaluates
-/// a deliberately small expression grammar:
+/// Substitutes `$WIDTH`, `$HEIGHT`, the runtime scalars the JavaScript exposes
+/// as uniforms (`$TIME`, `$TIMEDELTA`, `$FRAMEINDEX`, `$PASSINDEX`) and every
+/// `$<input>` value, then evaluates a deliberately small expression grammar:
 ///
 /// ```text
 /// expr    := term (('+' | '-') term)*
@@ -1133,7 +1236,14 @@ impl std::error::Error for SizeEvalError {}
 ///
 /// Functions: `max`, `min` (2 args), `floor`, `ceil`, `abs`, `round`
 /// (1 arg). The result is truncated towards zero (WebGL's `GLsizei`
-/// conversion) and clamped to at least 1 pixel.
+/// conversion), clamped to at least 1 pixel and at most
+/// [`SizeVars::max_dimension`] so a hostile formula cannot request a gigapixel
+/// texture and kill the module with a wgpu validation error.
+///
+/// Vector uniforms (`$RENDERSIZE`, `$DATE`, `$<texture>_imgSize`) have no
+/// scalar spelling: they are [`SizeEvalError::UnknownVariable`], which the
+/// runtime reports as [`super::runtime::IsfRuntimeError::InvalidPassSize`] for
+/// that pass instead of rendering nothing forever.
 pub fn evaluate_size(expr: &str, vars: &SizeVars) -> Result<u32, SizeEvalError> {
     let substituted = substitute_size_vars(expr, vars)?;
     let mut parser = ExprParser::new(&substituted);
@@ -1148,20 +1258,26 @@ pub fn evaluate_size(expr: &str, vars: &SizeVars) -> Result<u32, SizeEvalError> 
     if !value.is_finite() {
         return Err(SizeEvalError::NotFinite);
     }
-    Ok((value.max(0.0) as u32).max(1))
+    let limit = vars.max_dimension.max(1) as f64;
+    Ok((value.max(0.0).min(limit) as u32).max(1))
 }
 
 /// Substitute `$NAME` tokens longest-first (a name that is a prefix of
 /// another must not win — the JavaScript's insertion-order `replace` does not
 /// guarantee that, which matters for e.g. `$size` vs `$sizeFactor`).
 fn substitute_size_vars(expr: &str, vars: &SizeVars) -> Result<String, SizeEvalError> {
-    let mut names: Vec<(&str, String)> = Vec::new();
-    names.push(("WIDTH", format_number(vars.width)));
-    names.push(("HEIGHT", format_number(vars.height)));
+    let mut names: Vec<(&str, String)> = vec![
+        ("WIDTH", format_number(vars.width)),
+        ("HEIGHT", format_number(vars.height)),
+        ("TIME", format_number(vars.time)),
+        ("TIMEDELTA", format_number(vars.time_delta)),
+        ("FRAMEINDEX", format_number(vars.frame_index)),
+        ("PASSINDEX", format_number(vars.pass_index)),
+    ];
     for (name, value) in &vars.inputs {
         names.push((name.as_str(), format_number(*value)));
     }
-    names.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    names.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
 
     let mut out = expr.to_string();
     for (name, value) in names {
@@ -1749,7 +1865,7 @@ void main(void) {
         let vars = SizeVars {
             width: 1280.0,
             height: 720.0,
-            inputs: Vec::new(),
+            ..SizeVars::default()
         };
         assert_eq!(
             evaluate_size("max(floor($WIDTH*0.02),1.0)", &vars).expect("evaluates"),
@@ -1774,7 +1890,7 @@ void main(void) {
         let vars = SizeVars {
             width: 10.0,
             height: 10.0,
-            inputs: Vec::new(),
+            ..SizeVars::default()
         };
         assert_eq!(
             evaluate_size("max(floor($WIDTH*0.02),1.0)", &vars).expect("evaluates"),
@@ -1790,6 +1906,7 @@ void main(void) {
             width: 640.0,
             height: 480.0,
             inputs: vec![("scale".into(), 0.5), ("offset".into(), 2.0)],
+            ..SizeVars::default()
         };
         assert_eq!(
             evaluate_size("$WIDTH * $scale + $offset", &vars).expect("evaluates"),
@@ -1803,6 +1920,7 @@ void main(void) {
             width: 100.0,
             height: 100.0,
             inputs: vec![("size".into(), 2.0), ("sizeFactor".into(), 4.0)],
+            ..SizeVars::default()
         };
         assert_eq!(
             evaluate_size("$sizeFactor + $size", &vars).expect("evaluates"),
@@ -1910,5 +2028,159 @@ void main(void) {
         assert_eq!(format_number(1280.0), "1280");
         assert_eq!(format_number(0.9), "0.9");
         assert_eq!(format_number(0.02), "0.02");
+    }
+
+    #[test]
+    fn evaluate_size_clamps_to_the_device_dimension_limit() {
+        let vars = SizeVars {
+            width: 1920.0,
+            height: 1080.0,
+            max_dimension: 8192,
+            ..SizeVars::default()
+        };
+        assert_eq!(
+            evaluate_size("$WIDTH * 1000000", &vars).expect("evaluates"),
+            8192,
+            "a gigapixel request must clamp to max_texture_dimension_2d"
+        );
+        assert_eq!(evaluate_size("1073741824", &vars).expect("evaluates"), 8192);
+        let tiny = SizeVars {
+            max_dimension: 16,
+            ..SizeVars::default()
+        };
+        assert_eq!(evaluate_size("100", &tiny).expect("evaluates"), 16);
+    }
+
+    #[test]
+    fn evaluate_size_substitutes_the_runtime_scalars() {
+        // `ISFRenderer.evaluateSize` replaces every uniform, not just inputs:
+        // `$TIME`, `$TIMEDELTA`, `$FRAMEINDEX` and `$PASSINDEX` must resolve.
+        let vars = SizeVars {
+            width: 100.0,
+            height: 50.0,
+            time: 2.5,
+            time_delta: 0.5,
+            frame_index: 7.0,
+            pass_index: 3.0,
+            ..SizeVars::default()
+        };
+        assert_eq!(evaluate_size("floor($TIME * 10.0)", &vars).expect("ok"), 25);
+        assert_eq!(
+            evaluate_size("$FRAMEINDEX + $PASSINDEX", &vars).expect("ok"),
+            10
+        );
+        assert_eq!(evaluate_size("$TIMEDELTA * 4.0", &vars).expect("ok"), 2);
+    }
+
+    #[test]
+    fn vector_uniforms_are_a_clear_error_not_a_silent_zero() {
+        let vars = SizeVars {
+            width: 100.0,
+            height: 50.0,
+            ..SizeVars::default()
+        };
+        assert_eq!(
+            evaluate_size("$RENDERSIZE.x", &vars).expect_err("vector uniform"),
+            SizeEvalError::UnknownVariable("RENDERSIZE".into())
+        );
+        assert_eq!(
+            evaluate_size("$DATE", &vars).expect_err("date uniform"),
+            SizeEvalError::UnknownVariable("DATE".into())
+        );
+    }
+
+    #[test]
+    fn statement_keyword_inputs_keep_control_flow_intact() {
+        // R-26: an input named `return`/`for`/`if` used to be replaced in the
+        // body, turning every `return`/`for`/`if` keyword into an identifier.
+        let shader = r#"/*{ "INPUTS": [
+            { "NAME": "return", "TYPE": "float" },
+            { "NAME": "for", "TYPE": "float" },
+            { "NAME": "if", "TYPE": "event" }
+        ] }*/
+        void main() {
+            float total = 0.0;
+            for (int i = 0; i < 3; i++) { total += 1.0; }
+            if (total > 0.0) { gl_FragColor = vec4(total); return; }
+            gl_FragColor = vec4(0.0);
+        }"#;
+        let glsl = build_fragment_glsl(&doc(shader), 0);
+        // The declarations are prefixed ...
+        assert!(glsl.contains("  float isf_input_return;"), "{glsl}");
+        assert!(glsl.contains("  float isf_input_for;"), "{glsl}");
+        assert!(glsl.contains("  int isf_bool_isf_input_if;"), "{glsl}");
+        // ... and the keywords are untouched.
+        assert!(glsl.contains("for (int i = 0; i < 3; i++)"), "{glsl}");
+        assert!(glsl.contains("if (total > 0.0)"), "{glsl}");
+        assert!(glsl.contains("return;"), "{glsl}");
+        assert!(!glsl.contains("isf_input_for ("), "{glsl}");
+        crate::isf::translate::translate_fragment(&doc(shader), 0).expect("translates");
+    }
+
+    #[test]
+    fn qualifier_named_inputs_are_still_rewritten_in_the_body() {
+        // `UltimateSpiral.fs` reads its `smooth` input as an expression; the
+        // qualifier spelling can only be fixed by renaming body occurrences.
+        let shader = r#"/*{ "INPUTS": [ { "NAME": "smooth", "TYPE": "float" } ] }*/
+        void main() { gl_FragColor = vec4(step(smooth, 0.5)); }"#;
+        let glsl = build_fragment_glsl(&doc(shader), 0);
+        assert!(glsl.contains("  float isf_input_smooth;"), "{glsl}");
+        assert!(glsl.contains("step(isf_input_smooth, 0.5)"), "{glsl}");
+        crate::isf::translate::translate_fragment(&doc(shader), 0).expect("translates");
+    }
+
+    #[test]
+    fn rect_samplers_are_not_rewritten_to_normalised_texture() {
+        assert_eq!(
+            rewrite_fragment_source("texture2DRect(tex, coord)", &[]),
+            "texture2DRect(tex, coord)"
+        );
+        let shader = "uniform sampler2DRect rect;\nvoid main() { gl_FragColor = texture2DRect(rect, vec2(1.0)); }";
+        let error = crate::isf::translate::translate_fragment(&doc(shader), 0)
+            .expect_err("rect samplers are rejected");
+        assert!(
+            matches!(
+                error,
+                crate::isf::translate::TranslateError::Unsupported { .. }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("texture2DRect"));
+    }
+
+    #[test]
+    fn contains_ident_respects_identifier_boundaries() {
+        assert!(contains_ident("texture2DRect(tex, uv)", "texture2DRect"));
+        assert!(!contains_ident(
+            "my_texture2DRect(tex, uv)",
+            "texture2DRect"
+        ));
+        assert!(!contains_ident("front_texture2DRectX", "texture2DRect"));
+        assert!(!contains_ident("texture2D(tex, uv)", "texture2DRect"));
+    }
+
+    #[test]
+    fn matrix_outputs_consume_one_location_per_column() {
+        // `v002 Light Leak.vs` declares `out mat2 rotmat`; WGSL gives a matrix
+        // one location per column (mat2 2, mat3 3, mat4 4, mat2x3 2).
+        assert_eq!(count_declarators("mat2 rotmat;"), 2);
+        assert_eq!(count_declarators("mat3 basis;"), 3);
+        assert_eq!(count_declarators("mat4 model;"), 4);
+        assert_eq!(count_declarators("mat2x3 m;"), 2);
+        assert_eq!(count_declarators("dmat4 model;"), 4);
+        assert_eq!(count_declarators("vec2 texOffsets[5];"), 5);
+        assert_eq!(count_declarators("mat2 mats[3];"), 6);
+        assert_eq!(count_declarators("mat3 a, b;"), 6);
+
+        let body = "out mat2 rotmat;\nout vec2 uv;\n";
+        let numbered = assign_output_locations(body, 1);
+        assert!(
+            numbered.contains("layout(location = 1) out mat2 rotmat;"),
+            "{numbered}"
+        );
+        assert!(
+            numbered.contains("layout(location = 3) out vec2 uv;"),
+            "{numbered}"
+        );
     }
 }
