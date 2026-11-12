@@ -17,6 +17,7 @@ import { reduceByteFrequencyData } from "./byte-frequency-data";
 import { createLogger } from "./logger";
 import MediaDeviceManager from "./media-device-manager";
 import { createEngineMediaController } from "./engine-media";
+import { engineModuleEnabledPatches } from "./engine-module-meta";
 import {
   SystemAudioCapture,
   SYSTEM_AUDIO_SOURCE_ID,
@@ -168,6 +169,13 @@ class ModV {
 
         if (d && typeof d.type === "string") {
           store.commit(d.type, d.payload);
+
+          // Scene applies and Gallery drops create Modules on the engine; a
+          // legacy document encodes `meta.enabled` as a number, which the
+          // compositor does not render. Re-assert it as a boolean.
+          if (d.type === "modules/ADD_ACTIVE_MODULE") {
+            this._normaliseEngineModuleMeta(d.payload?.module ?? d.payload);
+          }
         }
       });
 
@@ -359,6 +367,50 @@ class ModV {
       applyEngineSync(this._store, snapshot);
     } catch (error) {
       logger.warn("engine state sync failed", { message: error?.message });
+    }
+
+    // The snapshot's Modules can carry a legacy numeric `meta.enabled` (see
+    // `engine-module-meta.js`); fix the encoding so the compositor draws them.
+    this._normaliseEngineModuleMeta(snapshot?.modules);
+  }
+
+  /**
+   * Re-assert legacy `meta.enabled` encodings as booleans.
+   *
+   * Legacy modV Scene/preset documents store the Enable Input Link's value,
+   * a number (`1`/`0`), and the JS render loop used truthiness. The engine's
+   * compositor only draws a Module whose flag is the JSON boolean `true`, so a
+   * restored Webcam (or any other Module saved as `enabled: 1`) would never
+   * render. `modules/updateMeta` writes the boolean back without touching the
+   * saved document.
+   *
+   * @param {unknown} modules active Modules: the sync map, an array, or one
+   *   `modules/ADD_ACTIVE_MODULE` payload
+   */
+  _normaliseEngineModuleMeta(modules) {
+    if (!this.engineMode) {
+      return;
+    }
+
+    for (const { id, enabled } of engineModuleEnabledPatches(modules)) {
+      // Idempotent: a module that arrives through both the `state/sync` push
+      // and the `engine/get-sync` pull (or a re-sent Scene) just gets the same
+      // boolean written twice.
+      Promise.resolve()
+        .then(() =>
+          this.store.dispatch("modules/updateMeta", {
+            id,
+            metaKey: "enabled",
+            data: enabled,
+          }),
+        )
+        .catch((error) => {
+          logger.warn("could not normalise a module's enabled flag", {
+            id,
+            enabled,
+            message: error?.message || String(error),
+          });
+        });
     }
   }
 

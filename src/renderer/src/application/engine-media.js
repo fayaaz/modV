@@ -249,6 +249,89 @@ export function cameraIndexForDevice(selectedIds, deviceId) {
 }
 
 /**
+ * The camera-only order the engine's 1-based indexes refer to.
+ *
+ * The engine appends a camera to its live order when it starts it, so its
+ * `camera` prop indexes the cameras it is actually running. The saved
+ * selection, however, can still hold ids the engine cannot start: a legacy
+ * install persists Chromium's opaque `deviceId`s, and a camera can be
+ * unplugged. Counting those would shift every later index — the panel says
+ * "camera 1", the engine says index 4, and the Webcam module draws the wrong
+ * source (or nothing). Filtering the selection to the cameras the engine has
+ * listed keeps the two orders aligned.
+ *
+ * @param {string[]} selectedIds saved selection, in the renderer's order
+ * @param {string[] | null | undefined} availableIds engine camera ids, or
+ *   `null`/omitted when availability is unknown (then the selection is used
+ *   unchanged)
+ * @returns {string[]}
+ */
+export function cameraOrder(selectedIds, availableIds) {
+  const selected = Array.isArray(selectedIds) ? selectedIds : [];
+  const available = Array.isArray(availableIds)
+    ? new Set(availableIds.filter((id) => typeof id === "string" && id.length))
+    : null;
+  const seen = new Set();
+  const order = [];
+
+  for (const deviceId of selected) {
+    if (typeof deviceId !== "string" || deviceId.length === 0) {
+      continue;
+    }
+
+    if (available && !available.has(deviceId)) {
+      continue;
+    }
+
+    if (seen.has(deviceId)) {
+      continue;
+    }
+
+    seen.add(deviceId);
+    order.push(deviceId);
+  }
+
+  return order;
+}
+
+/**
+ * Panel order for engine cameras: the checked cameras first, in the order the
+ * engine indexes them, then the rest by label.
+ *
+ * The Audio/Video panel tells the user that "the order below is the Webcam
+ * module's `camera` index", and the engine indexes cameras in the order they
+ * were started (the saved selection order, then whatever was checked last).
+ * Sorting the whole list by label would make that sentence wrong as soon as
+ * the label order differs from the enable order, so the selected cameras lead.
+ *
+ * @param {Array<{deviceId?: string, label?: string}>} devices
+ * @param {string[]} selectedIds
+ * @returns {Array}
+ */
+export function orderEngineCameraInputs(devices, selectedIds) {
+  const list = (Array.isArray(devices) ? devices : []).filter(Boolean);
+  const byDeviceId = new Map();
+
+  for (const device of list) {
+    if (typeof device?.deviceId === "string") {
+      byDeviceId.set(device.deviceId, device);
+    }
+  }
+
+  const selected = cameraOrder(selectedIds, [...byDeviceId.keys()]);
+  const selectedSet = new Set(selected);
+
+  return [
+    ...selected.map((deviceId) => byDeviceId.get(deviceId)),
+    ...list
+      .filter((device) => !selectedSet.has(device?.deviceId))
+      .sort((a, b) =>
+        String(a?.label || "").localeCompare(String(b?.label || "")),
+      ),
+  ];
+}
+
+/**
  * Build the `media/start-camera` payload.
  *
  * `index` is the renderer's saved order. The engine echoes it back so a
@@ -320,6 +403,38 @@ function isAbsolutePath(filePath) {
   return /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(filePath);
 }
 
+/** Media folders the library stores under the media directory. */
+const MEDIA_LIBRARY_FOLDERS = new Set([
+  "video",
+  "image",
+  "palette",
+  "preset",
+  "module",
+  "plugin",
+  "scene",
+]);
+
+/**
+ * Whether a path is a media-library path (`/<folder>/…` or
+ * `/<project>/<folder>/…`) rather than a true absolute path.
+ *
+ * Library items are media-directory-relative even though they start with a
+ * slash; a Windows drive/UNC prefix is never library-relative.
+ */
+export function isMediaLibraryPath(value) {
+  const segments = value.split(/[\\/]+/).filter((segment) => segment.length);
+  if (segments.length < 2) {
+    return false;
+  }
+  if (/^[A-Za-z]:$/.test(segments[0])) {
+    return false;
+  }
+  return (
+    MEDIA_LIBRARY_FOLDERS.has(segments[0]) ||
+    (segments.length >= 3 && MEDIA_LIBRARY_FOLDERS.has(segments[1]))
+  );
+}
+
 /**
  * Resolve a media-store path (`default/video/clip.mp4`, relative to the media
  * directory) into the absolute path the engine's `media/start-file` wants.
@@ -347,21 +462,17 @@ export function toEngineMediaPath(mediaPath, filePath, platform = "linux") {
   const windows = platform === "win32";
   const separator = windows ? "\\" : "/";
 
-  // The media library stores media-directory-relative paths that start with
-  // "/" (e.g. "/video/clip.mp4"). On POSIX those look absolute, so treat a
-  // leading slash as media-relative whenever the media path is known; only a
-  // non-rooted path or a Windows drive path is a true absolute path.
-  // The media library stores paths like "/video/clip.mp4" (folder-rooted,
-  // media-directory-relative) while a user-selected file can be a true
-  // absolute path such as "/tmp/clip.mp4". Only the known media folders are
-  // re-rooted; anything else stays absolute.
+  // The media library stores media-directory-relative paths that look rooted:
+  // "/video/clip.mp4" or, for a project, "/default/video/clip.mp4". On POSIX
+  // those look absolute, so re-root them under `mediaPath` when the first or
+  // second segment is a known media folder. Anything else that is absolute
+  // (e.g. "/tmp/clip.mp4" or "D:\\clips\\a.mp4") is a true external path and
+  // passes through unchanged.
   const mediaRooted =
-    !windows &&
-    /^\/(video|image|palette|preset|module|plugin|scene)(\/|$)/.test(trimmed);
-  if (
-    isAbsolutePath(trimmed) &&
-    !(mediaRooted && typeof mediaPath === "string" && mediaPath.length > 0)
-  ) {
+    typeof mediaPath === "string" &&
+    mediaPath.trim().length > 0 &&
+    isMediaLibraryPath(trimmed);
+  if (isAbsolutePath(trimmed) && !mediaRooted) {
     // A bare root ("/", "C:\\") is not a usable video path.
     return /^[\\/]+$/.test(trimmed) ? null : trimmed;
   }
@@ -893,6 +1004,7 @@ export function createEngineMediaController({
     deviceId,
     cameraId,
     selectedIds,
+    availableIds,
     resolution,
     frameRate,
   } = {}) {
@@ -903,7 +1015,9 @@ export function createEngineMediaController({
     const request = buildCameraStartRequest({
       deviceId,
       cameraId,
-      selectedIds,
+      // Index the cameras the engine has, not the ids it can never start
+      // (legacy Chromium ids, unplugged cameras).
+      selectedIds: cameraOrder(selectedIds, availableIds),
       resolution,
       frameRate,
     });
@@ -1109,7 +1223,7 @@ export function createEngineMediaController({
       }
 
       try {
-        await startCamera({ deviceId, selectedIds });
+        await startCamera({ deviceId, selectedIds, availableIds });
         started.push(deviceId);
       } catch (_error) {
         // The failure recorded its own notice; the panel shows it.
@@ -1162,6 +1276,7 @@ export function createEngineMediaController({
           deviceId,
           cameraId: entry?.request?.cameraId,
           selectedIds,
+          availableIds,
           resolution: entry?.resolution,
           frameRate: entry?.frameRate,
         });

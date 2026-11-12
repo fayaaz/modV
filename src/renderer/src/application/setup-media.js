@@ -222,7 +222,8 @@ async function setupMedia({
   // pipeline engine-side) and record what it asked for. No hidden <video>, no
   // ImageCapture and no capture loop are created.
   if (engineVideo) {
-    const device = (mediaStreamDevices.video || []).find(
+    const devices = mediaStreamDevices.video || [];
+    const device = devices.find(
       (candidate) => candidate.deviceId === videoSourceId,
     );
 
@@ -233,6 +234,10 @@ async function setupMedia({
         selectedIds: [
           ...(this._store.state.mediaStream.selectedVideoSources || []),
         ],
+        // The engine's 1-based `camera` index only counts cameras it can
+        // start, so drop saved ids it does not list (legacy Chromium ids, a
+        // camera that is currently unplugged) before deriving the index.
+        availableIds: devices.map((candidate) => candidate.deviceId),
         resolution: videoResolution,
         frameRate: videoFrameRate,
       });

@@ -233,6 +233,46 @@ impl InheritFrom {
     }
 }
 
+/// JavaScript truthiness for a JSON value.
+///
+/// Used where the JS renderer tests a value directly (`if (meta.enabled)`):
+/// `0`, `NaN`, `""`, `null` and `false` are falsy; every non-empty string,
+/// non-zero number, array and object is truthy (including `[]` and `{}`).
+pub fn js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+/// Coerce a Module's `enabled` meta flag to a real boolean.
+///
+/// Scene documents written by older versions store `enabled: 1` / `0`; the
+/// legacy renderer tests it for truthiness, while the engine compositor and
+/// Input Link evaluation require `Value::Bool`. Normalising on load keeps
+/// restored Modules visible without weakening those strict checks.
+pub fn normalise_module_meta(meta: &mut Map<String, Value>) {
+    let Some(enabled) = meta.get("enabled") else {
+        return;
+    };
+    if enabled.is_boolean() {
+        return;
+    }
+    let truthy = js_truthy(enabled);
+    meta.insert("enabled".to_string(), Value::Bool(truthy));
+}
+
+/// [`normalise_module_meta`] for a raw `meta` JSON value (a no-op unless it is
+/// an object).
+pub fn normalise_module_meta_value(meta: &mut Value) {
+    if let Some(object) = meta.as_object_mut() {
+        normalise_module_meta(object);
+    }
+}
+
 /// A live module instance in the active modules map.
 ///
 /// Mirrors `store/modules/modules.js:660-683` (`createPresetData`): the

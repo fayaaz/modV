@@ -46,7 +46,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::engine_state::{EngineState, GALLERY_GROUP_NAME, Group, ModuleInstance};
+use crate::engine_state::{
+    EngineState, GALLERY_GROUP_NAME, Group, ModuleInstance, normalise_module_meta_value,
+};
 use crate::inputs::{Input, InputLink};
 
 /// The playlist document type token (`preset-serializer.js:3`).
@@ -235,8 +237,9 @@ pub fn parse_preset(preset: &Value) -> Result<PresetDocument, PresetError> {
         None | Some(Value::Null) => {}
         Some(Value::Object(modules)) => {
             for raw in modules.values() {
-                let module: ModuleInstance = serde_json::from_value(raw.clone())
+                let mut module: ModuleInstance = serde_json::from_value(raw.clone())
                     .map_err(|e| PresetError::decode("modules", e))?;
+                normalise_module_meta_value(&mut module.meta);
                 document.modules.insert(module.id.clone(), module);
             }
         }
@@ -758,6 +761,30 @@ mod tests {
             ],
             "midi": {"devices": {"dev-1": {"name": "Launchpad Mini"}}, "learning": false}
         })
+    }
+
+    #[test]
+    fn presets_normalise_numeric_enabled_flags() {
+        let preset = json!({
+            "groups": [],
+            "modules": {
+                "a": {"$id": "a", "$moduleName": "Webcam", "meta": {"enabled": 1}},
+                "b": {"$id": "b", "$moduleName": "Webcam", "meta": {"enabled": 0}},
+                "c": {"$id": "c", "$moduleName": "Webcam", "meta": {"enabled": "yes"}},
+                "d": {"$id": "d", "$moduleName": "Webcam", "meta": {"enabled": false}}
+            },
+            "inputs": {},
+            "expressions": {},
+            "tweens": [],
+            "midi": {}
+        });
+
+        let document = parse_preset(&preset).expect("preset parses");
+        assert_eq!(document.modules["a"].meta["enabled"], json!(true));
+        assert_eq!(document.modules["b"].meta["enabled"], json!(false));
+        // JS truthiness: a non-empty string (even "false") is truthy.
+        assert_eq!(document.modules["c"].meta["enabled"], json!(true));
+        assert_eq!(document.modules["d"].meta["enabled"], json!(false));
     }
 
     #[test]

@@ -243,6 +243,7 @@ import {
   ENGINE_MEDIA_STATUS_POLL_MS,
   formatDeviceStatus,
   formatMediaSourceStatus,
+  orderEngineCameraInputs,
 } from "../../application/engine-media";
 
 const logger = createLogger("renderer:audio-input");
@@ -286,6 +287,16 @@ export default {
       const videoInputs = Object.values(
         this.$modV.store.state.mediaStream.video,
       );
+
+      // Engine mode: the checked cameras lead, in the order the engine indexes
+      // them, so the panel's "order below" really is the Webcam module's
+      // `camera` index. The legacy list stays label-sorted.
+      if (this.engineMode) {
+        return orderEngineCameraInputs(
+          videoInputs,
+          this.selectedVideoSourceIds,
+        );
+      }
 
       return videoInputs.sort((a, b) => a.label.localeCompare(b.label));
     },

@@ -28,6 +28,7 @@ import {
   buildScreenStartRequest,
   cameraCapabilities,
   cameraIndexForDevice,
+  cameraOrder,
   cameraSourceId,
   createEngineMediaController,
   describeEngineMediaError,
@@ -41,6 +42,7 @@ import {
   mediaSourceStateLabel,
   normaliseMediaSource,
   normaliseMediaStatus,
+  orderEngineCameraInputs,
   reconcileCameraIndex,
   reconcileEngineSources,
   screenNodeIdFromSource,
@@ -203,6 +205,91 @@ describe("cameraSourceId / cameraIndexForDevice", () => {
   });
 });
 
+describe("cameraOrder", () => {
+  it("keeps the saved order of the cameras the engine actually has", () => {
+    expect(
+      cameraOrder(
+        ["/dev/video2", "/dev/video0"],
+        ["/dev/video0", "/dev/video2"],
+      ),
+    ).toEqual(["/dev/video2", "/dev/video0"]);
+  });
+
+  it("drops ids the engine does not know about", () => {
+    // The legacy renderer persisted Chromium's opaque device ids. They have no
+    // engine camera (and therefore no 1-based index), so they must not shift
+    // the Webcam module's `camera` prop.
+    const selected = [
+      "0cb8daf781a1f4bc7647c8786c81a7171393c3734d7acf520aad731fb0675bf2",
+      "6bde72d445e0ef42c3ec92109e2dfd6d3b507593a640af9005ac1754a67d559b",
+      "54d5608c102f25dba7e5a2d4456fea4f4ac3f4ff4d9fe0871170a8dd8c94a05b",
+      "/dev/video2",
+      "/dev/video0",
+    ];
+
+    expect(cameraOrder(selected, ["/dev/video0", "/dev/video2"])).toEqual([
+      "/dev/video2",
+      "/dev/video0",
+    ]);
+  });
+
+  it("deduplicates repeated ids", () => {
+    expect(
+      cameraOrder(["/dev/video0", "/dev/video0"], ["/dev/video0"]),
+    ).toEqual(["/dev/video0"]);
+  });
+
+  it("returns the whole selection when availability is unknown", () => {
+    expect(cameraOrder(["/dev/video2", "/dev/video0"])).toEqual([
+      "/dev/video2",
+      "/dev/video0",
+    ]);
+    expect(cameraOrder(["/dev/video2"], null)).toEqual(["/dev/video2"]);
+  });
+
+  it("is empty for a missing selection", () => {
+    expect(cameraOrder(undefined, ["/dev/video0"])).toEqual([]);
+    expect(cameraOrder([], ["/dev/video0"])).toEqual([]);
+  });
+});
+
+describe("orderEngineCameraInputs", () => {
+  const devices = [
+    { deviceId: "/dev/video0", label: "HD USB Camera" },
+    { deviceId: "/dev/video2", label: "4K U3 Camera" },
+    { deviceId: "/dev/video4", label: "A Virtual Camera" },
+  ];
+
+  it("lists the checked cameras first, in the engine's order", () => {
+    expect(
+      orderEngineCameraInputs(devices, ["/dev/video0", "/dev/video2"]).map(
+        (device) => device.deviceId,
+      ),
+    ).toEqual(["/dev/video0", "/dev/video2", "/dev/video4"]);
+  });
+
+  it("ignores saved ids the engine does not list", () => {
+    expect(
+      orderEngineCameraInputs(devices, ["legacy-a", "/dev/video2"]).map(
+        (device) => device.deviceId,
+      ),
+    ).toEqual(["/dev/video2", "/dev/video4", "/dev/video0"]);
+  });
+
+  it("sorts the unchecked cameras by label", () => {
+    expect(
+      orderEngineCameraInputs(devices, ["/dev/video4"]).map(
+        (device) => device.deviceId,
+      ),
+    ).toEqual(["/dev/video4", "/dev/video2", "/dev/video0"]);
+  });
+
+  it("handles an empty or missing list", () => {
+    expect(orderEngineCameraInputs(undefined, ["/dev/video0"])).toEqual([]);
+    expect(orderEngineCameraInputs(devices, undefined)).toHaveLength(3);
+  });
+});
+
 describe("buildCameraStartRequest", () => {
   it("carries the source id, camera id, order, size and frame rate", () => {
     expect(
@@ -317,9 +404,23 @@ describe("toEngineMediaPath", () => {
     expect(toEngineMediaPath("/home/u/VmodV/media", "/video/clip.mp4")).toBe(
       "/home/u/VmodV/media/video/clip.mp4",
     );
+    // Production library items carry the project segment first.
+    expect(
+      toEngineMediaPath("/home/u/VmodV/media", "/default/video/clip.mp4"),
+    ).toBe("/home/u/VmodV/media/default/video/clip.mp4");
     expect(
       toEngineMediaPath("/home/u/VmodV/media", "/video/../secret.mp4"),
     ).toBeNull();
+  });
+
+  it("re-roots a project-prefixed Windows library path", () => {
+    expect(
+      toEngineMediaPath(
+        "C:\\Users\\u\\VmodV\\media",
+        "\\default\\video\\clip.mp4",
+        "win32",
+      ),
+    ).toBe("C:\\Users\\u\\VmodV\\media\\default\\video\\clip.mp4");
   });
 
   it("passes a true absolute path through unchanged", () => {
@@ -787,6 +888,28 @@ describe("createEngineMediaController", () => {
     expect(controller.isTracked("camera:/dev/video2")).toBe(true);
   });
 
+  it("derives the index from the cameras the engine has (legacy ids excluded)", async () => {
+    const engine = createFakeEngine();
+    const controller = controllerFor(engine);
+
+    await controller.startCamera({
+      deviceId: "/dev/video0",
+      // A persisted legacy selection: three Chromium device ids, then the two
+      // engine cameras. The engine's own 1-based order only counts cameras it
+      // started, so the request must say 2, not 5.
+      selectedIds: [
+        "legacy-a",
+        "legacy-b",
+        "legacy-c",
+        "/dev/video2",
+        "/dev/video0",
+      ],
+      availableIds: ["/dev/video0", "/dev/video2"],
+    });
+
+    expect(engine.calls[0].request.index).toBe(2);
+  });
+
   it("records one notice per source when a start fails", async () => {
     const engine = createFakeEngine({
       startError: Object.assign(new Error("device busy"), {
@@ -942,6 +1065,29 @@ describe("createEngineMediaController", () => {
     expect(
       engine.calls.filter((c) => c.method === "startEngineCamera"),
     ).toHaveLength(2);
+  });
+
+  it("restarts a dead camera with an index the engine can honour", async () => {
+    const engine = createFakeEngine();
+    const controller = controllerFor(engine, { now: () => 1000 });
+
+    await controller.startCamera({
+      deviceId: "/dev/video0",
+      selectedIds: ["legacy-a", "/dev/video0"],
+      availableIds: ["/dev/video0"],
+    });
+
+    engine.setStatus([
+      { sourceId: "camera:/dev/video0", kind: "camera", state: "error" },
+    ]);
+
+    await controller.pollStatus({
+      selectedIds: ["legacy-a", "/dev/video0"],
+      availableIds: ["/dev/video0"],
+      nowMs: 60_000,
+    });
+
+    expect(engine.calls.at(-1).request.index).toBe(1);
   });
 
   it("returns an error string instead of throwing while polling", async () => {

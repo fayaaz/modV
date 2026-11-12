@@ -1724,6 +1724,10 @@ impl Store {
                 meta.insert(key.clone(), value.clone());
             }
         }
+        // Older Scene documents store `enabled: 1` / `0`; the legacy renderer
+        // tests it for truthiness while the engine compositor requires a real
+        // boolean, so a restored Webcam/effect would otherwise be skipped.
+        modv_engine::engine_state::normalise_module_meta(&mut meta);
         meta.entry("isGallery".to_string())
             .or_insert_with(|| json!(false));
 
@@ -3224,6 +3228,36 @@ mod tests {
     }
 
     // ————————————————— applyScene —————————————————
+
+    #[test]
+    fn apply_scene_normalises_numeric_enabled_flags() {
+        // Legacy Scene documents store `enabled: 1` / `0`; the engine treats
+        // Modules as drawable only for boolean `true`, so a restored Webcam
+        // used to be skipped (compositor.rs / input_links.rs strict check).
+        let mut scene = two_row_scene("scene-numeric-enabled");
+        scene["modules"]["doc-bands"]["meta"]["enabled"] = json!(1);
+        scene["modules"]["doc-ball"]["meta"]["enabled"] = json!(0);
+
+        let mut store = Store::new();
+        seed_scene(&mut store, scene);
+        store
+            .dispatch(
+                "scenes/applyScene",
+                json!({ "sceneId": "scene-numeric-enabled" }),
+            )
+            .expect("applyScene dispatches");
+
+        let module = |name: &str| {
+            store
+                .state()
+                .modules
+                .values()
+                .find(|module| module.module_name == name)
+                .expect("module exists")
+        };
+        assert_eq!(module("Bands").meta["enabled"], json!(true));
+        assert_eq!(module("Ball").meta["enabled"], json!(false));
+    }
 
     #[test]
     fn apply_scene_builds_rows_with_fresh_ids_and_merged_props() {
