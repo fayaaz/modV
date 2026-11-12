@@ -36,6 +36,11 @@
 //!   stored value).
 //! * `modules/updateMeta` / `modules/updateActiveModule` /
 //!   `modules/removeActiveModule` — `modules.js:564-587`, `:858-888`, `:715`.
+//!   The UI's controls *commit* the mutation forms
+//!   (`modules/UPDATE_ACTIVE_MODULE_META` in `ActiveModule.vue`,
+//!   `modules/UPDATE_ACTIVE_MODULE` for renderer-owned fields, and
+//!   `inputs/UPDATE_INPUT_LINK` in `InputConfig.vue`), so those names alias
+//!   the same handlers and emit the mirror's mutation delta.
 //! * `meyda/SET_BANDS` — the renderer's audio pump commits the AGC bands
 //!   (`meyda.js:88-96`); the engine stores them in [`Store::audio`] for the
 //!   compositor. When the engine owns capture (`--audio-source
@@ -371,7 +376,19 @@ impl Store {
             "modules/makeActiveModule" => self.make_active_module(params),
             "modules/updateProp" => self.update_prop(params),
             "modules/updateMeta" => self.update_meta(params),
+            // The UI's Module Inspector writes through the MUTATION names
+            // (`ActiveModule.vue` commits `modules/UPDATE_ACTIVE_MODULE_META`),
+            // while the render loop uses the actions; both reach the same
+            // state and emit the mirror's mutation delta. Aliasing to the
+            // action keeps expression evaluation and prop coercion in one
+            // place, so an inspector write lands on the same clamped value the
+            // next authoritative write would produce.
+            "modules/UPDATE_ACTIVE_MODULE_META" => self.update_meta(params),
             "modules/updateActiveModule" => self.update_active_module(params),
+            "modules/UPDATE_ACTIVE_MODULE" => self.update_active_module(params),
+            // Renderer-owned module fields (2D module data, plugin commits)
+            // use the mutation name too; the payload is the action's shape.
+            "modules/UPDATE_ACTIVE_MODULE_PROP" => self.update_prop(params),
             "modules/removeActiveModule" => self.remove_active_module(params),
             "meyda/SET_BANDS" => self.set_bands(params),
             // ————————————————— Beats (WS-9) —————————————————
@@ -393,6 +410,9 @@ impl Store {
             "inputs/removeInput" => self.remove_input_action(params),
             "inputs/createInputLink" => self.create_input_link(params),
             "inputs/updateInputLink" => self.update_input_link(params),
+            // The Input Config min/max fields commit the mutation name
+            // (`InputConfig.vue`).
+            "inputs/UPDATE_INPUT_LINK" => self.update_input_link(params),
             "inputs/removeInputLink" => self.remove_input_link(params),
             "inputs/setFocusedInput" => self.set_focused_input(params),
             "inputs/clearFocusedInput" => self.clear_focused_input(),
@@ -5067,6 +5087,80 @@ mod tests {
         assert_eq!(store.state().modules[&id].meta["alpha"], json!(0.5));
     }
 
+    /// The Module Inspector's Alpha/Enable/Blend controls `commit`
+    /// `modules/UPDATE_ACTIVE_MODULE_META` (`ActiveModule.vue`), so the engine
+    /// must handle the mutation name itself — the action name alone left the
+    /// inspector inert under engine mode.
+    #[test]
+    fn mutation_update_active_module_meta_sets_the_field_and_emits_the_delta() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Bands"}))
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": id, "metaKey": "alpha", "data": 0.5}),
+            )
+            .expect("the commit-shaped mutation dispatches");
+        assert_eq!(store.state().modules[&id].meta["alpha"], json!(0.5));
+
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_META");
+        assert_eq!(
+            deltas[0].payload,
+            json!({"id": id, "metaKey": "alpha", "data": 0.5})
+        );
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": id, "metaKey": "enabled", "data": false}),
+            )
+            .expect("the mutation handles enabled");
+        assert_eq!(store.state().modules[&id].meta["enabled"], json!(false));
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].payload["metaKey"], json!("enabled"));
+        assert_eq!(deltas[0].payload["data"], json!(false));
+
+        // The Blend control writes `compositeOperation` through the same
+        // mutation; any meta key is stored and echoed.
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": id, "metaKey": "compositeOperation", "data": "multiply"}),
+            )
+            .expect("the mutation handles compositeOperation");
+        assert_eq!(
+            store.state().modules[&id].meta["compositeOperation"],
+            json!("multiply")
+        );
+        assert_eq!(store.drain_deltas().len(), 1);
+    }
+
+    #[test]
+    fn mutation_update_active_module_meta_unknown_id_is_a_noop() {
+        let mut store = Store::new();
+        store.drain_deltas();
+
+        let result = store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": "missing", "metaKey": "alpha", "data": 0.5}),
+            )
+            .expect("an unknown module is not an error");
+        assert_eq!(result, Value::Null);
+        assert!(
+            store.drain_deltas().is_empty(),
+            "a dropped inspector write must not emit a mirror delta"
+        );
+    }
+
     #[test]
     fn update_active_module_sets_typed_keys() {
         let mut store = Store::new();
@@ -5091,6 +5185,75 @@ mod tests {
         let module = &store.state().modules[&id];
         assert_eq!(module.data, json!({"seed": 7}));
         assert_eq!(module.status.len(), 1);
+    }
+
+    /// `modules/UPDATE_ACTIVE_MODULE` is the mutation the renderer commits for
+    /// renderer-owned module fields (`worker/loop.js`, the 2D Buffer module).
+    /// It must share the action's typed-key semantics and delta name.
+    #[test]
+    fn mutation_update_active_module_sets_typed_keys() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Bands"}))
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE",
+                json!({"id": id, "key": "data", "value": {"seed": 3}}),
+            )
+            .expect("the mutation dispatches");
+        assert_eq!(store.state().modules[&id].data, json!({"seed": 3}));
+
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE");
+        assert_eq!(
+            deltas[0].payload,
+            json!({"id": id, "key": "data", "value": {"seed": 3}})
+        );
+
+        // An unknown id drops the write without a delta.
+        let result = store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE",
+                json!({"id": "missing", "key": "data", "value": {}}),
+            )
+            .expect("an unknown module is not an error");
+        assert_eq!(result, Value::Null);
+        assert!(store.drain_deltas().is_empty());
+    }
+
+    /// `modules/UPDATE_ACTIVE_MODULE_PROP` is the mutation form of
+    /// `modules/updateProp` (2D renderer data writes and plugin commits).
+    #[test]
+    fn mutation_update_active_module_prop_reaches_the_prop() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Bands"}))
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_PROP",
+                json!({
+                    "moduleId": id,
+                    "prop": "u_ringWidth",
+                    "data": {"value": 0.2, "type": "float", "path": ""},
+                }),
+            )
+            .expect("the mutation dispatches");
+        assert_eq!(store.state().modules[&id].props["u_ringWidth"], json!(0.2));
+
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_PROP");
+        assert_eq!(deltas[0].payload["moduleId"], json!(id));
+        assert_eq!(deltas[0].payload["data"]["value"], json!(0.2));
     }
 
     #[test]
@@ -5535,6 +5698,53 @@ mod tests {
                 "tweens/REMOVE_TWEEN"
             ]
         );
+    }
+
+    /// The Input Config min/max fields commit `inputs/UPDATE_INPUT_LINK`
+    /// (`InputConfig.vue`); the mutation name must reach the same record the
+    /// action edits and emit the mirror's mutation delta.
+    #[test]
+    fn mutation_update_input_link_edits_an_existing_link() {
+        let mut store = Store::new();
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({"id": "input-link", "type": "action", "location": "modules/updateProp"}),
+            )
+            .expect("addInput");
+        store
+            .dispatch(
+                "inputs/createInputLink",
+                json!({"inputId": "input-link", "type": "getter", "source": "meyda"}),
+            )
+            .expect("createInputLink");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "inputs/UPDATE_INPUT_LINK",
+                json!({"inputId": "input-link", "key": "min", "value": 0.25}),
+            )
+            .expect("the mutation dispatches");
+        assert_eq!(store.state().input_links["input-link"].min, Some(0.25));
+
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "inputs/UPDATE_INPUT_LINK");
+        assert_eq!(
+            deltas[0].payload,
+            json!({"inputId": "input-link", "key": "min", "value": 0.25})
+        );
+
+        // JS returns early when the link does not exist — no state, no delta.
+        let result = store
+            .dispatch(
+                "inputs/UPDATE_INPUT_LINK",
+                json!({"inputId": "missing", "key": "min", "value": 0.5}),
+            )
+            .expect("an unknown link is not an error");
+        assert_eq!(result, Value::Null);
+        assert!(store.drain_deltas().is_empty());
     }
 
     #[test]

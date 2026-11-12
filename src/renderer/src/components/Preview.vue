@@ -41,7 +41,10 @@ import { shouldRefresh } from "../application/engine-client.js";
 // latest one and paints it into its own plain 2D canvas. That is a display
 // copy, not GPU work — engine mode deliberately creates no WebGL/WebGPU
 // context. 15 fps is plenty for a debug panel and keeps the shm read cheap.
-const ENGINE_PREVIEW_FPS = 15;
+// The engine publishes the ring at ~30 fps; pulling at the same rate removes
+// the "engine mode looks choppy" effect of a 15 fps panel without measurable
+// cost (~0.5 ms per pull).
+const ENGINE_PREVIEW_FPS = 30;
 // While the engine has no frame at all (still starting, ring not published),
 // retry on a slow timer instead of waiting for a preview event that never comes.
 const ENGINE_PREVIEW_RETRY_MS = 500;
@@ -261,7 +264,14 @@ export default {
       }, ENGINE_PREVIEW_RETRY_MS);
     },
 
-    /** Paint an engine frame into the panel's own 2D canvas, letterboxed by CSS. */
+    /**
+     * Paint an engine frame into the panel's own 2D canvas, letterboxed by CSS.
+     *
+     * The engine flattens its output onto opaque black before publishing
+     * (`Compositor::read_preview`), so a transparent foreground shows black
+     * here, not the app background; the canvas CSS background is only a
+     * fallback for the first frame.
+     */
     drawEnginePreviewFrame(state, { width, height, data }) {
       const { canvas } = this.$refs;
       if (!canvas || data.length !== width * height * 4) {

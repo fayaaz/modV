@@ -256,6 +256,15 @@
 //! applies its sRGB encode at this single boundary. That is the documented
 //! "sRGB at present only" contract of the frame graph, not a per-pass
 //! conversion: module-to-group and group-to-main composites never linearise.
+//!
+//! The presented frame is **opaque black-backed**: the engine output is a
+//! desktop visualiser, not a transparent overlay. `present` clears the
+//! swapchain to `wgpu::Color::BLACK` before the premultiplied main blit and
+//! [`Compositor::read_preview`] forces the VMP1 preview's alpha to opaque
+//! (compositing premultiplied main over black leaves RGB unchanged). Both
+//! surfaces therefore show black where nothing drew instead of the app or
+//! desktop background. The isolated Gallery/Scene previews keep their
+//! transparency — they are deliberately drawn over UI panels.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -293,9 +302,9 @@ use crate::scene_preview::ScenePreviews;
 use crate::scene_transition::{SceneTransitionInfo, SceneTransitionPass};
 
 /// Preview frame width published to the UI (`modv-ipc` `VMP1` ring).
-pub const PREVIEW_WIDTH: u32 = 320;
+pub const PREVIEW_WIDTH: u32 = 640;
 /// Preview frame height published to the UI.
-pub const PREVIEW_HEIGHT: u32 = 180;
+pub const PREVIEW_HEIGHT: u32 = 360;
 
 /// The alpha below which a group (and a module) is culled (`loop.js:268`,
 /// `:390`).
@@ -2649,8 +2658,9 @@ impl Compositor {
 
     /// Present the main texture to the swapchain's `target` view.
     ///
-    /// The pass clears the target to the M0 near-black first, so an empty state
-    /// still presents a defined colour, then draws a fullscreen triangle
+    /// The pass clears the target to opaque black first, so an empty state
+    /// still presents a defined colour and transparent main pixels never show
+    /// the desktop behind the window, then draws a fullscreen triangle
     /// sampling main with premultiplied source-over ("normal") blending. No
     /// colour-space conversion happens here; see the module docs on the sRGB
     /// present boundary.
@@ -2699,13 +2709,11 @@ impl Compositor {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // Same near-black (#0b0b0f) the M0 window clears to.
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.043,
-                        g: 0.043,
-                        b: 0.059,
-                        a: 1.0,
-                    }),
+                    // Opaque black: the engine output is a desktop visualiser,
+                    // not a transparent overlay. Main is premultiplied and
+                    // transparent where nothing drew, so the clear is the
+                    // backdrop those pixels flatten onto.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -2787,7 +2795,12 @@ impl Compositor {
     }
 
     /// Copy the main texture into the preview ring, nearest-neighbour
-    /// downsampled to the ring's 320 × 180 RGBA8 frame.
+    /// downsampled to the ring's 640 × 360 RGBA8 frame.
+    ///
+    /// The panel is the only in-app picture in engine mode, so a 320 × 180
+    /// frame read as visibly soft even when upscaled; 640 × 360 costs four
+    /// times the CPU downsample but is dwarfed by the full-resolution
+    /// read-back that precedes it.
     ///
     /// Returns the written [`PreviewFrame`] so the supervisor can publish the
     /// `preview/frame` event, or `None` when there is nothing to publish (no
@@ -2817,6 +2830,15 @@ impl Compositor {
             }
         }
 
+        // Flatten onto opaque black. Main is premultiplied, so compositing it
+        // over black leaves RGB unchanged; only the alpha channel becomes
+        // opaque. Without this the panel painted the raw alpha-0 pixels and
+        // whatever sat behind its canvas (the app background) showed through
+        // a transparent foreground instead of the engine's black output, and
+        // the premultiplied values read back as straight `ImageData`.
+        for alpha in preview.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
         ring.write_frame(&preview)
             .map(Some)
             .map_err(|error| CompositorError::Preview(error.to_string()))
@@ -3348,6 +3370,7 @@ mod tests {
     use serde_json::json;
 
     use crate::scene_transition::TransitionEffect;
+    use crate::store_ops::Store;
 
     const SIZE: u32 = 64;
 
@@ -3417,6 +3440,34 @@ mod tests {
         state
     }
 
+    /// One `Effects` Group holding a `Point10 Invert` module, built through the
+    /// same dispatches the UI uses, so module-meta mutations can be exercised
+    /// end to end (store → compositor pixels).
+    fn store_with_invert_module() -> (Store, String) {
+        let mut store = Store::new();
+        let group = store
+            .dispatch(
+                "groups/createGroup",
+                json!({"name": "Effects", "clearing": true, "enabled": GROUP_ENABLED}),
+            )
+            .expect("createGroup dispatches");
+        let group_id = group["id"].as_str().expect("group id").to_string();
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Point10 Invert"}),
+            )
+            .expect("makeActiveModule dispatches");
+        let module_id = module["$id"].as_str().expect("module id").to_string();
+        store
+            .dispatch(
+                "groups/ADD_MODULE_TO_GROUP",
+                json!({"groupId": group_id, "moduleId": module_id}),
+            )
+            .expect("ADD_MODULE_TO_GROUP dispatches");
+        (store, module_id)
+    }
+
     fn assert_pixels_close(actual: &[u8], expected: [u8; 4], tolerance: i16, context: &str) {
         assert_eq!(
             actual.len(),
@@ -3476,6 +3527,58 @@ mod tests {
         assert_pixels_close(&pixels, [128, 128, 128, 128], 2, "module alpha 0.5");
     }
 
+    /// The Module Inspector commits `modules/UPDATE_ACTIVE_MODULE_META`; the
+    /// engine must store it *and* the live compositor must consume it. Alpha
+    /// 0.5 halves the module's contribution (opaque white → premultiplied
+    /// 128) and `enabled: false` skips the draw entirely.
+    #[test]
+    fn inspector_meta_mutations_reach_the_compositor() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let (mut store, module_id) = store_with_invert_module();
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+
+        // New modules start disabled (JS `modules.js:345`), so the inspector's
+        // Enable checkbox is what makes the module draw at all.
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": module_id, "metaKey": "enabled", "data": true}),
+            )
+            .expect("enabled mutation dispatches");
+        compositor
+            .render_frame(store.state(), &frame_info())
+            .expect("frame renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [255, 255, 255, 255], 2, "enabled + alpha 1");
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": module_id, "metaKey": "alpha", "data": 0.5}),
+            )
+            .expect("alpha mutation dispatches");
+        compositor
+            .render_frame(store.state(), &frame_info())
+            .expect("frame renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [128, 128, 128, 128], 2, "inspector alpha 0.5");
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({"id": module_id, "metaKey": "enabled", "data": false}),
+            )
+            .expect("enabled mutation dispatches");
+        compositor
+            .render_frame(store.state(), &frame_info())
+            .expect("frame renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [0, 0, 0, 0], 1, "disabled module is skipped");
+    }
+
     #[test]
     fn preview_reads_back_a_downsampled_frame() {
         let Some(engine) = try_engine() else {
@@ -3514,6 +3617,97 @@ mod tests {
         assert_eq!(pixels.len(), (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4) as usize);
         let first = &pixels[0..4];
         assert!(first[0] >= 250 && first[1] >= 250 && first[2] >= 250 && first[3] >= 250);
+    }
+
+    /// Create a ring, publish the current main texture into it and return the
+    /// slot's tightly packed RGBA8 pixels.
+    fn preview_pixels(compositor: &mut Compositor) -> Vec<u8> {
+        let path = std::env::temp_dir().join(format!(
+            "modv-app-preview-flatten-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut ring = PreviewRing::create(Some(path), 3, PREVIEW_WIDTH, PREVIEW_HEIGHT)
+            .expect("preview ring is created");
+        let slot_bytes = ring.handshake()["slotBytes"]
+            .as_u64()
+            .expect("handshake carries slotBytes") as usize;
+        let frame = compositor
+            .read_preview(&mut ring)
+            .expect("preview read-back succeeds")
+            .expect("a frame is published");
+        let (_, pixels) = PreviewRing::read_slot(ring.path(), slot_bytes, frame.slot)
+            .expect("slot reads")
+            .expect("slot holds a consistent frame");
+        pixels
+    }
+
+    /// The engine's presented output is opaque: transparent main pixels become
+    /// black in the VMP1 preview (the panel's 2D canvas is not a window onto
+    /// the app background). Premultiplied semi-transparent pixels flatten onto
+    /// the same black, so alpha 0.5 white arrives as 128 with alpha 255.
+    #[test]
+    fn preview_ring_flattens_transparency_onto_opaque_black() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        compositor
+            .render_frame(&EngineState::new(), &frame_info())
+            .expect("empty frame renders");
+        let pixels = preview_pixels(&mut compositor);
+        assert_eq!(pixels.len(), (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4) as usize);
+        assert!(
+            pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]),
+            "an empty (transparent) frame must preview as opaque black"
+        );
+
+        compositor
+            .render_frame(&invert_state(0.5), &frame_info())
+            .expect("half-alpha frame renders");
+        let pixels = preview_pixels(&mut compositor);
+        let first = &pixels[0..4];
+        for (channel, expected) in [128_u8, 128, 128, 255].iter().enumerate() {
+            assert!(
+                (first[channel] as i16 - *expected as i16).abs() <= 2,
+                "premultiplied 0.5 white must preview as opaque 128 grey, got {first:?}"
+            );
+        }
+    }
+
+    /// `present` clears the surface to opaque black before the premultiplied
+    /// main blit, so the window never shows a transparent (desktop/white)
+    /// background behind alpha-0 pixels.
+    #[test]
+    fn present_flattens_transparency_onto_opaque_black() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        compositor
+            .render_frame(&EngineState::new(), &frame_info())
+            .expect("empty frame renders");
+
+        let target = create_output_texture(&engine.device, "present-target", SIZE, SIZE);
+        let view = target
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = engine
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("present-test"),
+            });
+        compositor.present(&mut encoder, &view, wgpu::TextureFormat::Rgba8Unorm);
+        engine.queue.submit(Some(encoder.finish()));
+
+        let pixels = read_back_texture(&engine.device, &engine.queue, &target.texture, SIZE, SIZE)
+            .expect("present target reads back");
+        assert_pixels_close(&pixels, [0, 0, 0, 255], 1, "presented empty main");
     }
 
     #[test]
