@@ -89,7 +89,7 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       in the compositor; Ball renders through the packaged preview (CDP)
 - [x] Palette tween colours advance on the frame clock
 
-## M4 — Point10 — partial (18 of 25 scenes)
+## M4 — Point10 — partial (21 of 25 scenes)
 
 - [x] Scene trait/SceneContext, AudioBridge + P10Audio, shared particle
       alpha/sprite + random, postfx chain (UnrealBloom/OutputPass/ShaderPass/
@@ -108,8 +108,11 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       (ping-pong feedback), ColorCube (512 instances), Boxy (panorama env +
       `preserveBloomAlpha`), SoundCube (16-bit trail); shared cube mesh and
       p9 shading helpers
-- [ ] Remaining 7 scenes (HollowCube, AttractorParticles, DvdRoom,
-      GeometricTunnel SSAO, RollingFire/SmokeRoom, LatentBackrooms)
+- [x] Batch 5a: HollowCube (15k instances + fbm/Shader2 chain),
+      AttractorParticles (TSL compute → fragment MRT sim), DvdRoom (TSL smoke →
+      seeded puffs, procedural logo)
+- [ ] Batch 5b in flight: GeometricTunnel (SSAO), RollingFire, SmokeRoom,
+      LatentBackrooms (Afterimage)
 - [ ] Golden images (optional; behaviour parity is the priority), warm
       cache/instance eviction
 
