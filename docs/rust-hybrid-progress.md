@@ -83,8 +83,9 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 - [x] wgpu 2D facade (path builder, fill/stroke, clip, transforms,
       drawImage, text via cosmic-text) + tests for the 22 ops
 - [x] 15 hand-written 2D modules ported, smoke renders on lavapipe
-- [ ] 2D modules wired into the engine compositor (per-module canvases,
-      clearing semantics, module registry in modv-app)
+- [x] 2D modules wired into the engine compositor (per-module canvases,
+      clearing semantics, module registry in modv-app) — verified in the
+      packaged app via CDP (Ball field renders through the preview ring)
 - [ ] three Cube port (native WGSL)
 
 ## M4 — Point10
@@ -104,12 +105,14 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## M6 — Media
 
-- [ ] AudioBands port (AGC, cells/lanes, beat envelope) — fixture-parity test
-- [ ] tempo-detector, phrase-detector, audio-features smoothing, BeatDetektor
-- [ ] Meyda feature extractors (rms, zcr, energy, spectrum stats, Bark bands)
-- [ ] MIDI clock → BPM (95-sample MA, 500 ms emit, outlier reset)
+- [x] AudioBands port (AGC, cells/lanes, beat envelope) — fixture-parity test
+- [x] tempo-detector, phrase-detector, audio-features smoothing
+- [x] BeatDetektor (onset/draft scoring, kick/BPM)
+- [x] Meyda feature extractors (rms, zcr, energy, spectrum stats, Bark bands)
+- [x] MIDI clock → BPM (95-sample MA, 500 ms emit, outlier reset)
 - [ ] OSC server (rosc), NDI sender/receiver (libndi FFI)
 - [ ] GStreamer cameras/screen/video + PipeWire system audio
+- [ ] renderer → engine audio feed (engine analysis of the renderer's pump)
 
 ## M7 — Parity and release
 
