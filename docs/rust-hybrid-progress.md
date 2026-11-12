@@ -12,9 +12,10 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **911 tests pass** (modv-app 106, modv-engine 365, modv-ipc
-  32, modv-media 131, modv-render 21, modv-renderers 256).
-- Vitest: **924 tests pass** (includes the engine mirror-parity replay).
+- Rust workspace: **1107 tests pass** (modv-app 131, modv-engine 365,
+  modv-ipc 32, modv-media 131, modv-render 21, modv-renderers 427).
+- Vitest: **939 tests pass** (includes the engine mirror-parity replay and the
+  preview-client helpers).
 - `make lint`: clean (one pre-existing warning in an untouched component).
 - e2e: **143/143 pass** against the packaged AppImage, including the
   engine-mode spec (preview frames publish, engine kill survived and
@@ -83,17 +84,26 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       in the compositor; Ball renders through the packaged preview (CDP)
 - [x] Palette tween colours advance on the frame clock
 
-## M4 — Point10 — partial (5 of 25 scenes)
+## M4 — Point10 — partial (13 of 25 scenes)
 
 - [x] Scene trait/SceneContext, AudioBridge + P10Audio, shared particle
       alpha/sprite + random, postfx chain (UnrealBloom/OutputPass/ShaderPass/
       Composer), compositor integration, interim band mapping
-- [x] ChromaticLine (audio-driven), ChromaticWave, ParticleField,
-      SpiralParticles, Waveform — 96 Point10 tests incl. lavapipe renders
-- [ ] Remaining 20 scenes (tunnels, cubes, water/ripples, GlassLens, UltraHDR,
-      WebGPU/TSL scenes, GeometricTunnel SSAO, RollingFire/SmokeRoom,
-      LatentBackrooms) — next batches in the plan's dependency order
-- [ ] Golden-image parity vs the legacy renderer, warm cache/instance pool
+- [x] Batch 1: ChromaticLine (audio-driven), ChromaticWave, ParticleField,
+      SpiralParticles, Waveform
+- [x] Batch 2: SquareTunnel, LightTunnel, Wormhole (100k billboards, 5 px
+      sprites), ItIsComingForYou — composer bloom/ACES, Boxy
+      `preserveBloomAlpha`, transparent-background parity with a lavapipe
+      alpha test
+- [x] Batch 3: WaterRipple (WaveSim CPU field with a 64-point Node reference
+      match), GlassLens (raymarched glass over an internal Chromatic Wave
+      backdrop), Mycelium, AroundPlus — shared asset loader with procedural
+      fallbacks, phrase-colour helpers
+- [x] Batch 4 in flight: UltraHDR, MirrorCube, ColorCube, Boxy, SoundCube
+- [ ] Remaining 7 scenes (HollowCube, AttractorParticles, DvdRoom,
+      GeometricTunnel SSAO, RollingFire/SmokeRoom, LatentBackrooms)
+- [ ] Golden images (optional; behaviour parity is the priority), warm
+      cache/instance eviction
 
 ## M5 — Scenes / performance — mostly complete
 
@@ -107,9 +117,10 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       row-fade blending assigned to both group ids, Fade for manual changes,
       event-driven deltas
 - [ ] Scene-preview frames for the UI hover previews (≥ 25 fps)
-- [x] Gallery/output previews in the UI: main panel blits the composited ring;
-      gallery tiles poll the engine `preview/module` endpoint (renderer side
-      merged; engine endpoint in flight)
+- [x] Gallery/output previews in the UI: the main panel blits the composited
+      preview ring; gallery tiles poll `preview/module`, which the supervisor
+      queues (`Reply::Deferred`) and the window loop answers up to 4/frame
+      from an isolated LRU-cached module instance (shader/2D/Point10/ISF)
 - [ ] ISF shader scene transitions (Fade is the runtime transition for now)
 - [ ] Rename/removal migration for default Scenes on version bumps
 
@@ -119,9 +130,12 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [x] Meyda feature extractors, BeatDetektor, MIDI clock → BPM (43 tests)
 - [x] OSC server, raw MIDI ingestion, NDI send/receive via runtime FFI
       (51 tests; NDI needs the SDK at runtime)
-- [ ] Camera/screen/video capture (GStreamer) + system audio (PipeWire/cpal)
-- [ ] Renderer → engine audio feed (engine analysis of the renderer's pump)
-- [ ] Engine-side input-link evaluation of audio/MIDI/OSC sources
+- [ ] Camera/screen/video capture (GStreamer)
+- [ ] Audio capture: cpal input devices + native PipeWire monitor (in flight)
+- [ ] Engine audio feed + input-link evaluation (in flight: the renderer pump
+      forwards the full band/lane/cell/wave/FFT payload; the engine stores it,
+      drives shader/2D/ISF/Point10 audio and evaluates getter/state/mutation
+      links with throttled deltas)
 
 ## M7 — Parity and release — pending
 
