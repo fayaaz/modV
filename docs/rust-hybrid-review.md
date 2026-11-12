@@ -48,7 +48,7 @@ flush, windowless supervisor parking) remain open and are tracked here.
 
 - **Reviewed:** everything committed on `rust-hybrid` vs `origin/main`, i.e.
   the merge base `76816a0f` through the tip at the time of each review pass
-  (latest pass: **`36672a33`** — see the [Round log](#round-log)). This is
+  (latest pass: **`9afa21dc`** — see the [Round log](#round-log)). This is
   ~107k added lines across 205 files: six Rust crates (`crates/`, ~90k lines),
   the Electron/main-process and renderer integration, tests, build files and
   docs.
@@ -81,21 +81,31 @@ AGC bands port, the tween fixture (re-derived independently from anime.js
 3.2.2 — it is genuine output) and the delta-replay integration are all
 carefully done and well tested for the scale. The porting discipline (JS-named
 functions, JS line citations, deliberate-deviation comments) is unusually good
-and made this review productive.
+and made this review productive. The author's response to this review (see
+“Fix-wave verification — Round 5” below) was fast, broad and mostly
+high-quality — R-1..R-30 landed, with residuals.
 
-It is **not** ready to be the default renderer. There is at least one P1 that
-makes a class of ISF modules render wrong output, one P1 that makes the
-PipeWire capture path analyse garbage while reporting success, one P1 that
-leaves the renderer mirror permanently stale on a cold start, and (Round 3)
-a hero Point10 scene whose hoops render as solid washers. The Tweens and
-Scene-preview subsystems (the two newest, least baked workstreams) both have
-correctness defects of the data-loss/perf-correctness class rather than mere
-gaps. Several are cheap fixes; none of this is structural.
+**Status:** as of `9afa21dc`, engine mode remains opt-in and should stay so
+until the open items close. What blocks a default flip now:
+
+1. **R-31 (P1)** — an authored hero scene renders wrong (tunnel hoops ~20×
+   too deep) and was not touched by the fix wave.
+2. **R-2 residual** — mid-stream PipeWire death pins the show to silence with
+   no log and no renderer-pump fallback (the module doc claims the opposite;
+   engine-owned capture is a new user-facing path).
+3. **Shader-transition fallback paths (R-35/R-36)** — first-frame unblended
+   presentation on pass failure; alpha snap on mid-transition Fade fallback.
+4. **R-34** — Rolling Fire freezes entirely with no audio device (JS idles).
+5. **`.deb` linkage** — `libpipewire-0.3-0` is unconditional but undeclared
+   for the package; `MODV_ENGINE=1` dies at exec on minimal hosts.
+6. The seven known-failing ISF corpus shaders have no overrides (by design,
+   documented) — but the engine gives users no UI signal for "this effect
+   cannot render yet", only a log line.
 
 ## P1 — fix before anything else
 
-### R-1 `crates/modv-renderers/src/isf/runtime.rs:838` ✔
-Trailing-implicit final passes are blitted over, breaking real ISF shaders
+### R-1 `crates/modv-renderers/src/isf/runtime.rs:838` ✔ — FIXED in `3754b249`
+Trailing-implicit final passes were blitted over, breaking real ISF shaders
 
 ```rust
 let last_target = passes.iter().rev().find_map(|pass| pass.target);
@@ -103,24 +113,21 @@ let last_target = passes.iter().rev().find_map(|pass| pass.target);
 
 takes the last **targeted** pass. The JS sets `lastTarget = null` on every
 implicit pass and only blits when the *final* pass has a target — an implicit
-final pass is the destination. **33 corpus shaders have a trailing implicit
-final pass** (measured by scanning `src/renderer/.../isf/modules/isf/*.fs`:
-Glow, Soft Blur, Lens Flare, Long Exposure, Auto Levels, Echo Trace, Ghosting,
-VVMotionBlur 3.0, …, full list: `Auto Color Tone, Auto Levels, Circle Trails,
-Color History, Digital Clock, Echo Trace, Ghosting, Glow, HorizVertHold, Key
-Frame Artifacts, Lens Flare, Long Exposure, Micro Buffer (RGB), MultiFrame
-(2x2, 3x3), Noise Adapt, Optical Flow (Distort, Generator), RE RGB Gradient
-Generator, RGB Strobe, RGB Trails 3.0, Saturation Bleed, Shockwave Pulse,
-Smudged Lens, Soft Blur, Strobe, Time Glitch RGB, VVMotionBlur 3.0, Vertical
-Tearing, hexagons, rgbtimeglitch, rotozoomer`). For them, after the final
-(implicit) pass renders into the destination, this code performs an extra
-nearest-filtered blit of the pre-final buffer over the result
-(`runtime.rs:1095`), discarding the final pass. The same wrong contract is
-baked into the docs (`runtime.rs:19-21`, `overrides/README.md:77-78`,
-`mod.rs`), the 344/351 “success” narrative and the multi-pass unit test
-(which only asserts the all-targeted shape).
-**Fix:** `let last_target = passes.last().and_then(|pass| pass.target);` and
-add a trailing-implicit test that would have caught this.
+final pass is the destination. **30 corpus shaders have the affected shape**
+(multi-pass with a trailing implicit final pass — measured from the vendored
+corpus in Round 5; an earlier count of 33 in this file wrongly included three
+single-implicit-pass shaders that were never broken). Affected: Glow, Soft
+Blur, Lens Flare, Long Exposure, Auto Levels, Echo Trace, Ghosting,
+VVMotionBlur 3.0, … For them, after the final (implicit) pass renders into
+the destination, the code performed an extra nearest-filtered blit of the
+pre-final buffer over the result (`runtime.rs:1095`), discarding the final
+pass. The same wrong contract was baked into the docs (`runtime.rs:19-21`,
+`overrides/README.md:77-78`, `mod.rs`), the 344/351 “success” narrative and
+the multi-pass unit test.
+**Fix (landed):** `passes.last().and_then(|pass| pass.target)`; magenta
+regression test `trailing_implicit_final_pass_is_not_overwritten_by_a_blit`;
+docs updated. Verified against the JS bundle's `lastTarget=null` per implicit
+pass by the fix verifier.
 
 ### R-2 `crates/modv-media/src/audio/pipewire.rs` (`param_changed` ~L256, `process` ~L284) ✔
 Unsupported negotiated format is decoded as f32 anyway
@@ -445,7 +452,7 @@ ISF robustness/edges
 - `count_declarators` charges 1 location per declarator; `mat3/mat4` consume
   2 each → vertex sidecars can mis-number locations (report-only impact today).
 
-### R-27 ISF corpus claim hygiene (`docs/isf-corpus-report.md`, `docs/rust-hybrid-progress.md`) ◐ — fix in flight
+### R-27 ISF corpus claim hygiene (`docs/isf-corpus-report.md`, `docs/rust-hybrid-progress.md`) ◐ — landed in `3754b249`
 
 The corpus gate is `cargo test`, which (a) asserts only `translated > 0`, and
 never asserts the 98.0 % bar, and (b) **rewrites the committed report on every
@@ -456,13 +463,16 @@ stale. Also 7 override shaders are announced but the engine ships none
 (`cargo build` does not include `crates/modv-renderers/src/isf/overrides`; the
 `electron-builder.yml` `isf` resource ships only `resources/isf`), so in a
 packaged build those shaders get **no overrides at all**.
-**Fix:** make the corpus test assert the rate (≥95 %) against a checked-in
-manifest; stop the test rewriting the docs (diff instead); ship overrides in
-`extraResources` or embed them with `include_str!`.
-*Note: the working tree currently carries an in-flight rewrite of this path
-(`EMBEDDED_OVERRIDES` + `data/isf-overrides.json` fingerprint manifest +
-`ShaderOrigin::Corpus` guard, +870 lines in `translate.rs`) which addresses
-exactly this and the R-26 stem-collision issue — review once committed.*
+**Fix (landed in `3754b249`, verified in Round 5):** checked-in
+`isf-corpus-baseline.json` (344/0/7, 507 passes, 46 multi-pass, 15 FLOAT),
+corpus test asserts ≥ 95 % + per-shader diff vs the baseline, report markdown
+is written only to `OUT_DIR` (tracked file never rewritten by tests),
+overrides are embedded (`EMBEDDED_OVERRIDES` via build.rs `include_str!`)
+with `FNV-1a` fingerprint gating against `isf-overrides.json` (empty today),
+`MODV_ISF_REPORT_PATH` affects only the manual report writer, and user
+shaders named like corpus files cannot inherit overrides. **Still missing:**
+the 7 failing corpus shaders have no override files and render nothing —
+see Round 5 notes and the working list below.
 
 ### R-28 Point10 parity drift (`crates/modv-renderers/src/point10/**`) ◐
 
@@ -808,17 +818,337 @@ tests.
 
 ## Limitations of this review
 
-- No code was compiled, tested, or run — this is a reading review with JS
-  cross-checks. Rust test claims (1279 passing) were not re-run.
+- No code was compiled, tested, linted, packaged or run — this is a reading
+  review with JS cross-checks. The author's e2e (144/144), benchmark and
+  "1630 tests pass" claims were **not** re-run or reproduced.
 - Line numbers drift with each commit; `✔` findings were re-verified at the
-  reviewed tip, `◐` findings are single-pass reads (verify before fixing).
-- GPU-dependent behaviour (mip upload, clip-z, bloom alpha) verified by
-  reading wgpu/three.js semantics, not by running.
+  reviewed tip (not every fix was re-verified by execution), `◐` findings are
+  single-pass reads (verify before fixing).
+- GPU-dependent behaviour (mip upload, clip-z, bloom alpha, clip masks)
+  verified by reading wgpu/three.js semantics, not by running.
 - `crates/modv-engine/data/default-scenes.json` content was validated
   structurally by a reviewing agent, not by re-serialising against the JS
   source.
+- The review covers committed code only; the working tree at the snapshot was
+  never touched. Where the author's counts disagree with themselves (e.g.
+  1629 vs 1630 Rust subtotals, 947 vs 1005 Vitest), both were recorded
+  verbatim rather than arbitrated — running the suites was out of scope.
 - Review rounds are appended below; see [Round log](#round-log) for exactly
-  what was covered and when.
+  what was covered and when. As of Round 7, commits newer than `9afa21dc`
+  were in flight (expressions/plugins/video — see Round 7) and had not been
+  committed yet; the other thread had not stopped.
+
+## Fix-wave verification — Round 5 (`36672a33..916586f5`)
+
+The author addressed nearly every finding in dedicated commits
+(`011e432a` engine/ipc · `5732bdf2` media · `21402b4f` render/2D/Point10 ·
+`3754b249` ISF · `54e86322` app · `f1f3e615`/`916586f5` docs). Every fix was
+re-verified by reading the new code; GPU behaviour verified by reading only.
+The author also prepended a status table to this file
+(“Status after the fix wave”) — it is accurate for R-1..R-30 except as noted
+in this round's errata.
+
+**Verified fixed**
+
+- R-1 ISF trailing implicit pass — VERIFIED (`runtime.rs:907,1169`; blit now
+  `passes.last()`; magenta regression test; corpus measurement reconciled at
+  30 affected shaders).
+- R-2/R-3 PipeWire negotiation — VERIFIED for negotiation (F32LE/S16LE only,
+  8–192 kHz, 1–8 ch, `process` parks until accepted, readiness after accept,
+  negotiated rate reported, latched errors via non-consuming `ChunkQueue`,
+  analyser built from the negotiated rate). **Residual:** a mid-stream server
+  death still surfaces nothing — no `state_changed`/`error` listener, so
+  `next_chunk` returns `Ok(None)` forever: silence, no log, no renderer-pump
+  fallback (the module doc even claims otherwise). Also a mid-stream
+  rate/channel renegotiation leaves the startup-built analyser in place —
+  silent mis-analysis until restart.
+- R-4 cold-start sync — VERIFIED with design change: the engine now serves
+  `engine/get-sync` (sender-validated, main-window-only, returns *current*
+  state); the preload exposes `getSync()`; `application/index.js` awaits
+  `_pullEngineSync()` during `_appReady` before boot dispatches are replayed;
+  the accept-time `state/sync` path also feeds the same idempotent replay
+  (`engine-sync-replay.js`: removals→adds of groups/modules/inputs/links/
+  scenes/tweens/expressions; `registered` append-only). Re-entrant safe.
+  **Gaps:** no e2e kills the engine between spawn and renderer-ready; the
+  accept-time event can still fire before the tap registers (the pull is the
+  load-bearing path — fine); engine-client re-subscribers still drop the old
+  unsubscribe (P3, untouched); mirror tween descriptors carry no `frames`.
+- R-5/R-6/R-7 BPM/FPS tween rebuilds — VERIFIED (`bpm > 0.0` in both
+  collectors, infallible `TweenDescriptor::to_json`, per-entry serialisation,
+  `.max(1.0)` dropped, no-loop branch restores the seeked frame; JS `|| 120`
+  fallback for bpm≈0).
+- R-8/R-9 tween reload — VERIFIED (`restore_scene_inputs` ends with
+  `prune_tweens`, not full reload; per-entry decode with skip-and-warn;
+  failed ids keep the previous runtime). **Caveat:** `remove_input` on Scene
+  apply still never prunes stale tween descriptors from `state.tweens` —
+  the accumulator grows across a long performance; tracked as a residual.
+- R-10 scene-preview thrash — VERIFIED (retained instances for cached cells;
+  scoped `dispose_instances` of the evicted slot only; `materialisations()`
+  stays 1 across 20 warm renders; live path unchanged).
+- R-11 sync replay drops tweens/expressions — VERIFIED (replay helper;
+  unit-tested against the real worker store; idempotent; stale collection
+  replaced).
+- R-12 preview IPC — VERIFIED (magic + odd/even seq drop + post-pixel re-read
+  retry ×3, exact slot bound, `slotBytes-32` and 64 MiB caps, `readSync`
+  byte-count-checked, no `allocUnsafe`).
+- R-13 removeScene/stopPerformance transitions — VERIFIED (both call
+  `complete_all_row_transitions` + `complete_whole_scene_transition` and
+  re-publish `SET_ACTIVE_ROWS`).
+- R-14 migration duplicate removal — VERIFIED (first same-named match only,
+  seeded gate, drops all seeded entries for the name, idempotent re-run).
+  Residual: migration records carry names not ids (documented limitation).
+- R-15 scene-capture rows — VERIFIED (`MAX_SCENE_ROWS = 1024` shared with
+  `scene_rows`, BTreeMap, out-of-range rows dropped).
+- R-16 frame-graph COPY_DST — VERIFIED (`check_usage` + negative test).
+- R-17 2D self-sampling/clip/clear — VERIFIED (snapshot-routed
+  GridStretch/Pixelate/Buffer; `clip()` intersects incl. circle∧rect;
+  full-viewport `clearRect` is an ordered transparent-black `Replace` draw;
+  zero-init on create/resize).
+- R-18/R-19 OSC/tempo bounds — VERIFIED as library hardening (1<<16 array
+  index, arg/bundle/store caps, bundle depth ≤ 8; tempo rate 1–1000, ≤ 60 s
+  history, ≤ 60 000 frames). Note: OSC is unwired (R-23), so this protects
+  WS-10 later, not a live path today.
+- R-20/R-21 socket/ring — VERIFIED (`is_stale_socket`: ECONNREFUSED + socket
+  node only; mode 0600 after bind; `Drop` unlinks only the bound dev+inode;
+  ring created `0600`, slots init sequence=1/magic=0, poison-on-failure,
+  publish = 4-byte seq rewrite with full-header reader re-check, slot bounds
+  vs file length). Residual: bind/unlink TOCTOU vs a racing engine persists
+  (unlink-at-bind is not atomic); the “windowless supervisor parks forever”
+  P3 remains.
+- R-22 RT allocations — PARTIAL (scratch owned by the stream closures;
+  residual: `ChunkAssembler::push` still allocates/splits one `Vec` per
+  emitted block on the cpal RT thread).
+- R-23 engine-mode black-holing — PARTIAL (user-visible hints for Output
+  Window/MIDI/OSC; boot warning; `windows/createWindow` never dispatched).
+  Remaining: plugins list shows empty with no hint; fonts panel silently
+  shows the 4 system fonts; the BPM source dropdown still offers "midi" and
+  commits `SET_BPM_SOURCE midi` into the catch-all; `setupMidi()` still
+  commits `midi/ADD_DEVICE`/`WRITE_DATA` into the void with no feedback.
+- R-24 supervisor spawn/restart — VERIFIED (error→restart routing on
+  “starting” state, stale-child gating, SIGTERM→bounded-await→SIGKILL with
+  overlap log, `restartTimestamps` reset, budget logic extracted + unit-tested,
+  window-pruned, fake-engine integration tests added).
+- R-25 preload scope — VERIFIED (`engineApiScope` = main-only; `window.engine`
+  undefined elsewhere incl. output window; sender validation on every engine
+  handler; `ENGINE_IPC_CHANNELS` deleted). Loose end: `engine/get-state`
+  skips the sender check (trivial); `engine-client.js` re-subscriber leak
+  untouched.
+- R-26 ISF edges — VERIFIED except overrides (size clamp to device limit;
+  keyword-safe renames; `texture2DRect` → honest rejection (not a `textureLoad`
+  mapping, but loud > wrong); matrix/array location accounting; FRAMEINDEX doc
+  clarified; `$` scalars in size formulas incl. `$PASSINDEX`; `!!` truthiness;
+  `has_fragment_main` real check; override WGSL contract-validated end to end
+  with fingerprint (`FNV-1a`) manifest — user shaders named like corpus files
+  cannot inherit overrides). `has_default()` still cannot distinguish absent
+  vs `DEFAULT: null` (docs claim it can; zero corpus occurrences).
+- R-27 corpus hygiene — MOSTLY VERIFIED (checked-in `isf-corpus-baseline.json`
+  (344/0/7, 507 passes, 46 multi-pass, 15 FLOAT), corpus test asserts ≥ 95 %
+  + per-shader diff vs baseline, report markdown now written to `OUT_DIR`
+  only, tracked report never rewritten by tests). **Still missing:** the 7
+  failing corpus shaders have no override files — they render nothing until
+  someone writes the overrides (`Pixelize`, four Point10 Swirl/Wave variants,
+  `Shape Morph Feedback Mask/Wrap`). Both the manifest
+  (`isf-overrides.json` = `{"overrides": {}}`) and the README say so — honest,
+  but the WS-4 “98 %” figure hides those 7 as silent skips.
+- R-12-adjacent ring publish protocol — VERIFIED (see R-21).
+- `remove_scene_action`/`stop_performance` — VERIFIED (see R-13).
+- Ghost ordering + `restore()` republish — VERIFIED (ghost inserted before
+  created Groups; stable row sort; restore clears rows/transitions and
+  re-emits `SET_ACTIVE_ROWS`). Residual: the per-row interleave of incoming
+  Groups vs the JS's unnamed-row block is an in-code comment only, undocumented
+  in progress docs; `restore()` still leaves `engine_meter.pending` stale.
+
+**Still open after the fix wave (all re-confirmed at `916586f5`)**
+
+- **R-31 (P1) GeometricTunnel frame hoops ~16–24× too deep** — unchanged.
+- **R-32 (P2) SmokeRoom pane/sphere alpha order inverted** — unchanged.
+- **R-33 (P2) SmokeRoom lava sphere ignores `boxScale`** — unchanged.
+- **R-34 (P2) RollingFire no-audio path freezes the sim** — unchanged.
+- **R-35 (P2) compositron failure shows one unblended frame before the
+  Fade fallback** — unchanged.
+- **R-36 (P2) `fall_back_scene_transition_to_fade` snaps to frame-0 alphas**
+  — unchanged.
+- R-28 sub-items deliberately kept by the author (documented as deliberate):
+  `ItIsComingForYou` keeps `preserve_bloom_alpha` (JS does not call it — alpha
+  boost lost); `AroundPlus` keeps the GL-shaped matrix (justified for its
+  screen-space water maths).
+- `texture_pool.rs:229` — zero-size pool key still produces a zero
+  `bytes_per_row` write (wgpu panic). Unfixed.
+- `stroke_text` mask re-upload (~13 R8 textures per frame) — unfixed.
+- Engine-client unsubscribe leak; `engine-ipc` `engine/get-state` sender
+  validation; `MIDI` BPM-source dropdown reaches the catch-all;
+  `engine_meter.pending` not drained by `restore()`.
+- Docs arithmetic everywhere in the Wave docs: `rust-hybrid-progress.md` and
+  the new “Verification snapshot” still say **424** registered modules
+  ("37 shader + 15 2D + 21 Point10 + 351 ISF") — reality is **428**
+  (25 Point10); `store_ops.rs` test constant still `37 + 15 + 18`;
+  `mod.rs` says 287 image-input shaders (measured **288**);
+  `docs/isf-translation-notes.md` still says “63 multi-pass / 43 PERSISTENT /
+  16 FLOAT” (measured **46 / 46 / 15** — the progress doc itself was updated,
+  the notes/plan were not); progress doc claims 1630 Rust tests summing to
+  **1629**, and “947 Vitest” in one place vs “**1005** Vitest” in CHANGES.md;
+  the fix-wave author added a status table to this file claiming R-1..R-30
+  fixed — accurate except the counts above and the silent omission of
+  R-31..R-36 (they were simply not in the table).
+- Review-file hygiene: the committed copy of this document now leads with the
+  author's status table; the “In flight at the time of writing … they will be
+  reviewed when committed” paragraph was stale (now updated), and “Last full
+  pass” lagged behind (updated by this round).
+
+## Round 6 (`916586f5..73729fdb`)
+
+- `electron-builder.yml` — Point10 scene textures (`point10/textures`) now
+  ship as `extraResources: textures`; `engine-supervisor.js` computes
+  `assetsDir` (packaged resources path in production, source-tree path in
+  dev) and exports `MODV_ASSETS_DIR` into the engine. Clean, minimal fix for
+  the packaged-build texture fallbacks (reported as fixed in the progress
+  doc: zero asset-fallback warnings, 107 fps, 144/144 e2e).
+- Doc claims re-checked: “the `.deb` depends on the distro's package set …
+  `MODV_ENGINE=0` (the default) never launches the engine” — the default-flag
+  half is true; the `.deb` claim is **not**: `electron-builder.yml` `deb:` has
+  no `depends:`, and the electron-builder default set (GTK/notify/nss…) does
+  not include `libpipewire-0.3-0`, while `modv-media`/`modv-app` link it
+  **unconditionally** (linux target-dep) — so on a minimal host without it,
+  simply spawning the engine dies at load time regardless of
+  `--audio-source`, and the supervisor burns its restart budget. Fix: build
+  `modv-engine` with dlopen for PipeWire (like NDI), or declare
+  `deb.depends: ["default", "libpipewire-0.3-0"]`.
+
+## Round 7 — `73729fdb..9afa21dc` (ISF 351/351, gallery effect previews)
+
+### R-1/R-27 follow-up — the last 7 corpus shaders — VERIFIED, with one honest caveat
+Commit `77fcb048` adds four general GLSL→WGSL passes to `source.rs` (declared
+hoisting of non-constant global initialisers; per-call-site cloning of
+sampler-parameter functions; deterministic default returns for non-void
+fall-through functions; column splitting of matrix varyings) and bumps the
+baseline to 351/351, 507 passes, no overrides. Verified by reading only:
+
+- All four passes preserve declaration order and only fire on unreachable
+  paths or shapes naga previously rejected outright; the previously-344
+  "translated" corpus keeps identical semantics by construction, and the
+  corpus gate (exact name-set equality + ≥ 95 % assertion, `OUT_DIR`-only
+  markdown) now pins it. No previously-fine shader can reach the sampler
+  cloning path; matrix varying splits only the previously-failing sidecar.
+- Pass-specific cares: const globals never hoisted; `#if`-guarded
+  declarations never move; recursion refused (loud failure); clone tuples
+  cache per distinct sampler-pair not per call (no exponential blowup;
+  unbounded for pathological user shaders — no compile-time guard); a call
+  *before* a sampler-function's definition is never inlined (documented
+  false negative); `apply_edits` silently drops out-of-order edits (footgun
+  for future passes, P3).
+- **Caveat (docs):** the "100 % corpus" claim is materially misleading for
+  **v002 Light Leak**: it now naga-validates, but its sidecar's `mat2`
+  rotation is rebuilt from zero-initialised private globals — the leak's
+  rotation is a silent no-op. Runtime behaviour is identical to before the
+  commit (the effect was already dead), so it is *not* a regression; but
+  "351/351 translation passes naga" must not be read as "all 351 shaders
+  render fully". The `PERSISTENT`/`FLOAT` counts (46/15) remain accurate;
+  the tracked report is consistent with the new baseline.
+- All seven previously-failing shaders individually verified against their
+  specific failure modes (Pixelize hoist; Swirl/Wave/Banded sampler clones;
+  Shape Morph default returns; Light Leak column split).
+
+### `9afa21dc` — gallery effect previews (test card) — VERIFIED, clean
+Effects were rendered over a transparent/blank input so filter thumbnails
+were blank. `preview/module` now renders over a synthetic UV-gradient +
+checker card (white border), padded to the 256-byte row alignment, with a
+synthetic `audio`/`audioFFT` texture pair for shaders declaring audio inputs
+("animates even when the live frame is silent"). Textures are per-slot,
+dropped with the slot (bounded by the 32-slot cache), `create_output_texture`
+includes `COPY_DST` (no write-texture validation risk), image inputs are
+bound to the same test card. Compositor tests now assert the effect frame is
+non-uniform and opaque. No live-path impact; thumbnails now legible.
+
+### `8df313c9` — corpus docs — fine modulo the caveat above
+Claims "351/351 fragments, 36/36 vertex sidecars, no overrides" — the
+*counts* reproduce exactly from the corpus, but see the v002 Light Leak note
+and `mod.rs`/`isf-translation-notes.md`'s still-stale 63/43/16 figures
+(carried from Round 5; unfixed in this delta).
+
+### In flight (uncommitted, not yet reviewed)
+At the time of this round, the working tree carries a substantially larger
+scope: an **expressions engine** (`crates/modv-engine/src/expressions.rs`
+and `crates/modv-app/src/expressions.rs`, new), a **JS plugin host**
+(`src/renderer/src/application/plugin-host.js`, `install-plugin.js`,
+`plugins/grab-canvas.js`, `use.js`, `tests/unit/plugin-host.test.js`), video
+capture (`crates/modv-media/src/video/`, new), Point10 volume scenes
+(`scenes/dvd_logo.rs`, `point10/volume/`, new), ISF `translate.rs`/`source.rs`
+further changes with baseline bumps, `docs/rust-full-rewrite.md` (new), and
+`Dockerfile`/Cargo.toml updates. Not reviewed until committed. The
+full-rewrite doc suggests the project may be pivoting beyond the hybrid
+plan — watch for its landing.
+
+
+
+
+## Outstanding items — the working list as of `9afa21dc`
+
+Ordered by severity. Everything here is fix-wave-verified or carried forward
+(marked ✔/◐ in the body).
+
+**P1**
+1. **R-31** — `geometric_tunnel.rs`: frame-hoop instance missing its z-scale
+   (renders as a ~20× too deep solid washer; the author's own test pins the
+   wrong constant). Fix: scale the frame instance by `TUNNEL_HOOP_DEPTH`
+   (0.05) or build the frame band with that depth.
+
+**P2**
+2. **R-2 residual** — PipeWire mid-stream server death is silent: no
+   `state_changed`/`error` listener → capture never reports, feed stops,
+   silence, no fallback. Register the listener and route to the same
+   fallback used for startup failures.
+3. **R-35** — `compositor.rs:~1024`: pass failure shows one unblended frame
+   of the incoming Scene before the window loop downgrades (misattributed
+   WARN). Downgrade in-frame or log at the failure site.
+4. **R-36** — `performance.rs:~951`: `fall_back_scene_transition_to_fade`
+   snaps alphas to frame-0 values regardless of progress; lerp from the
+   current eased progress like the JS.
+5. **R-34** — `rolling_fire.rs:~1332`: no-audio device freezes the fire sim
+   (JS idles; the sibling SmokeRoom already behaves).
+6. **R-32 / R-33** — SmokeRoom: pane/sphere alpha order inverted; lava sphere
+   ignores `boxScale`.
+7. **`.deb` linkage** — `electron-builder.yml`: `deb.depends` absent;
+   `libpipewire-0.3-0` is an unconditional linux link-time dep of the engine.
+   Declare `["default", "libpipewire-0.3-0"]` or dlopen it like NDI.
+
+**P3 / hygiene**
+8. `restore()` leaves `engine_meter.pending` stale (store a fresh one or
+   drop it on restore).
+9. `remove_input` doesn't purge Scene-restoration tween descriptors from
+   `state.tweens` — unbounded growth over a long performance (R-8 residual);
+   `state.tweens` also silently shrinks on a non-finite BPM write (bounded,
+   warn-only).
+10. PipeWire mid-stream rate renegotiation leaves the startup-rate analyser
+    in place (silent mis-analysis).
+11. `texture_pool.rs:229` — zero-size pool key → zero `bytes_per_row`
+    (wgpu panic).
+12. `stroke_text` re-uploads the same mask ~13× per frame.
+13. Engine-client `onDelta/onState/onStateSync` drop previous listeners
+    instead of unsubscribing; `engine/get-state` skips the sender check.
+14. BPM panel still offers a “midi” source (selects a no-op commitment);
+    `setupMidi()` commits device actions into the void with no feedback;
+    plugins list and local-font panel silently render empty in engine mode
+    (boot warning only).
+15. Docs arithmetic: progress doc and status table say **424** registered
+    modules (it is **428**: 37+15+25+351; `store_ops` test constant still
+    `37+15+18`); `isf-translation-notes.md` still says 63/43/16 (it is
+    46/46/15); progress doc claims 1630 Rust tests (subtotals sum to
+    **1629**) and “947” vs “1005” Vitest (CHANGES vs progress doc);
+    progress doc says "of 351 ISF — 7 failing shaders render nothing" without
+    telling the user where; `rust-hybrid.md` carries the same stale figures.
+16. Whole-scene Fade interleaves incoming **between** same-row outgoing
+    groups; JS appends incoming after outgoing (R-29 deviation, in-code
+    comment only).
+17. ISF “351/351” caveat: the corpus validates to naga, but **v002 Light
+    Leak** renders with its rotation silently dead (sidecar matrix varying is
+    rebuilt from zeros) — naga-passing is not the same as effect-working;
+    consider failing that shader loudly or shipping one override. Also ship
+    no UI signal for "effect cannot fully render" in engine mode.
+18. ISF translator residuals (P3): `apply_edits` silently drops
+    out-of-order edits (footgun for future passes); clone of sampler-parameter
+    functions explodes for pathological user shaders (no compile-time guard);
+    a call before a sampler-parameter function's definition is never inlined
+    (false negative); the hoist doc over-claims about forward references.
 
 ## Round log
 
@@ -828,18 +1158,9 @@ tests.
 | 2 | `e8d78f18..3548101f` (delta, from `git archive`) | Tweens, Scene hover previews, engine sync wiring, Point10 batch 5a (21/25) | All P1s from round 1 re-verified still present; new tween and preview findings R-5..R-11 |
 | 3 | `3548101f..c088335d` (delta) | Point10 batch 5b (25/25), `--audio-source` engine-owned capture wiring, installer plumbing | New P1 R-31 (tunnel hoop depth); R-32..R-34 parity findings; packaging gap (no libpipewire in deb depends); docs/tests coverage gaps |
 | 4 | `c088335d..36672a33` (delta) | Shader whole-Scene transitions (crossfade/dissolve/pixelate/glitch/wipe/circle), progress docs, `M7 — in progress` status | No P1; new R-35..R-36 fallback-path defects; transition window glue untested; fallback-Fade alpha snap |
-
-**In flight at the time of writing (uncommitted, not yet reviewed):** the
-working tree carries fixes matching nearly every finding in this file —
-`scene_capture.rs` (R-15), `default_scene_migrations.rs` (R-14), `socket.rs` /
-`preview.rs` (R-20/R-21), `pipewire.rs` / `tempo.rs` / `osc.rs` / `capture.rs`
-(R-2/R-3/R-19/R-18/R-22), `tweens.rs` (R-5/R-6/R-7), `scene_preview.rs` (R-10),
-the ISF pipeline (R-1/R-26/R-27, incl. embedded overrides + fingerprint
-manifest), `two_d` (R-17), Point10 (R-28, R-31..R-34), `frame_graph.rs`
-(R-16), and the JS side (`engine-preview-read.js`, `engine-restart-budget.js`,
-`engine-sync-replay.js`, `preload/engine-api-scope.js`, R-4/R-12/R-24/R-25).
-They are listed here only so the reader knows a response is already
-underway; they will be reviewed when committed.
+| 5 | `36672a33..916586f5` (fix wave, 7 commits) | Review-driven fixes across all crates + JS | R-1..R-30 re-verified; residuals listed in the Round 5 section; **R-31..R-36 NOT FIXED**; new caveat: PipeWire mid-stream death still silent; module-count docs still wrong (424→428 unfixed) |
+| 6 | `916586f5..73729fdb` (delta) | Point10 textures shipped for packaged builds | Assets fix clean; `.deb` still undeclared `libpipewire-0.3-0` |
+| 7 | `73729fdb..9afa21dc` (delta) | ISF “351/351” (four new translation passes, no overrides), gallery effect previews over a test card | Passes verified per-shader; caveat: v002 Light Leak validates with its rotation silently dead — “351/351” ≠ “351/351 render correctly”; gallery fix clean |
 
 <sub>Review file maintained incrementally; earlier passes are not retracted,
-only extended. Last full pass: `36672a33` — 2026-11-12.</sub>
+only extended. Last full pass: `9afa21dc` — 2026-11-12.</sub>
