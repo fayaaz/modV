@@ -74,6 +74,19 @@ appImage:
     - --no-sandbox
 deb:
   artifactName: ${productName}-${version}.${ext}
+  # The engine (MODV_ENGINE=1) links libpipewire-0.3 for engine-owned
+  # system-audio capture. Keep electron-builder's default set and add it.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - libpipewire-0.3-0
 npmRebuild: false
 # publish:
 #   provider: github

@@ -2321,6 +2321,21 @@ impl Compositor {
 
     /// Run the active whole-scene shader transition over `main`.
     ///
+    /// Pre-build the shader-transition pipeline before the first transition
+    /// frame. A false result means the effect cannot run and the store should
+    /// fall back to Fade for this same frame.
+    pub fn prepare_scene_transition(
+        &mut self,
+        effect: crate::scene_transition::TransitionEffect,
+    ) -> bool {
+        let (width, height) = self.size;
+        let pass = self.scene_transition.get_or_insert_with(|| {
+            crate::scene_transition::SceneTransitionPass::new(&self.device, &self.queue)
+        });
+        pass.resize(width, height);
+        pass.prepare(effect)
+    }
+
     /// `from` is the captured outgoing frame, `to` is this frame's main
     /// composite. The pass renders into its own scratch target; the result is
     /// copied back into main so every downstream reader (present, preview,

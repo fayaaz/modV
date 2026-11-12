@@ -958,14 +958,18 @@ impl Store {
         }
         let from = transition.from.clone();
         let to = transition.to.clone();
+        // Resume the Fade from the transition's *current* eased progress; the
+        // JS only clears the shader and lets the next tick lerp, so a fallback
+        // at 90% must not snap the incoming Scene off (R-36).
+        let eased = smoothstep(transition.progress());
         if let Some(transition) = self.performance.transition.as_mut() {
             transition.kind = FADE_TRANSITION.to_string();
         }
-        for (group_id, _) in &to {
-            self.set_group_alpha(group_id, 0.0, true);
+        for (group_id, alpha) in &to {
+            self.set_group_alpha(group_id, alpha * eased, true);
         }
         for (group_id, alpha) in &from {
-            self.set_group_alpha(group_id, *alpha, true);
+            self.set_group_alpha(group_id, alpha * (1.0 - eased), true);
         }
         true
     }
@@ -1832,6 +1836,52 @@ mod tests {
                 store.take_pending_transition_capture(),
                 None,
                 "Fade needs no capture"
+            );
+        }
+    }
+
+    #[test]
+    fn fade_fallback_resumes_from_the_current_progress() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({
+                    "config": {
+                        "allowedTransitions": ["Three Wipe"],
+                        "transitionSeconds": 1,
+                    }
+                }),
+            )
+            .expect("config");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+            .expect("apply b");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-c" }))
+            .expect("apply c");
+
+        // Half-way through the shader transition, then lose the capture.
+        tick(&mut store, 0.5);
+        let shader = store.whole_scene_transition().cloned().expect("transition");
+        assert!((shader.progress() - 0.5).abs() < 1e-6);
+        assert!(store.fall_back_scene_transition_to_fade());
+        let fade = store.whole_scene_transition().cloned().expect("fade");
+        let eased = smoothstep(shader.progress());
+        for (group_id, alpha) in &fade.to {
+            let current = store.state().find_group(group_id).unwrap().alpha;
+            assert!(
+                (current - alpha * eased).abs() < 0.01,
+                "incoming {current} != {}",
+                alpha * eased
+            );
+        }
+        for (group_id, alpha) in &fade.from {
+            let current = store.state().find_group(group_id).unwrap().alpha;
+            assert!(
+                (current - alpha * (1.0 - eased)).abs() < 0.01,
+                "outgoing {current} != {}",
+                alpha * (1.0 - eased)
             );
         }
     }

@@ -466,6 +466,14 @@ impl SceneTransitionPass {
     /// Both inputs must be the current output size; the pass records a
     /// validation-time mismatch as a failure so the caller can fall back to
     /// Fade. Returns `false` when the effect's pipeline could not be built.
+    /// Pre-build the pipeline for `effect` (called when a shader transition
+    /// starts, before the first frame is composited) so a compile failure
+    /// downgrades to Fade on the same frame instead of showing one unblended
+    /// frame.
+    pub(crate) fn prepare(&mut self, effect: TransitionEffect) -> bool {
+        self.ensure_pipeline(effect)
+    }
+
     pub(crate) fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,

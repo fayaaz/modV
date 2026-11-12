@@ -1326,7 +1326,17 @@ impl GeometricTunnel {
 
             let frame_rotation =
                 ((index % 3) as f32 - 1.0) * std::f32::consts::PI / outer_sides as f32;
-            let frame_model = mat4_mul(&group, &rotation_z(frame_rotation));
+            // The shared band mesh is unit radius/depth; the JS frame geometry
+            // is authored at the tunnel radius (4.2) with TUNNEL_HOOP_DEPTH.
+            // Without this scale the hoops are 4.2× too small and ~20× too
+            // deep (they read as solid washers).
+            let frame_model = mat4_mul(
+                &group,
+                &mat4_mul(
+                    &rotation_z(frame_rotation),
+                    &scale(RADIUS, RADIUS, TUNNEL_HOOP_DEPTH),
+                ),
+            );
             push(
                 MeshKey::Ring(outer_sides),
                 EmissiveInstance {
@@ -3047,6 +3057,37 @@ mod tests {
         let bad = advance_tunnel(0.0, 0.0, 0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0, 1.0);
         assert_eq!(bad.scroll, 0.0);
         assert_eq!(bad.turn, 2.6);
+    }
+
+
+    #[test]
+    fn frame_hoops_use_the_tunnel_radius_and_hoop_depth() {
+        // R-31: the JS frame geometry is authored at RADIUS with
+        // TUNNEL_HOOP_DEPTH; the shared unit band must be scaled to match or
+        // the hoops render as small, deep washers.
+        let mut scene = GeometricTunnel::new();
+        scene.time = 0.4;
+        let pose = scene.current_pose(0);
+        let batches = scene.collect_batches();
+        let (_, instances) = batches
+            .iter()
+            .find(|(key, _)| matches!(key, MeshKey::Ring(_)))
+            .expect("ring batches exist");
+        let model = &instances[0].model;
+        let column_length = |column: usize| {
+            (model[column][0] * model[column][0]
+                + model[column][1] * model[column][1]
+                + model[column][2] * model[column][2])
+                .sqrt()
+        };
+        assert!((column_length(0) - RADIUS * pose.scale).abs() < 1e-4);
+        assert!((column_length(1) - RADIUS * pose.scale).abs() < 1e-4);
+        assert!(
+            (column_length(2) - TUNNEL_HOOP_DEPTH * pose.depth_scale).abs() < 1e-4,
+            "frame depth {} != {}",
+            column_length(2),
+            TUNNEL_HOOP_DEPTH * pose.depth_scale
+        );
     }
 
     #[test]

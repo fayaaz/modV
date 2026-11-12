@@ -445,15 +445,25 @@ impl WindowedApp {
                 .as_ref()
                 .is_some_and(Compositor::has_transition_capture);
             if captured {
-                scene_transition = Some(SceneTransitionInfo {
-                    effect,
-                    progress: transition.progress(),
-                    from_groups: transition
-                        .from
-                        .iter()
-                        .map(|(group_id, _)| group_id.clone())
-                        .collect(),
-                });
+                let prepared = self
+                    .compositor
+                    .as_mut()
+                    .is_some_and(|compositor| compositor.prepare_scene_transition(effect));
+                if prepared {
+                    scene_transition = Some(SceneTransitionInfo {
+                        effect,
+                        progress: transition.progress(),
+                        from_groups: transition
+                            .from
+                            .iter()
+                            .map(|(group_id, _)| group_id.clone())
+                            .collect(),
+                    });
+                } else if self.store.fall_back_scene_transition_to_fade() {
+                    eprintln!(
+                        "engine: WARN the shader transition pipeline failed to build; Scene transition falls back to Fade"
+                    );
+                }
             } else if self.store.fall_back_scene_transition_to_fade() {
                 eprintln!(
                     "engine: WARN lost the captured outgoing frame; Scene transition falls back to Fade"
