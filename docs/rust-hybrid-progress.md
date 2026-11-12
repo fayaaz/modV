@@ -98,11 +98,14 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## M5 — Scenes / performance
 
-- [ ] scenes state machine (per-cell dwell, row names, ghosts, crossfades,
-      stopPerformance, transition pick), row-transition blend
-- [ ] default-scenes.js → JSON data + seeding logic
-- [ ] Scene capture, hover preview, playlist import/export, transition defs
-- [ ] scene-preview renders ≥ 25 fps
+- [x] scenes core logic (per-cell dwell, row names/family sharing, transition
+      pick, capture, preview-data, columns/cells, link defaults) — 269 tests
+- [x] default-scenes.js → JSON data (59 Scenes) + seeding/refresh/removal logic
+- [x] Scene apply/save/capture, playlist import/export, scenes.json
+      persistence, row-name remap — engine-integrated, mirror deltas emitted
+- [ ] performance runtime (start/stop/tick, per-row dwell advance, crossfade
+      ghosts, whole-scene fade transitions)
+- [ ] scene-preview frames to the UI (hover previews ≥ 25 fps)
 
 ## M6 — Media
 
