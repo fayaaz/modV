@@ -6,6 +6,7 @@
 
 mod cli;
 mod compositor;
+mod fixtures;
 mod headless;
 mod ids;
 mod module_registry;
@@ -20,6 +21,19 @@ use modv_render::{Engine, EngineConfig};
 
 fn main() -> ExitCode {
     let cli = cli::parse();
+
+    // Fixture emission is a pure store session: no GPU device, no window and no
+    // control socket are touched, so it runs before `Engine::new`.
+    if let Some(dir) = &cli.emit_fixtures {
+        return match fixtures::emit(dir) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: could not emit fixtures: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     if cli.socket.is_some() && cli.headless {
         eprintln!("engine: note — the control socket is only polled in windowed mode");
     }

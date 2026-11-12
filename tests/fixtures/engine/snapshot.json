@@ -1,0 +1,140 @@
+{
+  "groups": [
+    {
+      "id": "group-1",
+      "name": "Background",
+      "hidden": false,
+      "modules": [
+        "module-1"
+      ],
+      "enabled": 0,
+      "alpha": 0.35,
+      "inherit": true,
+      "inheritFrom": -1,
+      "pipeline": false,
+      "clearing": false,
+      "compositeOperation": "normal"
+    },
+    {
+      "id": "group-3",
+      "name": "Effects",
+      "hidden": false,
+      "modules": [
+        "module-2"
+      ],
+      "enabled": 0,
+      "alpha": 1,
+      "inherit": true,
+      "inheritFrom": -1,
+      "pipeline": false,
+      "clearing": false,
+      "compositeOperation": "multiply"
+    }
+  ],
+  "modules": {
+    "module-1": {
+      "$id": "module-1",
+      "$moduleName": "Bands",
+      "meta": {
+        "name": "Bands",
+        "author": "modV",
+        "version": "0.1",
+        "type": "shader",
+        "category": "2d-scenes",
+        "audioFeatures": [
+          "bass",
+          "mid",
+          "treble"
+        ],
+        "previewWithOutput": false,
+        "alpha": 1,
+        "enabled": true,
+        "compositeOperation": "normal",
+        "isGallery": false
+      },
+      "props": {
+        "u_ringWidth": 0.31
+      },
+      "data": {},
+      "$props": {}
+    },
+    "module-2": {
+      "$id": "module-2",
+      "$moduleName": "Point10 Invert",
+      "meta": {
+        "name": "Point10 Invert",
+        "author": "Point10",
+        "version": "1.0.0",
+        "type": "shader",
+        "previewWithOutput": true,
+        "alpha": 1,
+        "enabled": true,
+        "compositeOperation": "normal",
+        "isGallery": false
+      },
+      "props": {},
+      "data": {},
+      "$props": {}
+    },
+    "module-3": {
+      "$id": "module-3",
+      "$moduleName": "Ball",
+      "meta": {
+        "name": "Ball",
+        "author": "2xAA",
+        "version": "1.0.1",
+        "type": "2d",
+        "audioFeatures": [
+          "zcr",
+          "rms"
+        ],
+        "alpha": 1,
+        "enabled": false,
+        "compositeOperation": "normal",
+        "isGallery": false
+      },
+      "props": {
+        "amount": 300.0,
+        "speed": 2.0,
+        "wrap": false,
+        "size": 2,
+        "intensity": 15,
+        "soundType": false,
+        "color": {
+          "data": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              255,
+              255,
+              255
+            ]
+          ],
+          "duration": 10000,
+          "easing": "linear"
+        }
+      },
+      "data": {},
+      "$props": {}
+    }
+  },
+  "inputs": {
+    "focusedInput": null,
+    "inputs": {},
+    "inputLinks": {}
+  },
+  "expressions": {
+    "assignments": {}
+  },
+  "tweens": [],
+  "midi": {},
+  "version": 1,
+  "renderOrder": [
+    0,
+    2,
+    1
+  ]
+}

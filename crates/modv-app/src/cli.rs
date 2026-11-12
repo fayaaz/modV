@@ -3,7 +3,8 @@
 //! Parsed with clap's builder API: the `derive` feature of clap is not
 //! enabled in this workspace and `Cargo.toml` is frozen for this milestone.
 //! The `--socket`/`--state` flags are accepted for forward compatibility
-//! with M1 (WS-14) and are unused here.
+//! with M1 (WS-14) and are unused here. `--emit-fixtures` writes the M2 parity
+//! fixtures and exits before any GPU/window work (see [`crate::fixtures`]).
 
 use std::path::PathBuf;
 
@@ -41,6 +42,10 @@ pub struct Cli {
     pub socket: Option<PathBuf>,
     /// Reserved for M1: state snapshot path. Accepted but unused here.
     pub state: Option<PathBuf>,
+    /// Write the deterministic store fixtures (`deltas.json` +
+    /// `snapshot.json`) into this directory and exit. Runs before any GPU,
+    /// window or socket setup — see [`crate::fixtures`].
+    pub emit_fixtures: Option<PathBuf>,
 }
 
 impl Cli {
@@ -151,6 +156,13 @@ pub fn parse() -> Cli {
                 .value_name("PATH")
                 .help("Reserved for M1: state snapshot path"),
         )
+        .arg(
+            Arg::new("emit-fixtures")
+                .long("emit-fixtures")
+                .value_name("DIR")
+                .help("Write the deterministic store fixtures (deltas.json, snapshot.json) into DIR and exit")
+                .value_parser(value_parser!(PathBuf)),
+        )
         .get_matches();
 
     let socket = matches.get_one::<String>("socket").map(PathBuf::from);
@@ -186,5 +198,6 @@ pub fn parse() -> Cli {
         log_adapter: matches.get_flag("log-adapter"),
         socket,
         state: matches.get_one::<String>("state").map(PathBuf::from),
+        emit_fixtures: matches.get_one::<PathBuf>("emit-fixtures").cloned(),
     }
 }

@@ -1,0 +1,288 @@
+[
+  {
+    "type": "groups/ADD_GROUP",
+    "payload": {
+      "group": {
+        "id": "group-1",
+        "name": "Background",
+        "hidden": false,
+        "modules": [],
+        "enabled": 0,
+        "alpha": 1,
+        "inherit": true,
+        "inheritFrom": -1,
+        "pipeline": false,
+        "clearing": false,
+        "compositeOperation": "normal"
+      }
+    }
+  },
+  {
+    "type": "groups/ADD_GROUP",
+    "payload": {
+      "group": {
+        "id": "group-2",
+        "name": "VmodV internal Gallery Group",
+        "hidden": true,
+        "modules": [],
+        "enabled": 0,
+        "alpha": 1,
+        "inherit": true,
+        "inheritFrom": -1,
+        "pipeline": false,
+        "clearing": false,
+        "compositeOperation": "normal"
+      }
+    }
+  },
+  {
+    "type": "groups/ADD_GROUP",
+    "payload": {
+      "group": {
+        "id": "group-3",
+        "name": "Effects",
+        "hidden": false,
+        "modules": [],
+        "enabled": 0,
+        "alpha": 1,
+        "inherit": true,
+        "inheritFrom": -1,
+        "pipeline": false,
+        "clearing": false,
+        "compositeOperation": "normal"
+      }
+    }
+  },
+  {
+    "type": "modules/ADD_ACTIVE_MODULE",
+    "payload": {
+      "module": {
+        "$id": "module-1",
+        "$moduleName": "Bands",
+        "meta": {
+          "name": "Bands",
+          "author": "modV",
+          "version": "0.1",
+          "type": "shader",
+          "category": "2d-scenes",
+          "audioFeatures": [
+            "bass",
+            "mid",
+            "treble"
+          ],
+          "previewWithOutput": false,
+          "alpha": 1,
+          "enabled": false,
+          "compositeOperation": "normal",
+          "isGallery": false
+        },
+        "props": {
+          "u_ringWidth": 0.05
+        },
+        "data": {},
+        "$props": {},
+        "$status": []
+      }
+    }
+  },
+  {
+    "type": "modules/ADD_ACTIVE_MODULE",
+    "payload": {
+      "module": {
+        "$id": "module-2",
+        "$moduleName": "Point10 Invert",
+        "meta": {
+          "name": "Point10 Invert",
+          "author": "Point10",
+          "version": "1.0.0",
+          "type": "shader",
+          "previewWithOutput": true,
+          "alpha": 1,
+          "enabled": false,
+          "compositeOperation": "normal",
+          "isGallery": false
+        },
+        "props": {},
+        "data": {},
+        "$props": {},
+        "$status": []
+      }
+    }
+  },
+  {
+    "type": "modules/ADD_ACTIVE_MODULE",
+    "payload": {
+      "module": {
+        "$id": "module-3",
+        "$moduleName": "Ball",
+        "meta": {
+          "name": "Ball",
+          "author": "2xAA",
+          "version": "1.0.1",
+          "type": "2d",
+          "audioFeatures": [
+            "zcr",
+            "rms"
+          ],
+          "alpha": 1,
+          "enabled": false,
+          "compositeOperation": "normal",
+          "isGallery": false
+        },
+        "props": {
+          "amount": 10,
+          "speed": 2.0,
+          "wrap": false,
+          "size": 2,
+          "intensity": 15,
+          "soundType": false,
+          "color": {
+            "data": [
+              [
+                0,
+                0,
+                0
+              ],
+              [
+                255,
+                255,
+                255
+              ]
+            ],
+            "duration": 10000,
+            "easing": "linear"
+          }
+        },
+        "data": {},
+        "$props": {},
+        "$status": []
+      }
+    }
+  },
+  {
+    "type": "modules/ADD_ACTIVE_MODULE",
+    "payload": {
+      "module": {
+        "$id": "module-4",
+        "$moduleName": "Not A Real Module",
+        "meta": {
+          "name": "Not A Real Module",
+          "alpha": 1,
+          "enabled": false,
+          "compositeOperation": "normal",
+          "isGallery": false
+        },
+        "props": {},
+        "data": {},
+        "$props": {},
+        "$status": [
+          {
+            "type": "error",
+            "message": "Module \"Not A Real Module\" is not registered. VmodV will skip this while rendering"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "groups/ADD_MODULE_TO_GROUP",
+    "payload": {
+      "moduleId": "module-1",
+      "groupId": "group-1",
+      "position": 0
+    }
+  },
+  {
+    "type": "groups/ADD_MODULE_TO_GROUP",
+    "payload": {
+      "moduleId": "module-2",
+      "groupId": "group-3",
+      "position": 0
+    }
+  },
+  {
+    "type": "groups/ADD_MODULE_TO_GROUP",
+    "payload": {
+      "moduleId": "module-3",
+      "groupId": "group-1",
+      "position": 1
+    }
+  },
+  {
+    "type": "modules/UPDATE_ACTIVE_MODULE_META",
+    "payload": {
+      "id": "module-1",
+      "metaKey": "enabled",
+      "data": true
+    }
+  },
+  {
+    "type": "modules/UPDATE_ACTIVE_MODULE_META",
+    "payload": {
+      "id": "module-2",
+      "metaKey": "enabled",
+      "data": true
+    }
+  },
+  {
+    "type": "modules/UPDATE_ACTIVE_MODULE_PROP",
+    "payload": {
+      "moduleId": "module-1",
+      "prop": "u_ringWidth",
+      "data": {
+        "value": 0.31,
+        "type": "float",
+        "path": ""
+      }
+    }
+  },
+  {
+    "type": "modules/UPDATE_ACTIVE_MODULE_PROP",
+    "payload": {
+      "moduleId": "module-3",
+      "prop": "amount",
+      "data": {
+        "value": 300.0,
+        "type": "int",
+        "path": ""
+      }
+    }
+  },
+  {
+    "type": "groups/UPDATE_GROUP_BY_KEY",
+    "payload": {
+      "groupId": "group-1",
+      "key": "alpha",
+      "data": 0.35
+    }
+  },
+  {
+    "type": "groups/UPDATE_GROUP_BY_KEY",
+    "payload": {
+      "groupId": "group-3",
+      "key": "compositeOperation",
+      "data": "multiply"
+    }
+  },
+  {
+    "type": "groups/UPDATE_GROUP_BY_KEY",
+    "payload": {
+      "groupId": "group-3",
+      "key": "inheritFrom",
+      "data": -1
+    }
+  },
+  {
+    "type": "modules/REMOVE_ACTIVE_MODULE",
+    "payload": {
+      "moduleId": "module-4"
+    }
+  },
+  {
+    "type": "groups/REMOVE_MODULE_FROM_GROUP",
+    "payload": {
+      "moduleId": "module-3",
+      "groupId": "group-1"
+    }
+  }
+]
