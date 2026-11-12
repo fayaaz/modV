@@ -30,6 +30,10 @@ const GALLERY_IDLE_FPS = 0.25;
 // The engine may not implement `preview/module` yet (or may be mid-restart):
 // back off so a Gallery full of tiles cannot flood the control socket.
 const GALLERY_FAILURE_RETRY_MS = 15_000;
+// The engine answers four previews per frame; a fresh Gallery mounts hundreds
+// of tiles at once, so stagger the first pull instead of overflowing the
+// engine's pending queue.
+const GALLERY_INITIAL_SPREAD_MS = 4_000;
 // Fallback request size when the tile has not been laid out yet.
 const GALLERY_FALLBACK_WIDTH = 160;
 const GALLERY_FALLBACK_HEIGHT = 90;
@@ -161,8 +165,11 @@ export default {
         disposed: false,
         hovered: false,
         failures: 0,
-        // null → nothing pulled yet, so the first frame is due immediately.
+        // null → nothing pulled yet; the first frame is staggered so a fresh
+        // Gallery does not enqueue hundreds of requests in one tick.
         lastMs: null,
+        firstPullAt:
+          performance.now() + Math.random() * GALLERY_INITIAL_SPREAD_MS,
       };
 
       this.scheduleEnginePreview();
@@ -199,7 +206,9 @@ export default {
       const fps = this.enginePreviewFps(state);
       let wait = 0;
 
-      if (state.failures > 0) {
+      if (state.lastMs === null && !state.hovered && now < state.firstPullAt) {
+        wait = state.firstPullAt - now;
+      } else if (state.failures > 0) {
         wait = GALLERY_FAILURE_RETRY_MS;
       } else if (!shouldRefresh(now, state.lastMs, fps)) {
         wait = Math.max(0, state.lastMs + 1000 / fps - now);

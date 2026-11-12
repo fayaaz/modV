@@ -304,6 +304,11 @@ impl Store {
         self.scene_list_revision
     }
 
+    /// Push one delta to the UI mirror (status metrics, resize events).
+    pub(crate) fn push_delta(&mut self, type_: &str, payload: Value) {
+        self.deltas.push(type_, payload);
+    }
+
     /// Mark the Scene list (or the row-name mapping that selects its rows) as
     /// changed.
     pub(crate) fn touch_scene_list(&mut self) {

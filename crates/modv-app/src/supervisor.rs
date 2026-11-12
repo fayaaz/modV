@@ -58,7 +58,7 @@ const SNAPSHOT_SAVE_EVERY_FRAMES: u64 = 120;
 /// of surfaces never reaches this. A request that would overflow the queue is
 /// answered with `engine_busy` immediately instead of growing memory (spec:
 /// bounded queues only).
-pub const MAX_PENDING_PREVIEWS: usize = 32;
+pub const MAX_PENDING_PREVIEWS: usize = 512;
 
 /// Which preview a queued request renders.
 ///

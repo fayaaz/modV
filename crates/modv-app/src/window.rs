@@ -96,6 +96,12 @@ struct WindowedApp {
     window: Option<Arc<Window>>,
     bench_deadline: Option<Duration>,
     frames_done: u64,
+    /// Frames since the last `metrics/SET_FPS_MEASURE` publish.
+    metric_frames: u32,
+    last_metric: Instant,
+    /// Latest surface size, republished with the status metrics so a late
+    /// renderer connection still receives it.
+    surface_size: (u32, u32),
     last_frame: Instant,
     start: Instant,
     done: bool,
@@ -216,6 +222,9 @@ impl WindowedApp {
             adapter,
             window: None,
             frames_done: 0,
+            metric_frames: 0,
+            last_metric: Instant::now(),
+            surface_size: (0, 0),
             last_frame: start,
             start,
             done: false,
@@ -535,6 +544,30 @@ impl WindowedApp {
         }
         self.frames_done += 1;
 
+        // Publish the UI status metrics once a second: the legacy worker owned
+        // `metrics/SET_FPS_MEASURE` and `size/SET_SIZE`, so engine mode showed
+        // "0 FPS" without this.
+        self.metric_frames += 1;
+        let metric_now = Instant::now();
+        let metric_elapsed = metric_now.saturating_duration_since(self.last_metric);
+        if metric_elapsed >= Duration::from_secs(1) {
+            let fps = self.metric_frames as f64 / metric_elapsed.as_secs_f64();
+            self.store
+                .push_delta("metrics/SET_FPS_MEASURE", serde_json::json!(fps));
+            let (width, height) = self.surface_size;
+            if width > 0 && height > 0 {
+                self.store.push_delta(
+                    "size/SET_SIZE",
+                    serde_json::json!({ "width": width, "height": height, "dpr": 1.0 }),
+                );
+            }
+            self.metric_frames = 0;
+            self.last_metric = metric_now;
+            if let Some(supervisor) = &mut self.supervisor {
+                supervisor.broadcast_deltas(&mut self.store);
+            }
+        }
+
         if let Some(supervisor) = &mut self.supervisor {
             supervisor.note_frame_presented(&self.store);
             if supervisor.shutdown_requested() {
@@ -684,6 +717,20 @@ impl ApplicationHandler for WindowedApp {
                     if let Some(compositor) = &mut self.compositor {
                         compositor.resize(size.width, size.height);
                     }
+                    let dpr = self
+                        .window
+                        .as_ref()
+                        .map(|window| window.scale_factor())
+                        .unwrap_or(1.0);
+                    self.surface_size = (size.width, size.height);
+                    self.store.push_delta(
+                        "size/SET_SIZE",
+                        serde_json::json!({
+                            "width": size.width,
+                            "height": size.height,
+                            "dpr": dpr,
+                        }),
+                    );
                 }
             }
             WindowEvent::RedrawRequested => self.draw_frame(event_loop),
