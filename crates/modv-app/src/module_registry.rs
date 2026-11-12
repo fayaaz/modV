@@ -816,6 +816,86 @@ impl ModuleRegistry {
 
     /// The default prop values for a module, as the `props` object of a new
     /// active module (`getPropDefault`, `utils/get-prop-default.js`).
+    /// The `state.registered` map the UI mirror needs in engine mode.
+    ///
+    /// The legacy worker registers every module definition locally
+    /// (`modules.js` `ADD_REGISTERED_MODULE`), so the Gallery and the
+    /// drag/preview surfaces can read `registered[name].meta`. In engine mode
+    /// no worker exists; `state/sync` ships this map once per connection and
+    /// the renderer replays it into the mirror. Names resolve with the same
+    /// precedence as [`ModuleRegistry::kind`] (shader → 2D → Point10 → ISF), so
+    /// a corpus shader that shares a built-in name does not shadow it.
+    ///
+    /// Only `meta` and the prop descriptors are included — the JS definition
+    /// object also carries lifecycle functions, which the mirror never calls.
+    pub fn registered_modules(&self) -> Value {
+        let mut names: Vec<&str> = Vec::new();
+        for module in &self.shader {
+            names.push(&module.name);
+        }
+        for definition in &self.two_d {
+            names.push(&definition.meta.name);
+        }
+        for definition in &self.point10 {
+            names.push(&definition.meta.name);
+        }
+        for definition in &self.isf {
+            names.push(&definition.name);
+        }
+        names.sort_unstable();
+        names.dedup();
+
+        let mut registered = Map::new();
+        for name in names {
+            let Some(meta) = self.meta_fields(name) else {
+                continue;
+            };
+            let props = self
+                .prop_names(name)
+                .into_iter()
+                .filter_map(|prop| {
+                    let schema = self.prop_schema(name, &prop)?;
+                    Some((prop, schema_json(&schema)))
+                })
+                .collect::<Map<String, Value>>();
+            registered.insert(name.to_string(), json!({ "meta": meta, "props": props }));
+        }
+        Value::Object(registered)
+    }
+
+    /// Prop names declared by a registered module, in declaration order.
+    fn prop_names(&self, module_name: &str) -> Vec<String> {
+        if let Some(module) = self.shader_module(module_name) {
+            return module
+                .props
+                .iter()
+                .map(|prop| prop.name.to_string())
+                .collect();
+        }
+        if let Some(definition) = self.two_d_definition(module_name) {
+            return definition
+                .props
+                .iter()
+                .map(|prop| prop.name.to_string())
+                .collect();
+        }
+        if let Some(definition) = self.point10_definition(module_name) {
+            return definition
+                .props
+                .iter()
+                .map(|prop| prop.name.to_string())
+                .collect();
+        }
+        if let Some(definition) = self.isf_definition(module_name) {
+            return definition
+                .props
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+        }
+        Vec::new()
+    }
+
     pub fn default_props(&self, module_name: &str) -> Option<Value> {
         if let Some(module) = self.shader_module(module_name) {
             let mut props = Map::new();
@@ -895,6 +975,28 @@ fn prop_kind_name(kind: PropKind) -> &'static str {
         PropKind::Vec4 => "vec4",
         PropKind::Color => "color",
     }
+}
+
+/// Serialise a [`PropSchema`] the way the JS prop descriptors are shaped.
+fn schema_json(schema: &PropSchema) -> Value {
+    let mut map = Map::new();
+    map.insert("type".to_string(), json!(schema.type_));
+    if let Some(default) = &schema.default {
+        map.insert("default".to_string(), default.clone());
+    }
+    if let Some(min) = schema.min {
+        map.insert("min".to_string(), json!(min));
+    }
+    if let Some(max) = schema.max {
+        map.insert("max".to_string(), json!(max));
+    }
+    if schema.strict {
+        map.insert("strict".to_string(), json!(true));
+    }
+    if schema.abs {
+        map.insert("abs".to_string(), json!(true));
+    }
+    Value::Object(map)
 }
 
 /// Build a [`PropSchema`] from a shader prop declaration.
@@ -1260,6 +1362,33 @@ mod tests {
     }
 
     // ————————————————— Point10 scenes (M4) —————————————————
+
+    #[test]
+    fn registered_modules_cover_every_kind_and_match_meta_fields() {
+        let registry = ModuleRegistry::builtin();
+        let registered = registry.registered_modules();
+        let map = registered.as_object().expect("registered is an object");
+
+        for name in ["Bands", "Ball", "Point10 Chromatic Line"] {
+            let entry = map.get(name).unwrap_or_else(|| panic!("{name} missing"));
+            assert_eq!(
+                entry["meta"],
+                json!(registry.meta_fields(name).expect("meta fields")),
+                "{name} meta must match meta_fields"
+            );
+            assert!(
+                entry["props"]
+                    .as_object()
+                    .is_some_and(|props| !props.is_empty()),
+                "{name} must expose prop descriptors"
+            );
+        }
+
+        // Built-in shader + 2D + Point10 definitions, all unique.
+        assert!(map.len() >= 37 + 15 + 18);
+        assert_eq!(map["Bands"]["props"]["u_ringWidth"]["type"], json!("float"));
+        assert_eq!(map["Bands"]["props"]["u_ringWidth"]["min"], json!(0.01));
+    }
 
     #[test]
     fn registry_knows_the_point10_scenes() {

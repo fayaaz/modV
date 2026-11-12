@@ -138,16 +138,29 @@ pub fn evaluate_input_links(
             continue;
         };
 
-        // `loop.js:164-170`: the JS loop skips a meyda link when its Module is
-        // disabled, and skips mutation links entirely (the mutation subscriber
-        // owns them). The engine evaluates mutation links here because it has
-        // no Vuex subscription: they are gated on the matcher below.
+        // `loop.js:164-170`: the JS loop skips a **meyda** link when its
+        // Module is disabled (tween/state links keep updating so a re-enabled
+        // module resumes at the current tween value), and skips mutation links
+        // entirely (the mutation subscriber owns them). The engine evaluates
+        // mutation links here because it has no Vuex subscription: they are
+        // gated on the matcher below.
+        // `createInputLink` always stores a source, but older/synthesised
+        // documents may omit it: a sourceless `meyda/*` getter is still an
+        // audio link and keeps the JS disabled-module gate.
+        let meyda_link = link.source.as_deref() == Some("meyda")
+            || (link.source.is_none()
+                && link
+                    .location
+                    .as_deref()
+                    .is_some_and(|location| location.starts_with("meyda/")));
         if let LinkTarget::Module { module_id, .. } | LinkTarget::ModuleMeta { module_id, .. } =
             &target
         {
             match state.modules.get(module_id) {
                 Some(module) => {
-                    if module.meta.get("enabled").and_then(Value::as_bool) != Some(true) {
+                    if meyda_link
+                        && module.meta.get("enabled").and_then(Value::as_bool) != Some(true)
+                    {
                         continue;
                     }
                 }
@@ -669,6 +682,39 @@ mod tests {
         // A disabled module is skipped for meta links too (JS loop gate).
         state.modules.get_mut("m-meta").expect("module").meta = json!({ "enabled": false });
         assert!(evaluate(&state).is_empty());
+    }
+
+    #[test]
+    fn only_meyda_links_skip_a_disabled_module() {
+        let (mut state, _) = state_with_link(
+            "tween",
+            "m1",
+            "amount",
+            None,
+            json!({
+                "type": "state",
+                "location": "tweens.tweens['t1'].value[0]",
+                "source": "tween",
+            }),
+        );
+        state.tweens = json!([{ "id": "t1", "value": [0.4] }]);
+        state.modules.get_mut("m1").expect("module").meta = json!({ "enabled": false });
+        let writes = evaluate(&state);
+        assert_eq!(writes.len(), 1, "tween links update disabled modules");
+        assert!((writes[0].value - 0.4).abs() < 1e-6);
+
+        let (mut state, _) = state_with_link(
+            "meyda",
+            "m2",
+            "amount",
+            None,
+            json!({ "type": "getter", "location": "meyda/getFeature", "args": ["bass"], "source": "meyda" }),
+        );
+        state.modules.get_mut("m2").expect("module").meta = json!({ "enabled": false });
+        assert!(
+            evaluate(&state).is_empty(),
+            "meyda links skip disabled modules"
+        );
     }
 
     #[test]
