@@ -12,8 +12,8 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1798 tests pass** (modv-app 299, modv-engine 439,
-  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 761).
+- Rust workspace: **1801 tests pass** (modv-app 301, modv-engine 439,
+  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 762).
 - Vitest: **1139 tests pass** across 90 files (engine mirror-parity replay,
   preview/read helpers, supervisor restart budget, preload scoping, sync
   replay, plugin host, engine media controller/paths, module meta and payload
@@ -53,7 +53,10 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
   frame); restored Webcam scenes (`WEBCAM2`, `WEBCAM2-EDGEBLUR`) render the
   live feed with both cameras running and `enabled` arriving as booleans; the
   media library's project-prefixed paths (`/default/video/…`) resolve under
-  `media.path`.
+  `media.path`; a Gallery-added module has its prop/meta Inputs in both the
+  engine and the mirror (Inspector populated); `rave.exe` renders upright
+  (texture-free ISF generators now use the legacy bottom-left coordinate
+  system).
 - Engine vs legacy at 1920×1080 (same scenes, Electron UI open): the engine
   holds **120 fps** in every scene (Smoke Room, Geometric Tunnel, Chromatic
   Cascade, Rolling Fire, DVD Afterglow) at 720p/1080p/1440p; legacy holds its

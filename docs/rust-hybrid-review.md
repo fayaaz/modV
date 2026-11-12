@@ -2184,6 +2184,19 @@ Verified on the packaged AppImage (`MODV_ENGINE=1`), 2026-11-12.
   1 stutter/10 s** (was 120 fps, p99 49.4 ms, 253 stutters/10 s). Legacy
   holds 60 fps / p99 ~20 ms.
 
+- **Gallery-added Modules (P1) — fixed.** `modules/makeActiveModule` now
+  creates the per-prop Inputs and the alpha/enabled/compositeOperation meta
+  Inputs, records their ids in `$props`/`meta`, and emits `inputs/ADD_INPUT`
+  deltas before `ADD_ACTIVE_MODULE`. Previously only Scene snapshots did this,
+  so a Gallery drop produced a Module whose Inspector was empty. Fixtures
+  regenerated; the mirror-parity test now compares 17 input records.
+- **Texture-free ISF generators (P1 visual) — fixed.** Legacy ISF gives
+  `isf_FragNormCoord` a bottom-left origin (WebGL); the engine used top-left,
+  which is correct for sampling wgpu textures but rendered coordinate-built
+  generators upside down (`rave.exe` posters had inverted type). Shaders with
+  no texture bindings now use a bottom-left vertex shader; filters keep the
+  top-left varying so input sampling stays upright. Verified live.
+
 **Remaining, ranked:** GPU-resample the preview before read-back (or map
 async) to remove the ~32 ms full-resolution read-back outlier; the X11
 obscured-window wedge; engine output window/CLI size (defaults to 1280×720,
