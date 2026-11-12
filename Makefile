@@ -181,6 +181,7 @@ docker-cargo-volume: docker-rust
 
 define run-cargo
 	$(DOCKER) run --rm \
+		--ulimit core=0 \
 		--user "$(HOST_UID):$(HOST_GID)" \
 		-e HOME=/tmp \
 		-e CARGO_HOME=/cargo \

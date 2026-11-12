@@ -10,8 +10,8 @@ test-results
 playwright-report
 tests
 *.log
-core
-core.*
+**/core
+**/core.*
 .env
 .env.*
 .DS_Store
