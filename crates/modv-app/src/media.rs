@@ -448,7 +448,13 @@ impl MediaHub {
                             None
                         }
                     } else if let Some(status) = self.hub.status(&id) {
-                        if status.needs_restart() {
+                        if status.needs_restart() && !should_restart(status.state, entry.looping) {
+                            // A non-looping video file finished playing: leave
+                            // it parked at its last frame (the legacy
+                            // `<video>` element stops at the end) instead of
+                            // replaying it forever.
+                            Some(HealthAction::Ended)
+                        } else if status.needs_restart() {
                             let reason = status.last_error.clone().unwrap_or_else(|| match status
                                 .state
                             {
@@ -487,6 +493,12 @@ impl MediaHub {
                     dropped,
                     size,
                 }) => self.schedule_restart(&id, reason, frames, dropped, size),
+                Some(HealthAction::Ended) => {
+                    if let Some(entry) = self.entries.get_mut(&id) {
+                        entry.attempts = 0;
+                        entry.logged_failure = false;
+                    }
+                }
                 Some(HealthAction::Healthy) => {
                     if let Some(entry) = self.entries.get_mut(&id) {
                         entry.attempts = 0;
@@ -651,10 +663,25 @@ impl MediaHub {
     }
 }
 
+/// Whether a stopped pipeline should be restarted.
+///
+/// A non-looping file that reached `Ended` stays parked (the JS `<video>`
+/// stops at its last frame); an error is always retried, and a looping file
+/// that ends is restarted from the beginning.
+fn should_restart(state: VideoSourceState, looping: bool) -> bool {
+    match state {
+        VideoSourceState::Ended => looping,
+        VideoSourceState::Error => true,
+        _ => false,
+    }
+}
+
 /// What [`MediaHub::poll_health`] decided for one source.
 enum HealthAction {
     /// The backoff elapsed: start the pipeline again.
     Retry,
+    /// A non-looping file finished: leave it parked, no restart.
+    Ended,
     /// The source failed/ended: release it and schedule a retry.
     Restart {
         reason: String,

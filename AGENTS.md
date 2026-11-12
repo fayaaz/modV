@@ -108,8 +108,14 @@ renderer stays the default until the plan's M7.
   frames into per-source pooled textures and the Webcam module draws the
   camera-like source selected by its 1-based `camera` prop (files excluded
   from that order). Sources survive Scene applies, reconnect with backoff and
-  stop on shutdown. Engine-mode UI drives engine sources (no getUserMedia for
-  video); screen capture is gated until Electron exposes the portal node id.
+  stop on shutdown; a non-looping file parks at its end instead of replaying,
+  and `media/start-file` accepts only absolute local paths (no URI scheme or
+  `..`). Camera enumeration queries V4L2 directly (`v4l` crate) because
+  GStreamer's device monitor instantiates libcamera, which segfaults on some
+  hosts. Engine-mode UI drives engine sources (no getUserMedia for video);
+  screen capture is gated until Electron exposes the portal node id. The
+  AppImage needs the host GStreamer runtime for engine video capture (the
+  `.deb` declares it).
 - Expressions/tweens/plugins: expressions run in-engine through Boa
   (`crates/modv-engine/src/expressions.rs` + `modv-app/src/expressions.rs`),
   applied at every JS `applyExpression` site; tweens are ported in

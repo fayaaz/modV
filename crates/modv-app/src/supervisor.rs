@@ -553,9 +553,20 @@ impl EngineSupervisor {
                     .get("loop")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                // `path` comes from the media directory (absolute); the crate
-                // percent-encodes it into the `file://` URI `uridecodebin`
-                // wants.
+                // Refuse URIs/relative paths: `uridecodebin` would happily
+                // fetch `https://…`, and a shared Scene playlist must not be
+                // able to make the engine open arbitrary network or relative
+                // targets. The renderer resolves library paths against the
+                // media directory before sending them.
+                let Some(path) = normalise_media_path(&path) else {
+                    return Response::err(
+                        request.id,
+                        "invalid_params",
+                        "media/start-file needs an absolute local file path (no URI scheme or \"..\")",
+                    );
+                };
+                // The crate percent-encodes the path into the `file://` URI
+                // `uridecodebin` wants.
                 let config = VideoSourceConfig::file(path).with_mode(
                     media_dimension(&request.params, "width", DEFAULT_WIDTH),
                     media_dimension(&request.params, "height", DEFAULT_HEIGHT),
@@ -843,6 +854,29 @@ fn media_dimension(params: &Value, key: &str, default: u32) -> u32 {
         .filter(|number| number.is_finite() && *number > 0.0)
         .map(|number| number.round().min(f64::from(u32::MAX)) as u32)
         .unwrap_or(default)
+}
+
+/// Validate a `media/start-file` path.
+///
+/// Only an absolute local path is accepted: a URI (`https://…`, `file:…`) or a
+/// relative path could make `uridecodebin` reach outside the user's media
+/// library, and a `..` component could escape the directory the renderer
+/// rooted the path under. Returns the path unchanged (no filesystem access).
+fn normalise_media_path(raw: &str) -> Option<String> {
+    if raw.contains('\0') || raw.contains("://") || raw.starts_with("file:") {
+        return None;
+    }
+    let path = std::path::Path::new(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(raw.to_string())
 }
 
 fn media_invalid_params(id: u64, method: &str, field: &str) -> Response {
@@ -1884,6 +1918,42 @@ mod tests {
             0,
             "a failed start registers nothing"
         );
+    }
+
+    #[test]
+    fn media_paths_are_absolute_local_files_only() {
+        assert_eq!(
+            normalise_media_path("/home/u/VmodV/media/video/clip.mp4").as_deref(),
+            Some("/home/u/VmodV/media/video/clip.mp4")
+        );
+        assert_eq!(normalise_media_path("https://example.com/clip.mp4"), None);
+        assert_eq!(normalise_media_path("file:///tmp/clip.mp4"), None);
+        assert_eq!(normalise_media_path("clip.mp4"), None);
+        assert_eq!(normalise_media_path("/media/../secret.mp4"), None);
+        assert_eq!(normalise_media_path("/media/clip.mp4\0"), None);
+    }
+
+    #[test]
+    fn media_start_file_rejects_uris_and_relative_paths() {
+        let (mut supervisor, mut store, mut stream) = media_fixture("media-file-invalid");
+        for (id, path) in [
+            (201, "https://example.com/clip.mp4"),
+            (202, "clip.mp4"),
+            (203, "/media/../secret.mp4"),
+        ] {
+            let (response, _) = request(
+                &mut supervisor,
+                &mut store,
+                &mut stream,
+                id,
+                "media/start-file",
+                json!({ "sourceId": "video-a", "path": path }),
+            );
+            let error = response.error.expect("invalid paths are rejected");
+            assert_eq!(error.code, "invalid_params");
+        }
+        // The engine is still healthy and has no source registered.
+        assert!(supervisor.media_mut().is_empty());
     }
 
     #[test]

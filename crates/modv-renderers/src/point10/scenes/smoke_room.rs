@@ -57,7 +57,7 @@
 
 use crate::point10::audio_bridge::AudioBridge;
 use crate::point10::scenes::cube_mesh::{
-    Mat4, MeshGpu, build_box, depth_state, identity, scale, translation,
+    Mat4, MeshGpu, build_box, depth_state, scale, translation,
 };
 use crate::point10::scenes::fire_common::build_sphere as build_uv_sphere;
 use crate::point10::shared::phrase_color::{DropColorState, drop_color_pulse, ease_phrase_hue};
@@ -372,11 +372,19 @@ impl SmokeRoom {
         }
     }
 
+    /// `_boxGroup.scale.setScalar(_boxScale)` (`SmokeRoom.js:296-299`): the
+    /// emitter lives inside the scaled box group, so its vertices (and the
+    /// volume seed positions) grow with `boxScale`. The wind falloff radius
+    /// uses the same scale (`u.origin.w`), so both must move together (R-33).
+    fn emitter_model(&self) -> crate::point10::scenes::cube_mesh::Mat4 {
+        scale(self.box_scale, self.box_scale, self.box_scale)
+    }
+
     fn emitter_uniforms(&self, temporal: &FireTemporal) -> EmitterUniforms {
         let colour = fire_colour(0.55, self.fire_hue);
         EmitterUniforms {
             view_proj: self.view_proj(),
-            model: identity(),
+            model: self.emitter_model(),
             camera_pos: [CAMERA_START[0], CAMERA_START[1], CAMERA_START[2], 1.0],
             glow: [colour[0], colour[1], colour[2], self.emitter_glow(temporal)],
             params: [temporal.time, temporal.flame_height, temporal.flicker, 0.0],
@@ -440,7 +448,7 @@ impl SmokeRoom {
             volume_width as f32,
             volume_height as f32,
         ];
-        uniforms.set_emitter_model(identity());
+        uniforms.set_emitter_model(self.emitter_model());
         uniforms
     }
 }
@@ -942,8 +950,9 @@ mod tests {
         assert_eq!(uniforms.view[3], 128.0);
         close(uniforms.view[0], (60.0_f32.to_radians() * 0.5).tan(), 1e-6);
         close(uniforms.view[1], 16.0 / 9.0, 1e-6);
-        // The emitter model is the identity (the sphere sits at the origin).
-        assert_eq!(uniforms.emitter_model, identity());
+        // The emitter is inside the `boxScale` group: at scale 2 its vertices
+        // spread to twice the JS radius (R-33).
+        assert_eq!(uniforms.emitter_model, scale(2.0, 2.0, 2.0));
         // Point light: dark at t = 0? No — the temporal is t = 10, so lit.
         assert!(uniforms.point_light[0] > 0.0);
     }

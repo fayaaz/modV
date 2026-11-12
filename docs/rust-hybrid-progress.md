@@ -212,9 +212,13 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       loop/alternate, steps, 41 penner easings verified against anime.js);
       Input Links resolve tween paths read-then-advance, `beats/SET_BPM`
       rebuilds durations and `fps/SET_FPS` rebuilds frames
-- [ ] Expression assignments (`new Function` in the JS) and JS plugins: a
-      documented M7 gap until a sandboxed evaluator/ABI lands
-- [ ] Camera/screen/video capture (GStreamer)
+- [x] Expression assignments (`new Function` in the JS) and JS plugins:
+      Boa evaluates assignments in-engine; plugin hooks run in a renderer-side
+      host that forwards writes to the engine
+- [x] Camera/screen/video capture (GStreamer): cameras (V4L2 enumeration via
+      the `v4l` crate after the libcamera provider crashed), files and portal
+      screen nodes; the UI gates screen capture until Electron exposes a
+      PipeWire node id
 
 ## Known gaps (M7 sign-off)
 
@@ -225,7 +229,16 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
   is not modelled (restart the source). The built-in `grab-canvas` plugin
   needs the worker's composited output canvas and is disabled with a reason.
 - Expressions and plugin hooks are now engine-supported; `osc` in expression
-  scope is empty until the engine owns OSC receive state.
+  scope is empty until the engine owns OSC receive state. Expression source is
+  capped and a denylist rejects native allocation/loop/context escapes; the
+  engine trusts user presets but not hostile shared playlists with arbitrary
+  JS.
+- Known compositing limitation: Point10/ISF scene targets use straight alpha
+  (`alpha = max(rgb)`) while the internal frame graph is premultiplied. Over
+  opaque/bright backdrop rows the engine adds slightly too much colour;
+  default Scenes put these layers on black rows, so current content is
+  unaffected (documented decision: keep the scene outputs straight until a
+  composite-time premultiply flag lands).
 - Custom/third-party ISF transitions are not available: the six native
   transitions are ported, the picker filters unknown names to Fade.
 - The ISF corpus translates 351/351 fragments and 36/36 vertex sidecars with

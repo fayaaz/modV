@@ -87,6 +87,15 @@ deb:
     - libuuid1
     - libsecret-1-0
     - libpipewire-0.3-0
+    # Engine-owned video capture (MODV_ENGINE=1, WS-10) uses GStreamer:
+    # cameras need v4l2src (plugins-good), files uridecodebin + decoders
+    # (plugins-base/libav), screens pipewiresrc (pipewire). The engine degrades
+    # to a media_plugin_missing error without them.
+    - libgstreamer1.0-0
+    - libgstreamer-plugins-base1.0-0
+    - gstreamer1.0-plugins-base
+    - gstreamer1.0-plugins-good
+    - gstreamer1.0-libav
 npmRebuild: false
 # publish:
 #   provider: github

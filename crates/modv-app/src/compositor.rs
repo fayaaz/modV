@@ -711,6 +711,16 @@ impl MediaTexture {
         if frame.width == 0 || frame.height == 0 {
             return Err("the frame has no size".to_string());
         }
+        // A misbehaving screen/camera node can advertise absurd caps; refuse
+        // before the texture pool reserves gigabytes (R-33/P2 review item).
+        // 8192² covers 8K video with headroom.
+        const MAX_FRAME_PIXELS: u64 = 8192 * 8192;
+        if u64::from(frame.width) * u64::from(frame.height) > MAX_FRAME_PIXELS {
+            return Err(format!(
+                "the frame is {}x{} (more than {MAX_FRAME_PIXELS} pixels)",
+                frame.width, frame.height
+            ));
+        }
         if !frame.is_tightly_packed() {
             return Err(format!(
                 "the frame buffer is {} bytes; {}x{} RGBA8 needs {}",
