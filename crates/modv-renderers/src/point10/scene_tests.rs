@@ -9,6 +9,7 @@
 
 use crate::point10::audio_bridge::{AUDIO_SAMPLES, AudioBridge, BandPayload};
 use crate::point10::postfx::Composer;
+use crate::point10::scenes::rolling_fire;
 use crate::point10::test_support::{TestTarget, any_lit, gpu};
 use crate::point10::{HDR_FORMAT, Point10Scene, SceneContext, all_scenes};
 
@@ -932,6 +933,179 @@ fn dvd_room_volume_is_structured() {
     assert_ne!(pixels, next, "consecutive audio frames are identical");
 }
 
+/// The mean luminance of the brightest `fraction` of the drawn pixels — the
+/// fire's own colour, without the (grey) floor diluting it.
+fn warm_ratio_of_brightest(pixels: &[u8], fraction: f32) -> f32 {
+    let mut drawn: Vec<(f32, f32, f32)> = Vec::new();
+    for pixel in pixels.as_chunks::<4>().0 {
+        if pixel[3] == 0 {
+            continue;
+        }
+        drawn.push((pixel[0] as f32, pixel[1] as f32, pixel[2] as f32));
+    }
+    if drawn.is_empty() {
+        return 0.0;
+    }
+    drawn.sort_by(|a, b| (b.0 + b.1 + b.2).total_cmp(&(a.0 + a.1 + a.2)));
+    let take = ((drawn.len() as f32 * fraction).ceil() as usize).max(1);
+    let (mut red, mut blue) = (0.0, 0.0);
+    for (r, _, b) in drawn.iter().take(take) {
+        red += r;
+        blue += b;
+    }
+    red / blue.max(1.0)
+}
+
+/// `alpha = max(rgb)` (the JS's `outputNode`) within 8-bit quantisation.
+///
+/// The final pass writes alpha from the **linear HDR** max channel while the
+/// output pass tone-maps the colour afterwards (three does the same), so a very
+/// dim pixel can round its colour up to 1..3/255 while its alpha rounds down to
+/// 0. The layer contract is still "bright pixels carry alpha, black pixels stay
+/// clear".
+fn assert_alpha_tracks_rgb(pixels: &[u8]) {
+    for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        let max_rgb = pixel[0].max(pixel[1]).max(pixel[2]);
+        let alpha = pixel[3];
+        assert!(
+            !(max_rgb >= 4 && alpha == 0),
+            "pixel {index} ({pixel:?}) is visible but has zero alpha"
+        );
+        assert!(
+            !(max_rgb == 0 && alpha > 8),
+            "pixel {index} ({pixel:?}) is black but opaque"
+        );
+    }
+}
+
+#[test]
+fn rolling_fire_renders() {
+    let mut scene =
+        crate::point10::scenes::rolling_fire::RollingFire::with_grid(volume_test_grid());
+    let payload = loud_payload();
+    let Some(frames) =
+        render_owned_chain_frames(&mut scene, VOLUME_SIZE, VOLUME_WARMUP, &payload, &payload)
+    else {
+        return;
+    };
+    assert!(
+        any_lit(&frames.before),
+        "RollingFire produced an empty frame at {VOLUME_SIZE}x{VOLUME_SIZE}"
+    );
+}
+
+/// RollingFire must render a real raymarched fire volume around the lava
+/// sphere, keep the transparent-overlay contract and react to the music.
+#[test]
+fn rolling_fire_volume_is_structured() {
+    let mut scene =
+        crate::point10::scenes::rolling_fire::RollingFire::with_grid(volume_test_grid());
+    assert_eq!(scene.clear_alpha(), 0.0);
+    assert_eq!(scene.grid().cell_count(), 64 * 64 * 128);
+
+    let Some(RenderedFrames {
+        before: pixels,
+        after: next,
+        ..
+    }) = render_owned_chain_frames(
+        &mut scene,
+        VOLUME_SIZE,
+        VOLUME_WARMUP,
+        &quiet_payload(),
+        &loud_payload(),
+    )
+    else {
+        return;
+    };
+
+    let spread = luminance_spread(&pixels);
+    assert!(
+        spread > 12.0,
+        "the fire volume looks flat (luminance spread {spread})"
+    );
+    // The fire is the brightest thing in the frame and it is warm.
+    let warm = warm_ratio_of_brightest(&pixels, 0.1);
+    assert!(
+        warm > 1.2,
+        "the fire is not warm-lit (brightest-pixel r/b {warm})"
+    );
+    // The volume does not cover the whole frame: the floor, the empty grid and
+    // the black background keep the corners dark.
+    let dark = dark_fraction(&pixels);
+    assert!(
+        dark > 0.15,
+        "the fire covers the whole frame (only {:.0}% dark)",
+        dark * 100.0
+    );
+    assert_alpha_tracks_rgb(&pixels);
+    assert_translucent_layer(&pixels);
+    // The ball moved under the quiet payload and then the loud one; two
+    // different frames prove the fire is animating.
+    assert_ne!(pixels, next, "consecutive audio frames are identical");
+    assert_ne!(scene.ball(), rolling_fire::Ball::new());
+}
+
+#[test]
+fn ball_of_fire_renders() {
+    let mut scene = crate::point10::scenes::rolling_fire::BallOfFire::with_grid(volume_test_grid());
+    let payload = loud_payload();
+    let Some(frames) =
+        render_owned_chain_frames(&mut scene, VOLUME_SIZE, VOLUME_WARMUP, &payload, &payload)
+    else {
+        return;
+    };
+    assert!(
+        any_lit(&frames.before),
+        "BallOfFire produced an empty frame at {VOLUME_SIZE}x{VOLUME_SIZE}"
+    );
+}
+
+/// Ball of Fire draws the same volume with the ball pinned: a lit, structurally
+/// varied frame whose ball never moves, and a transparent overlay.
+#[test]
+fn ball_of_fire_is_frozen_and_structured() {
+    let mut scene = crate::point10::scenes::rolling_fire::BallOfFire::with_grid(volume_test_grid());
+    let start = scene.inner().ball();
+    assert_eq!(scene.role(), rolling_fire::SceneRole::Standalone);
+    assert!(scene.frozen());
+
+    let Some(RenderedFrames {
+        before: pixels,
+        after: next,
+        ..
+    }) = render_owned_chain_frames(
+        &mut scene,
+        VOLUME_SIZE,
+        VOLUME_WARMUP,
+        &quiet_payload(),
+        &loud_payload(),
+    )
+    else {
+        return;
+    };
+
+    assert_eq!(scene.inner().ball(), start, "the ball must stay pinned");
+    let spread = luminance_spread(&pixels);
+    assert!(
+        spread > 12.0,
+        "the ball-of-fire volume looks flat (luminance spread {spread})"
+    );
+    let warm = warm_ratio_of_brightest(&pixels, 0.1);
+    assert!(
+        warm > 1.2,
+        "the ball of fire is not warm-lit (brightest-pixel r/b {warm})"
+    );
+    let dark = dark_fraction(&pixels);
+    assert!(
+        dark > 0.15,
+        "the fire covers the whole frame (only {:.0}% dark)",
+        dark * 100.0
+    );
+    assert_alpha_tracks_rgb(&pixels);
+    assert_translucent_layer(&pixels);
+    assert_ne!(pixels, next, "consecutive audio frames are identical");
+}
+
 #[test]
 fn latent_backrooms_renders() {
     let mut scene = crate::point10::scenes::latent_backrooms::LatentBackrooms::new();
@@ -1086,6 +1260,121 @@ fn dump_volume_reference_frames() {
     }
     if let Some(report) = dvd_dye {
         eprintln!("{report}");
+    }
+}
+
+/// Render RollingFire and Ball of Fire at 256x256 and write PNGs for
+/// inspection (the fire volume is the shape check the unit tests cannot make).
+///
+/// `MODV_FIRE_GRID="x,y,z"` overrides the simulation grid,
+/// `MODV_FIRE_FRAMES` the warm-up frame count, `MODV_FIRE_SIZE` the image size
+/// and `MODV_FIRE_DIR` the output directory (default `/app/crates/target`).
+///
+/// Ignored by default: it is the offline fidelity check, not a CI test.
+#[test]
+#[ignore = "renders reference frames for manual inspection"]
+fn dump_rolling_fire_reference_frames() {
+    let size = std::env::var("MODV_FIRE_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(256);
+    let frames = std::env::var("MODV_FIRE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(90);
+    let grid = std::env::var("MODV_FIRE_GRID")
+        .ok()
+        .and_then(|value| {
+            let parts: Vec<u32> = value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<u32>().ok())
+                .collect();
+            (parts.len() == 3)
+                .then(|| crate::point10::volume::VolumeGrid::new(parts[0], parts[1], parts[2]))
+        })
+        .unwrap_or(rolling_fire::GRID);
+    let directory =
+        std::env::var("MODV_FIRE_DIR").unwrap_or_else(|_| "/app/crates/target".to_string());
+    let payload = if std::env::var("MODV_FIRE_SILENT").is_ok() {
+        BandPayload::silent(44_100.0)
+    } else if std::env::var("MODV_FIRE_QUIET").is_ok() {
+        quiet_payload()
+    } else if let Some(band) = std::env::var("MODV_FIRE_BAND")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        // A uniform band level, for a representative fidelity frame between
+        // the silent and the `loud_payload` extremes.
+        let mut payload = BandPayload::silent(44_100.0);
+        payload.freq_mag = [band; AUDIO_SAMPLES];
+        payload.wave = [band; AUDIO_SAMPLES];
+        payload.beat = band;
+        payload.lanes = [band; 12];
+        payload.cells = [band; 16];
+        payload.byte_frequency_data = vec![(band.clamp(0.0, 1.0) * 255.0) as u8; 1024];
+        payload
+    } else {
+        loud_payload()
+    };
+
+    let mut rolling = rolling_fire::RollingFire::with_grid(grid);
+    if let Some(rendered) =
+        render_owned_chain_frames(&mut rolling, size, frames, &payload, &payload)
+    {
+        eprintln!(
+            "rolling fire: grid {:?} cell_count {} frames {frames} ball {:?} spread {:.2} dark {:.2} warm {:.2}",
+            grid,
+            grid.cell_count(),
+            rolling.ball(),
+            luminance_spread(&rendered.before),
+            dark_fraction(&rendered.before),
+            warm_ratio_of_brightest(&rendered.before, 0.1)
+        );
+        write_png(
+            &format!("{directory}/rolling-fire.png"),
+            &rendered.before,
+            size,
+        );
+        write_png(
+            &format!("{directory}/rolling-fire-next.png"),
+            &rendered.after,
+            size,
+        );
+        if let Some(report) = rolling
+            .debug_sim()
+            .and_then(|sim| report_dye(sim, &rendered.device, &rendered.queue, grid))
+        {
+            eprintln!("{report}");
+        }
+    }
+
+    let mut ball = rolling_fire::BallOfFire::with_grid(grid);
+    if let Some(rendered) = render_owned_chain_frames(&mut ball, size, frames, &payload, &payload) {
+        eprintln!(
+            "ball of fire: grid {:?} cell_count {} frames {frames} ball {:?} spread {:.2} dark {:.2} warm {:.2}",
+            grid,
+            grid.cell_count(),
+            ball.inner().ball(),
+            luminance_spread(&rendered.before),
+            dark_fraction(&rendered.before),
+            warm_ratio_of_brightest(&rendered.before, 0.1)
+        );
+        write_png(
+            &format!("{directory}/ball-of-fire.png"),
+            &rendered.before,
+            size,
+        );
+        write_png(
+            &format!("{directory}/ball-of-fire-next.png"),
+            &rendered.after,
+            size,
+        );
+        if let Some(report) = ball
+            .debug_sim()
+            .and_then(|sim| report_dye(sim, &rendered.device, &rendered.queue, grid))
+        {
+            eprintln!("{report}");
+        }
     }
 }
 

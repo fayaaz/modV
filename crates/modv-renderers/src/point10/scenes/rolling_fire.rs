@@ -1,115 +1,174 @@
-//! RollingFire — Rust/wgpu port of
+//! RollingFire / BallOfFire — Rust/wgpu port of
 //! `src/renderer/src/application/point10/scenes/RollingFire.js`.
 //!
 //! The JS scene is **WebGPU/TSL**, a port of three's `webgpu_volume_fire`
-//! example: a 100x100x200 velocity/dye grid with seven compute passes per
-//! 1/120 s step, rendered by an 18-step `VolumeNodeMaterial` raymarch and
-//! bloomed. The teapot is a lava sphere that **rolls with the music**: bass
-//! accelerates it, a bass-rise "beat" kicks it, hats and snares puff the fire
-//! and the ROYGBIV hue flips on phrase crests.
+//! example: a `100 x 100 x 200` velocity/dye grid (16 x 16 x 32 world units,
+//! 6.25 voxels per unit) stepped with seven compute passes per
+//! `1/120 * simulationSpeed` second, rendered by an **18-step**
+//! `VolumeNodeMaterial` raymarch and bloomed. The teapot is a lava sphere that
+//! **rolls with the music**: bass accelerates it, a bass-rise "beat" kicks it,
+//! hats and snares puff the fire and the ROYGBIV hue flips on phrase crests.
+//! The simulation grid, the camera and the key light all follow the ball.
+//!
+//! # The volume is the shared GPU simulation
+//!
+//! The earlier additive-puff substitute is gone. This scene configures
+//! [`crate::point10::volume::VolumeSim`] / [`VolumeStage`] (the same engine
+//! SmokeRoom and DvdRoom use) at RollingFire's grid, emitter and light values,
+//! and runs the JS passes in the JS order: curl noise once at init; then per
+//! step advect velocity, divergence, two Jacobi iterations, project, advect dye
+//! and the per-vertex sphere emit; then the raymarch → blur → combine → bloom →
+//! ACES chain.
+//!
+//! # What the shared module needed for this scene
+//!
+//! * **A movable key light.** SmokeRoom's `uKeyLightPos` is a fixed sun at
+//!   `(0, 80, 0)` with a `400/d²` fire term; RollingFire tracks a 20 m
+//!   overhead spot above the rolling ball with a `25/d²` term. Both are now
+//!   [`VolumeUniforms::key_light`] (`xyz` position, `w` numerator).
+//! * **A dynamic raymarch step count.** The room scenes march 16 steps,
+//!   RollingFire 18 (`:756`); the count rides `VolumeUniforms::misc[1]`.
+//! * **A movable volume box.** The raymarch intersected a box centred on the
+//!   world origin; RollingFire's grid origin follows the ball, so the box is
+//!   now centred on `uvw_to_world(0.5)` (`origin + (0, worldY / 2, 0)`). For
+//!   the room scenes that is exactly the old origin.
+//! * **The flame sway in the point light.** `distance_to_flame` now adds
+//!   `uSway` (`VolumeUniforms::light2.yz`), which the JS applies to the flame
+//!   segment both rooms and RollingFire use.
+//! * **A scene-selected point-light intensity.** `uPointLightVolumeIntensity`
+//!   is 2 in the room scenes and 1.4 here
+//!   ([`crate::point10::volume::room::volume_point_light_scaled`]).
+//! * **An overlay switch.** `_transparentOverlay` selects `alpha = max(rgb)`
+//!   or an opaque frame in the stage's final pass.
+//! * The fire ramp / hue maths moved to `volume/fire_colour.wgsl` so the lava
+//!   sphere's emissive can apply the exact `fireRamp` + luminance-equalised
+//!   `fireHue` the volume uses.
 //!
 //! # Ported exactly
 //!
 //! * the ball drive (`:102-176`), the scene's only pure simulation:
-//!   [`beat_kick`] (the `riseFrac`/`floor`/`maxRise` gates),
-//!   [`roll_ball`] (the `5/7` solid-sphere factor, `ROLL_DAMP`, the
-//!   `ROLL_MAX_SPEED` cap, the `BALL_ROVE_RADIUS = 40` rim with `BALL_BOUNCE`),
-//!   `BALL_ACCEL_K = 60`, `BALL_BEAT_K = 3`, `BALL_DIR_SPIN = 0.35`,
-//!   `BALL_DIR_SWAY = 2.0`;
-//! * the audio mapping (`:228-291`): bass = mean of the first five bins with
+//!   [`beat_kick`] (the `riseFrac`/`floor`/`maxRise` gates), [`roll_ball`] (the
+//!   `5/7` solid-sphere factor, `ROLL_DAMP`, the `ROLL_MAX_SPEED` cap, the
+//!   `BALL_ROVE_RADIUS = 40` rim with `BALL_BOUNCE`), `BALL_ACCEL_K = 60`,
+//!   `BALL_BEAT_K = 3`, `BALL_DIR_SPIN = 0.35`, `BALL_DIR_SWAY = 2.0`;
+//! * the audio mapping (`:223-291`): bass = mean of the first five bins with
 //!   `dt * 8` smoothing, the hi-hat band (top 15%) with `dt * 10`, the hi-hat
 //!   spectral centroid `sway = ((c/w - hiStart) / (len - hiStart) - 0.5) * 0.25`
 //!   with `BALL_DIR_SWAY`, the snare band (2%..13%) with `dt * 12`,
 //!   `uFireSize = 1 + hi * 2.5 + snare * 8`, the `dt * 0.15` camera-yaw
 //!   smoothing and the `dropColorPulse` hue flip eased on the shortest arc at
 //!   `dt * 1.2`;
-//! * the per-frame integration (`:1403-1425`): the kick impulse into the
-//!   velocity, `roll_ball`'s damping/cap/rim, the constant ball height
-//!   `floorY + SPHERE_RADIUS`, the `delta * 0.25` sphere spin;
-//! * the camera (`:1427-1453`): the world-offset follow
-//!   `camFollow = (9, 3.5, 2.8)` rotated by the bass yaw, `lerp(k = delta *
-//!   1.2)`, the two `ImprovedNoise` jitter terms, and `lookAt(ball - 1)` so the
-//!   floor stays in frame;
-//! * the fire light/emission calibration (`:389-405`, `:1000-1034`):
-//!   `uEmitDensity 16`, `uEmitTemperature 14`, `uFireIntensity 26`,
-//!   `fireRamp(temperature)` from `0xffe68c`/`0xff7305`/`0xff0000`, the
-//!   `(temperature)^(6 - 5)` fire power, the `fireHue` luminance equalisation,
-//!   `tempFactor = (emitTemp/33.36)^4`, `densityScale = emitDensity/44.08`,
-//!   the 3-second fade-in and the bass self-glow `1.5 + bass * 5.3`;
-//! * the bloom (`:1373-1378`): `min(0.12 + bass * 3.6, 4.0)`;
+//! * the silence path (**R-34**): the JS analyser exists even with no signal,
+//!   so `freqMag` is zeros rather than "no update". The scene therefore runs
+//!   the same maths with a zero band vector — the bass/hi/snare smoothers decay
+//!   to zero, the ball loses its acceleration and coasts to rest, and the sim,
+//!   camera, spin and hue ease keep running — instead of freezing;
+//! * the simulation clock (`:1329-1370`): the `1/120 * speed` accumulator
+//!   capped at eight steps, `uTurbulence = 3.2 / sqrt(speed)`,
+//!   `uDissipation = 1 / smokeLifespan`, `uCooling = 1 / fireLifespan`, and the
+//!   grid parameters `100 x 100 x 200`, `16 x 16 x 32`, grid origin
+//!   `(ball.x, ball.y - worldY/2, ball.z)`;
+//! * the emitter (`:446-453`, `:683-749`, `:1297-1327`): a
+//!   `SphereGeometry(0.9, 64, 40)` at the ball, with its world matrix (ball
+//!   position × `rotationY(time * 0.25)`), the per-vertex noise flicker, the
+//!   radial buoyancy and the CPU Perlin-driven flame height / sway / flicker /
+//!   colour noise;
+//! * the calibration (`:388-441`): `uEmitDensity 16`, `uEmitTemperature 14`,
+//!   `uFireIntensity 26`, `uFireGlowSpread 5`, `uBuoyancy 3`, `uWeight 0.15`,
+//!   `uTurbulenceDecay 0.1`, `uTurbFrequency 10`, `uVelDamping 0.25`,
+//!   `uWindStrength 6.5`, `uShadowAbsorption 2`, `uShadowAmbient 0.5`,
+//!   `uMultiScattering 1`, `uPowderStrength 0.59`, `uAsymmetry 0`,
+//!   `uPointLightVolumeIntensity 1.4`, the `25/d²` key-light attenuation and
+//!   the `fireRamp` stops `0xffe68c` / `0xff7305` / `0xff0000`;
+//! * the lava sphere's emissive (`:1000-1034`): three `mx_noise_float` octaves
+//!   (`p9_noise` here), `lavaT = noise^2.5`, `fireRamp(lavaT + 0.1)` hue
+//!   equalised after `saturation(…, 1.1)`, the
+//!   `(emitTemp / 33.36)^4 * emitDensity / 44.08 * fireIntensity * flicker *
+//!   fadeIn * (1.5 + bass * 5.3)` scale;
+//! * the camera (`:1427-1470`): the world-offset follow
+//!   `(9, 3.5, 2.8)` rotated by the bass yaw, `lerp(k = delta * 1.2)`, the two
+//!   `ImprovedNoise` jitter terms, `lookAt(ball - 1)` so the floor stays in
+//!   frame, and the overhead key light at `ball + 20y`;
+//! * the bloom (`:1373-1378`): `min(0.12 + bass * 3.6, 4.0)` at threshold 0.5 /
+//!   radius 1, against the JS `bloom()` node (bloom scale 1.0);
 //! * the renderer grade (`:335-336`): ACES filmic, exposure 2;
 //! * the composite (`:1236-1241`): `alpha = max(rgb)` on transparent black;
 //! * the props (`sceneProps.js:46-58`, `bindSmoke`): `smokeDensity` 16,
 //!   `fireIntensity` 26, `smokeLifespan` 1.5, `fireLifespan` 0.9,
 //!   `simulationSpeed` 1.2, `sceneOffsetX`/`sceneOffsetY`.
 //!
-//! # Replaced TSL machinery — the fire volume
+//! # Deviations
 //!
-//! This crate has no compute path or 3D storage textures, so the **motion,
-//! colour and audio behaviour** of the simulation is kept and the density
-//! field becomes seeded additive billboards (the same approach DVD Room and
-//! Smoke Room document):
+//! * **No shadow map.** The JS renders a `castShadow` volume mesh with a
+//!   custom `volumeCastShadow` node and a 1024² spotlight shadow map onto the
+//!   floor, and the sphere `receiveShadow`s it. This renderer has no shadow
+//!   map: the *shadow march inside the raymarch* (`scatteringNode`, the Beer /
+//!   multi-scatter / powder transmittance toward the key light) is ported —
+//!   that is what shades the smoke — while the projected floor shadow of the
+//!   fire volume is not drawn. The floor is a rubber-textured plane lit by the
+//!   same moving key spot and the fire's bounce light instead.
+//! * **No PMREM environment / PBR.** The sphere's `MeshStandardMaterial` base
+//!   is black in the JS, so only its emissive node reads; the port keeps the
+//!   emissive and a small key term, and the floor uses a flat diffuse +
+//!   roughness-folded shading instead of a PMREM studio environment.
+//! * `mx_noise_float` becomes [`p9_noise`](crate::point10::shared::p9_glsl) (the
+//!   substitution AttractorParticles documents); the sphere's
+//!   `moon_04_diff` map is not sampled because the base colour is black.
+//! * The point light's *surface* projection uniforms
+//!   (`uPointLightProjection*`, `uLightNear/FarIntensity`,
+//!   `uPointLightSurfaceIntensity`) only drive the JS's non-volume light
+//!   branch, which this renderer does not shade with; the volume branch (the
+//!   `volume_point_light` uniform + the 10..15 distance ramp) is ported.
+//! * The JS copies `sphere.matrixWorld` into the sim uniforms *before* it
+//!   integrates the ball in `_animate`, so the sim lags the ball by one frame.
+//!   The port integrates the ball in `update` and steps the sim in `render`
+//!   from that fresh state; the one-frame lag is dropped (invisible at 60 Hz
+//!   and it makes the ball/camera tests deterministic).
 //!
-//! | RollingFire (TSL) | RollingFire (Rust) |
-//! |-------------------|--------------------|
-//! | 2M-cell velocity/dye/pressure grids + seven compute passes | 48 CPU puffs emitted around the lava sphere |
-//! | the radial buoyancy force (away from the sphere) + curl turbulence | each puff's spawn direction is radial, with a small upward bias and per-puff curl |
-//! | `uCooling` / `uDissipation` (fire/smoke lifespan) | the puff age and colour decay |
-//! | `uTurbulence`, `uTurbulenceDecay`, `uTurbFreq` | the per-puff curl and `simulationSpeed` |
-//! | `uEmitDensity` / `uEmitTemperature` / `uFireIntensity` | puffs' density/brightness scalars |
-//! | 18-step raymarch + volumetric shadow + gaussian blur | additive puffs + [`UnrealBloomPass`] |
+//! # Ball of Fire
 //!
-//! The puffs are seeded with [`seeded_rand`], so a run is deterministic; the
-//! JS uses `Math.random` only through its curl noise, which is deterministic
-//! per voxel anyway.
-//!
-//! # Other deviations
-//!
-//! * **The floor is a real textured plane, not a shadow-receiving PBR mesh.**
-//!   The rubber diffuse map is loaded through [`load_texture`] (procedural
-//!   fallback when the asset is missing) and shaded by a simplified overhead
-//!   spot; the JS's `receiveShadow` depth map has no equivalent here.
-//! * `ImprovedNoise` becomes [`value_noise`] (deterministic smooth value noise)
-//!   for the flame height/sway/flicker/colour jitter.
-//! * The key spot's shadow map, the volumetric shadow pass and the point
-//!   light's projection noise are folded into the emissive/bloom calibration:
-//!   the port has no shadow map.
-//! * The lava sphere is a 32x16 UV sphere; its emissive noise is
-//!   [`p9_noise`](crate::point10::shared::p9_glsl::P9_COMMON_WGSL) instead of
-//!   `mx_noise_float` (the same substitution AttractorParticles documents).
-//! * `Ball of Fire` (the frozen subclass) is not a separate Rust scene: the
-//!   wrapper list for this batch is the four module names, and RollingFire
-//!   keeps the free-roaming ball.
-//!
-//! # Transparency
-//!
-//! `_transparentOverlay = true` (`:189`), no scene background, and the output
-//! node's alpha is `max(rgb)` (`:1239-1241`): the fire composites over the
-//! layer below. The port keeps that rule in its final pass.
+//! [`BallOfFire`] is the JS subclass: the same scene with `_freezeBall = true`
+//! (the ball stays at its start position while the fire, bloom, colour drops
+//! and camera stay fully audio-reactive) and `role = "standalone"` instead of
+//! RollingFire's foreground pin. Both are transparent overlays.
 //!
 //! [`UnrealBloomPass`]: crate::point10::postfx::UnrealBloomPass
 
 #![forbid(unsafe_code)]
 
 use crate::point10::audio_bridge::{AUDIO_SAMPLES, AudioBridge};
-use crate::point10::postfx::{Composer, ToneMapping, UnrealBloomPass};
 use crate::point10::scenes::cube_mesh::{
-    Mat4, Mesh, MeshGpu, Vertex, create_depth, depth_state, look_at, mat4_mul, normalise,
-    perspective,
+    Mat4, Mesh, MeshGpu, Vertex, look_at, mat4_mul, perspective, rotation_y, translation,
 };
 use crate::point10::scenes::fire_common::build_sphere;
 use crate::point10::shared::assets::{ColourSpace, Wrap, load_texture};
 use crate::point10::shared::phrase_color::{DropColorState, drop_color_pulse, ease_phrase_hue};
 use crate::point10::shared::random::seeded_rand;
-use crate::point10::volume::room::{SPHERE_RADIUS, band, fire_colour, treble_band};
+use crate::point10::volume::room::{
+    CAMERA_FAR, CAMERA_FOV, CAMERA_NEAR, FIRE_END_HEX, FIRE_MID_HEX, FIRE_START_HEX, FireTemporal,
+    ImprovedNoise, SPHERE_RADIUS, SimTick, SimulationClock, band, emission_scale, fade_in,
+    fire_temporal, snare_band, treble_band, volume_point_light_scaled,
+};
+use crate::point10::volume::stage::{Material, VolumeStage, volumetric_size};
+use crate::point10::volume::{FIRE_COLOUR_WGSL, VolumeGrid, VolumeSim, VolumeUniforms};
 use crate::point10::{
-    FULLSCREEN_TRIANGLE_WGSL, HDR_FORMAT, Point10Scene, SceneContext, SceneMeta, SceneProp,
-    UnitQuad, frame_dt, read_scene_props, scene_props_with_levers,
+    Point10Scene, SceneContext, SceneMeta, SceneProp, frame_dt, read_scene_props,
+    scene_props_with_levers,
 };
 
 // ---------------------------------------------------------------------------
 // Constants (`RollingFire.js:63-138`)
 // ---------------------------------------------------------------------------
+
+/// `GRID_SIZE_X`.
+pub const GRID_SIZE_X: u32 = 100;
+/// `GRID_SIZE_Y`.
+pub const GRID_SIZE_Y: u32 = 100;
+/// `GRID_SIZE_Z`.
+pub const GRID_SIZE_Z: u32 = 200;
+
+/// The JS simulation grid (`100 x 100 x 200`, 2M cells).
+pub const GRID: VolumeGrid = VolumeGrid::new(GRID_SIZE_X, GRID_SIZE_Y, GRID_SIZE_Z);
 
 /// `VOLUME_WORLD_SIZE_X`.
 pub const VOLUME_WORLD_SIZE_X: f32 = 16.0;
@@ -117,6 +176,17 @@ pub const VOLUME_WORLD_SIZE_X: f32 = 16.0;
 pub const VOLUME_WORLD_SIZE_Y: f32 = 16.0;
 /// `VOLUME_WORLD_SIZE_Z`.
 pub const VOLUME_WORLD_SIZE_Z: f32 = 32.0;
+
+/// `volumetricMaterial.steps = 18` (`:756`).
+pub const RAYMARCH_STEPS: u32 = 18;
+
+/// `uKeyLightPos = ball + 20y` (`:1457`) and the `25/d²` fire attenuation
+/// (`:870`).
+pub const KEY_LIGHT_HEIGHT: f32 = 20.0;
+/// `25.0 / distance²`.
+pub const KEY_LIGHT_ATTENUATION: f32 = 25.0;
+/// `uPointLightVolumeIntensity` (`:426`).
+pub const POINT_LIGHT_VOLUME_INTENSITY: f32 = 1.4;
 
 /// `BASS_BINS`.
 pub const BASS_BINS: usize = 5;
@@ -153,6 +223,75 @@ pub const BALL_BOUNCE: f32 = 0.6;
 /// `FLOOR_AIM_DOWN`.
 pub const FLOOR_AIM_DOWN: f32 = 1.0;
 
+/// `uEmitDensity` default.
+pub const EMIT_DENSITY: f32 = 16.0;
+/// `uEmitTemperature` default.
+pub const EMIT_TEMPERATURE: f32 = 14.0;
+/// `uFireIntensity` default.
+pub const FIRE_INTENSITY: f32 = 26.0;
+/// `uFireGlowSpread`.
+pub const FIRE_GLOW_SPREAD: f32 = 5.0;
+/// `uBuoyancy`.
+pub const BUOYANCY: f32 = 3.0;
+/// `uWeight`.
+pub const WEIGHT: f32 = 0.15;
+/// `uTurbulenceDecay`.
+pub const TURBULENCE_DECAY: f32 = 0.1;
+/// `uTurbFrequency`.
+pub const TURB_FREQUENCY: f32 = 10.0;
+/// `uVelDamping`.
+pub const VEL_DAMPING: f32 = 0.25;
+/// `uWindStrength`.
+pub const WIND_STRENGTH: f32 = 6.5;
+/// `uShadowAbsorption`.
+pub const SHADOW_ABSORPTION: f32 = 2.0;
+/// `uShadowAmbient`.
+pub const SHADOW_AMBIENT: f32 = 0.5;
+/// `uMultiScattering`.
+pub const MULTI_SCATTERING: f32 = 1.0;
+/// `uPowderStrength`.
+pub const POWDER_STRENGTH: f32 = 0.59;
+/// `uAsymmetry`.
+pub const ASYMMETRY: f32 = 0.0;
+
+/// `this._simSpeed`.
+pub const SIMULATION_SPEED: f32 = 1.2;
+/// `this._smokeLifespan`.
+pub const SMOKE_LIFESPAN: f32 = 1.5;
+/// `this._fireLifespan`.
+pub const FIRE_LIFESPAN: f32 = 0.9;
+
+/// `camera.position.set(9, 3.5, 2.8)`.
+pub const CAMERA_START: [f32; 3] = [9.0, 3.5, 2.8];
+/// `PerspectiveCamera(60, aspect, 0.1, 100)`.
+pub const CAMERA_FOV_DEGREES: f32 = CAMERA_FOV;
+/// Near plane.
+pub const CAMERA_NEAR_PLANE: f32 = CAMERA_NEAR;
+/// Far plane.
+pub const CAMERA_FAR_PLANE: f32 = CAMERA_FAR;
+
+/// `floorGroup.position.y = -VY/2 + 0.4 + VY/2 + 0.4`.
+pub const FLOOR_Y: f32 = 0.8;
+/// `FLOOR_TILE` — world metres per texture tile.
+pub const FLOOR_TILE: f32 = 10.0;
+/// `FLOOR_PLANE`.
+pub const FLOOR_PLANE: f32 = 400.0;
+/// `floorMat.opacity`.
+pub const FLOOR_OPACITY: f32 = 0.45;
+
+/// `scene.background = null` (`:343-345`).
+pub const CLEAR_ALPHA: f64 = 0.0;
+
+/// `rubber002_diff_1k.jpg`.
+pub const FLOOR_DIFFUSE_ASSET: &str = "rubber002_diff_1k.jpg";
+
+/// The sphere floats `SPHERE_RADIUS` above the level floor (`:1419-1423`).
+pub const SPHERE_Y: f32 = FLOOR_Y + SPHERE_RADIUS;
+
+// ---------------------------------------------------------------------------
+// Pure maths (`RollingFire.js:102-176`)
+// ---------------------------------------------------------------------------
+
 /// `BALL_BEAT` gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BeatGates {
@@ -170,49 +309,6 @@ pub const BALL_BEAT: BeatGates = BeatGates {
     floor: 0.04,
     max_rise: 0.1,
 };
-
-/// `FLOOR_TILE` — world metres per texture tile.
-pub const FLOOR_TILE: f32 = 10.0;
-/// `FLOOR_PLANE`.
-pub const FLOOR_PLANE: f32 = 400.0;
-/// `floorMat.opacity`.
-pub const FLOOR_OPACITY: f32 = 0.45;
-
-/// `uEmitDensity` default.
-pub const EMIT_DENSITY: f32 = 16.0;
-/// `uEmitTemperature` default.
-pub const EMIT_TEMPERATURE: f32 = 14.0;
-/// `uFireIntensity` default.
-pub const FIRE_INTENSITY: f32 = 26.0;
-
-/// `camera.position.set(9, 3.5, 2.8)`.
-pub const CAMERA_START: [f32; 3] = [9.0, 3.5, 2.8];
-/// `PerspectiveCamera(60, aspect, 0.1, 100)`.
-pub const CAMERA_FOV: f32 = 60.0;
-/// Near plane.
-pub const CAMERA_NEAR: f32 = 0.1;
-/// Far plane.
-pub const CAMERA_FAR: f32 = 100.0;
-
-/// `floorGroup.position.y = -VY/2 + 0.4 + VY/2 + 0.4`.
-pub const FLOOR_Y: f32 = 0.8;
-
-/// The haze puff count standing in for the simulation grid.
-pub const PUFF_COUNT: usize = 48;
-/// The per-puff brightness scalar.
-pub const PUFF_GAIN: f32 = 0.085;
-
-/// `scene.background = null`.
-pub const CLEAR_ALPHA: f64 = 0.0;
-
-/// `rubber002_diff_1k.jpg`.
-pub const FLOOR_DIFFUSE_ASSET: &str = "rubber002_diff_1k.jpg";
-/// `rubber002_rough_1k.jpg`.
-pub const FLOOR_ROUGH_ASSET: &str = "rubber002_rough_1k.jpg";
-
-// ---------------------------------------------------------------------------
-// Pure maths (`RollingFire.js:102-176`)
-// ---------------------------------------------------------------------------
 
 /// The ball's state on the floor plane (`{x, z, vx, vz}`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -309,13 +405,6 @@ pub fn hi_band(freq_mag: &[f32; AUDIO_SAMPLES]) -> f32 {
     treble_band(freq_mag)
 }
 
-/// The snare band (2%..13%, `:272-277`).
-pub fn snare_band(freq_mag: &[f32; AUDIO_SAMPLES]) -> f32 {
-    let lo = (AUDIO_SAMPLES as f32 * 0.02).floor() as usize;
-    let hi = (AUDIO_SAMPLES as f32 * 0.13).floor() as usize;
-    band(freq_mag, lo, hi)
-}
-
 /// The hi-hat centroid steer (`:240-248`): `-0.125..0.125`.
 pub fn hi_sway(freq_mag: &[f32; AUDIO_SAMPLES]) -> f32 {
     let hi_start = AUDIO_SAMPLES - (AUDIO_SAMPLES as f32 * 0.15).floor() as usize;
@@ -331,133 +420,39 @@ pub fn hi_sway(freq_mag: &[f32; AUDIO_SAMPLES]) -> f32 {
     ((centroid / weight - hi_start as f32) / (AUDIO_SAMPLES - hi_start) as f32 - 0.5) * 0.25
 }
 
-/// The lava sphere's emissive scale (`:1149-1160`), including the 3-second
-/// fade-in and the bass self-glow.
+/// The lava sphere's emissive scale (`:1000-1034`), including the flicker, the
+/// 3-second fade-in and the bass self-glow `1.5 + bass * 5.3`.
 pub fn sphere_glow(
     emit_temperature: f32,
     emit_density: f32,
     fire_intensity: f32,
-    time: f32,
+    temporal: &FireTemporal,
     bass: f32,
 ) -> f32 {
-    let temp_factor = (emit_temperature / 33.36).max(0.0).powi(4);
-    let density_scale = (emit_density / 44.08).max(0.0);
-    let t = (time / 3.0).clamp(0.0, 1.0);
-    let fade_in = t * t * (3.0 - 2.0 * t);
-    temp_factor * density_scale * fire_intensity * fade_in * (1.5 + bass.max(0.0) * 5.3)
+    emission_scale(emit_temperature, emit_density, fire_intensity)
+        * temporal.flicker
+        * fade_in(temporal.time)
+        * (1.5 + bass.max(0.0) * 5.3)
 }
 
-/// Deterministic smooth 1D value noise — the port's stand-in for
-/// `ImprovedNoise.noise(x, y, z)` (`:1297-1311`).
-pub fn value_noise(x: f32) -> f32 {
-    let x = if x.is_finite() { x } else { 0.0 };
-    let floor = x.floor();
-    let fract = x - floor;
-    let a = seeded_rand(floor as i32, 17) * 2.0 - 1.0;
-    let b = seeded_rand(floor as i32 + 1, 17) * 2.0 - 1.0;
-    let t = fract * fract * (3.0 - 2.0 * fract);
-    a + (b - a) * t
+/// The `fireRamp` stops in linear-sRGB, as `THREE.Color(hex)` converts them.
+pub fn ramp_stops() -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let linear = crate::point10::shared::phrase_color::srgb_hex_to_linear;
+    (
+        linear(FIRE_START_HEX),
+        linear(FIRE_MID_HEX),
+        linear(FIRE_END_HEX),
+    )
 }
 
-/// A puff of the fire haze.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Puff {
-    /// World position.
-    pub position: [f32; 3],
-    /// World velocity.
-    pub velocity: [f32; 3],
-    /// Normalised age, 0..1.
-    pub age: f32,
-    /// World radius.
-    pub size: f32,
-    /// Brightness multiplier.
-    pub alpha: f32,
-    /// Temperature for the fire ramp.
-    pub temperature: f32,
-    /// The seed stream for the next respawn.
-    pub seed: u32,
-}
-
-impl Puff {
-    /// A dead puff (respawns on the next update).
-    pub const fn dead() -> Self {
-        Self {
-            position: [0.0; 3],
-            velocity: [0.0; 3],
-            age: 1.0,
-            size: 0.0,
-            alpha: 0.0,
-            temperature: 0.0,
-            seed: 0,
-        }
-    }
-}
-
-/// Emit a puff on the sphere's surface around `emitter`.
-pub fn spawn_puff(seed: u32, emitter: [f32; 3], radius: f32) -> Puff {
-    let rand = |offset: u32| seeded_rand(seed as i32, offset as i32);
-    let fraction = rand(1);
-    let y = 1.0 - 2.0 * fraction;
-    let ring = (1.0 - y * y).max(0.0).sqrt();
-    let theta = rand(2) * std::f32::consts::TAU;
-    let direction = [theta.cos() * ring, y, theta.sin() * ring];
-    let speed = 1.6 + rand(3) * 2.6;
-    Puff {
-        position: [
-            emitter[0] + direction[0] * radius,
-            emitter[1] + direction[1] * radius,
-            emitter[2] + direction[2] * radius,
-        ],
-        velocity: [
-            direction[0] * speed,
-            direction[1] * speed + 0.6,
-            direction[2] * speed,
-        ],
-        age: 0.0,
-        size: 0.5 + rand(4) * 0.9,
-        alpha: 0.6 + rand(5) * 0.4,
-        temperature: 0.5 + rand(6) * 0.5,
-        seed: seed.wrapping_add(1),
-    }
-}
-
-/// Advance one puff (`uCooling` / `uDissipation` / `uTurbulence`).
-pub fn advance_puff(
-    puff: &mut Puff,
-    emitter: [f32; 3],
-    dt: f32,
-    simulation_speed: f32,
-    lifespan: f32,
-    radius: f32,
-) {
-    let speed = if simulation_speed.is_finite() {
-        simulation_speed.clamp(0.1, 4.0)
-    } else {
-        1.2
-    };
-    let life = if lifespan.is_finite() {
-        lifespan.clamp(0.1, 20.0)
-    } else {
-        1.5
-    };
-    let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 } * speed;
-    if puff.age >= 1.0 {
-        *puff = spawn_puff(puff.seed, emitter, radius);
-        return;
-    }
-    puff.age = (puff.age + step / life).min(1.0);
-    puff.position = [
-        puff.position[0] + puff.velocity[0] * step,
-        puff.position[1] + puff.velocity[1] * step,
-        puff.position[2] + puff.velocity[2] * step,
-    ];
-    puff.velocity = [
-        puff.velocity[0] * (1.0 - 0.45 * step),
-        puff.velocity[1] * (1.0 - 0.25 * step) + 0.5 * step,
-        puff.velocity[2] * (1.0 - 0.45 * step),
-    ];
-    puff.size += step * 2.2;
-    puff.temperature *= 1.0 - 0.55 * step;
+/// `this.role`: which layer slot the scene claims in the JS adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneRole {
+    /// Rolling Fire composites over another scene as the performance
+    /// foreground layer (`:185`).
+    Foreground,
+    /// Ball of Fire plays standalone (`:1489`).
+    Standalone,
 }
 
 // ---------------------------------------------------------------------------
@@ -475,121 +470,176 @@ const ROLLING_FIRE_PROPS: &[SceneProp] = &[
     SceneProp::float("sceneOffsetY", "Offset Y", 0.0, -10.0, 10.0, 0.1),
 ];
 
-/// The geometry uniform block (128 bytes).
+/// The lava sphere's uniform block (208 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct SceneUniforms {
+struct SphereUniforms {
     view_proj: Mat4,
+    model: Mat4,
     camera_pos: [f32; 4],
-    /// rgb = fire colour, w = sphere glow scale.
-    glow: [f32; 4],
-    /// x = time, y = ball x, z = ball z, w = floor opacity.
+    /// rgb `uFireStartColor`, w `uFireIntensity`.
+    fire_start: [f32; 4],
+    /// rgb `uFireMidColor`, w `uFireGlowSpread`.
+    fire_mid: [f32; 4],
+    /// rgb `uFireEndColor`, w `uFireHue`.
+    fire_end: [f32; 4],
+    /// x `uTime`, y emissive scale, z `_bass`, w `uFlicker`.
     params: [f32; 4],
-    /// x = floor tile repeat, y = ball y, z = flicker, w = unused.
-    extra: [f32; 4],
 }
 
-/// The floor shader's uniform block (96 bytes).
+/// The floor's uniform block (144 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FloorUniforms {
     view_proj: Mat4,
     camera_pos: [f32; 4],
+    /// xyz key light position, w tile repeat (`FLOOR_PLANE / FLOOR_TILE`).
+    light: [f32; 4],
+    /// rgb fire bounce colour, w its intensity.
+    fire: [f32; 4],
+    /// x time, y opacity, z ball x, w ball z.
     params: [f32; 4],
+    /// x ball y, yzw unused.
+    misc: [f32; 4],
 }
 
-/// The haze puff shader's uniform block (96 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct PuffUniforms {
-    view_proj: Mat4,
-    camera_right: [f32; 4],
-    camera_up: [f32; 4],
+/// The floor: a textured plane needs a texture + sampler beside its uniform
+/// block, which [`Material`] does not model.
+struct FloorMaterial {
+    pipeline: wgpu::RenderPipeline,
+    uniforms: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
-/// One puff instance (32 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct PuffInstance {
-    position: [f32; 3],
-    size: f32,
-    colour: [f32; 3],
-    alpha: f32,
-}
-
-impl PuffInstance {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Self>() as u64,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 0,
-                    shader_location: 4,
+impl FloorMaterial {
+    fn new(
+        device: &wgpu::Device,
+        shader_source: &str,
+        texture: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("point10-rolling-fire-floor"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("point10-rolling-fire-floor-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 12,
-                    shader_location: 5,
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 16,
-                    shader_location: 6,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 28,
-                    shader_location: 7,
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
                 },
             ],
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point10-rolling-fire-floor-uniforms"),
+            size: std::mem::size_of::<FloorUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("point10-rolling-fire-floor-bind-group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("point10-rolling-fire-floor-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("point10-rolling-fire-floor-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(Vertex::layout())],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(crate::point10::scenes::cube_mesh::depth_state()),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::point10::HDR_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            pipeline,
+            uniforms,
+            bind_group,
         }
     }
-}
 
-/// The final composite uniform block (16 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct FinalUniforms {
-    resolution: [f32; 2],
-    _pad: [f32; 2],
-}
+    fn write(&self, queue: &wgpu::Queue, bytes: &[u8]) {
+        queue.write_buffer(&self.uniforms, 0, bytes);
+    }
 
-/// A texture target.
-struct TextureTarget {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, mesh: &'pass MeshGpu) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        mesh.draw(pass);
+    }
 }
 
 /// GPU resources built in `init`.
 struct RollingFireGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    scene_pipeline: wgpu::RenderPipeline,
-    scene_uniforms: wgpu::Buffer,
-    scene_bind_group: wgpu::BindGroup,
-    scene_mesh: MeshGpu,
-    floor_pipeline: wgpu::RenderPipeline,
-    floor_uniforms: wgpu::Buffer,
-    floor_bind_group: wgpu::BindGroup,
+    sim: VolumeSim,
+    stage: VolumeStage,
+    sphere: Material,
+    floor: FloorMaterial,
+    sphere_mesh: MeshGpu,
     floor_mesh: MeshGpu,
     _floor_texture: wgpu::Texture,
-    puff_pipeline: wgpu::RenderPipeline,
-    puff_uniforms: wgpu::Buffer,
-    puff_bind_group: wgpu::BindGroup,
-    puff_instances: wgpu::Buffer,
-    quad: UnitQuad,
-    scene_target: TextureTarget,
-    _depth: wgpu::Texture,
-    depth_view: wgpu::TextureView,
-    bloom: UnrealBloomPass,
-    final_pipeline: wgpu::RenderPipeline,
-    final_uniforms: wgpu::Buffer,
-    final_bind_group: wgpu::BindGroup,
-    final_layout: wgpu::BindGroupLayout,
-    final_sampler: wgpu::Sampler,
-    composer: Composer,
 }
 
 /// RollingFire scene.
@@ -616,6 +666,8 @@ pub struct RollingFire {
     camera_yaw: f32,
     /// `this.camera.position`.
     camera: [f32; 3],
+    /// `this.sphere.rotation.y` (`+= delta * 0.25`).
+    ball_spin: f32,
     /// `this._uFireHue`.
     fire_hue: f32,
     /// `this._pulse`.
@@ -624,12 +676,23 @@ pub struct RollingFire {
     seed: u32,
     /// `this.time` (`BaseSceneWebGPU.update` accumulates the frame delta).
     time: f32,
-    /// `Math.min(this._dt || 1/60, 1/30)`.
-    last_delta: f32,
-    /// `this._simulationTime`.
-    simulation_time: f32,
-    /// The haze puffs.
-    puffs: [Puff; PUFF_COUNT],
+    /// `this._simAccumulator` / `this._simulationTime`.
+    clock: SimulationClock,
+    /// `this._cpuNoise`.
+    noise: ImprovedNoise,
+    /// The raymarch dither's `frameId`.
+    frame: u32,
+    /// The volume uniforms for the steps accumulated this frame (built in
+    /// `update`, submitted in `render`).
+    pending_steps: Vec<VolumeUniforms>,
+    /// The idle uniform refresh when this frame produced no simulation step.
+    pending_idle: Option<VolumeUniforms>,
+    /// The temporal state the geometry/materials were last built from.
+    last_temporal: FireTemporal,
+    /// `this._freezeBall` (Ball of Fire pins the ball in place).
+    freeze_ball: bool,
+    /// `this._transparentOverlay`.
+    transparent_overlay: bool,
     /// Props.
     smoke_density: f32,
     fire_intensity: f32,
@@ -639,6 +702,8 @@ pub struct RollingFire {
     scene_offset: [f32; 2],
     camera_aspect: f32,
     size: (u32, u32),
+    /// The simulation grid (`GRID` unless a test scales it).
+    grid: VolumeGrid,
     gpu: Option<RollingFireGpu>,
 }
 
@@ -649,12 +714,17 @@ impl Default for RollingFire {
 }
 
 impl RollingFire {
+    /// A scene with a different simulation grid (tests and the offline
+    /// reference renderer use a smaller grid; the scene defaults to the JS
+    /// `100 x 100 x 200`).
+    pub fn with_grid(grid: VolumeGrid) -> Self {
+        let mut scene = Self::new();
+        scene.grid = grid;
+        scene
+    }
+
     /// Create the scene (`RollingFire.js:178-221` defaults).
     pub fn new() -> Self {
-        let mut puffs = [Puff::dead(); PUFF_COUNT];
-        for (index, puff) in puffs.iter_mut().enumerate() {
-            puff.seed = index as u32 * 13 + 5;
-        }
         Self {
             bass: 0.0,
             hi: 0.0,
@@ -667,21 +737,28 @@ impl RollingFire {
             kick: [0.0; 3],
             camera_yaw: 0.0,
             camera: CAMERA_START,
+            ball_spin: 0.0,
             fire_hue: 0.0,
             pulse: DropColorState::new(),
             seed: 0,
             time: 0.0,
-            last_delta: 1.0 / 60.0,
-            simulation_time: 0.0,
-            puffs,
+            clock: SimulationClock::default(),
+            noise: ImprovedNoise,
+            frame: 0,
+            pending_steps: Vec::new(),
+            pending_idle: None,
+            last_temporal: fire_temporal(&ImprovedNoise, 0.0),
+            freeze_ball: false,
+            transparent_overlay: true,
             smoke_density: EMIT_DENSITY,
             fire_intensity: FIRE_INTENSITY,
-            smoke_lifespan: 1.5,
-            fire_lifespan: 0.9,
-            simulation_speed: 1.2,
+            smoke_lifespan: SMOKE_LIFESPAN,
+            fire_lifespan: FIRE_LIFESPAN,
+            simulation_speed: SIMULATION_SPEED,
             scene_offset: [0.0; 2],
             camera_aspect: 1.0,
             size: (1, 1),
+            grid: GRID,
             gpu: None,
         }
     }
@@ -707,6 +784,16 @@ impl RollingFire {
         self.ball
     }
 
+    /// `this._ballDir`.
+    pub fn ball_direction(&self) -> f32 {
+        self.ball_direction
+    }
+
+    /// `this._kickX`/`_kickZ` (zeroed once consumed).
+    pub fn kick(&self) -> [f32; 3] {
+        self.kick
+    }
+
     /// `this._bass`.
     pub fn bass(&self) -> f32 {
         self.bass
@@ -727,9 +814,34 @@ impl RollingFire {
         self.camera
     }
 
-    /// The haze puffs.
-    pub fn puffs(&self) -> &[Puff; PUFF_COUNT] {
-        &self.puffs
+    /// `this._camYaw`.
+    pub fn camera_yaw(&self) -> f32 {
+        self.camera_yaw
+    }
+
+    /// The simulation clock's accumulated time.
+    pub fn simulation_time(&self) -> f32 {
+        self.clock.time()
+    }
+
+    /// The simulation grid the scene runs (`GRID` by default).
+    pub fn grid(&self) -> VolumeGrid {
+        self.grid
+    }
+
+    /// `this._freezeBall`.
+    pub fn frozen(&self) -> bool {
+        self.freeze_ball
+    }
+
+    /// `this._transparentOverlay`.
+    pub fn transparent_overlay(&self) -> bool {
+        self.transparent_overlay
+    }
+
+    /// `this.role`.
+    pub fn role(&self) -> SceneRole {
+        SceneRole::Foreground
     }
 
     /// The destination alpha the scene clears to.
@@ -744,179 +856,183 @@ impl RollingFire {
 
     /// `this.sphere.position` (`:1419-1423`).
     pub fn sphere_position(&self) -> [f32; 3] {
-        [self.ball.x, FLOOR_Y + SPHERE_RADIUS, self.ball.z]
+        [self.ball.x, SPHERE_Y, self.ball.z]
     }
 
-    /// The lava sphere's emissive scale (`:1149-1160`).
-    pub fn sphere_glow(&self) -> f32 {
+    /// `uGridOrigin` — the grid's bottom-centre, `worldY / 2` below the ball
+    /// (`:1322-1326`).
+    pub fn grid_origin(&self) -> [f32; 3] {
+        let sphere = self.sphere_position();
+        [sphere[0], sphere[1] - VOLUME_WORLD_SIZE_Y / 2.0, sphere[2]]
+    }
+
+    /// `this._keyLight.position` (`:1457`).
+    pub fn key_light_position(&self) -> [f32; 3] {
+        let sphere = self.sphere_position();
+        [sphere[0], sphere[1] + KEY_LIGHT_HEIGHT, sphere[2]]
+    }
+
+    /// The camera's look-at target (`:1449-1453`).
+    pub fn camera_target(&self) -> [f32; 3] {
+        let sphere = self.sphere_position();
+        [
+            sphere[0] + self.scene_offset[0],
+            sphere[1] - FLOOR_AIM_DOWN + self.scene_offset[1],
+            sphere[2],
+        ]
+    }
+
+    /// `uSphereMatrix`: `translation(ball) * rotationY(spin)`.
+    pub fn emitter_model(&self) -> Mat4 {
+        let sphere = self.sphere_position();
+        mat4_mul(
+            &translation(sphere[0], sphere[1], sphere[2]),
+            &rotation_y(self.ball_spin),
+        )
+    }
+
+    /// The lava sphere's emissive scale for a temporal state (`:1000-1034`).
+    pub fn sphere_glow(&self, temporal: &FireTemporal) -> f32 {
         sphere_glow(
             EMIT_TEMPERATURE,
             self.smoke_density,
             self.fire_intensity,
-            self.simulation_time,
+            temporal,
             self.bass,
         )
     }
 
-    /// The fire light colour the scene is lit by (`:1051-1171`).
-    pub fn fire_light(&self) -> [f32; 4] {
-        let colour = fire_colour(0.62, self.fire_hue);
-        let intensity = (self.fire_intensity / 26.0).max(0.0) * 2.0;
-        [
-            colour[0] * intensity * 0.25,
-            colour[1] * intensity * 0.25,
-            colour[2] * intensity * 0.25,
-            intensity * 0.25,
-        ]
+    /// The fire bounce light the floor picks up (`:1051-1171`).
+    pub fn fire_light(&self, temporal: &FireTemporal) -> [f32; 3] {
+        volume_point_light_scaled(
+            temporal,
+            EMIT_TEMPERATURE,
+            self.smoke_density,
+            self.fire_intensity,
+            self.fire_hue,
+            POINT_LIGHT_VOLUME_INTENSITY,
+        )
     }
 
     fn view_proj(&self) -> Mat4 {
         mat4_mul(
             &perspective(
-                CAMERA_FOV.to_radians(),
+                CAMERA_FOV_DEGREES.to_radians(),
                 self.camera_aspect,
-                CAMERA_NEAR,
-                CAMERA_FAR,
+                CAMERA_NEAR_PLANE,
+                CAMERA_FAR_PLANE,
             ),
-            &look_at(
-                self.camera,
-                [
-                    self.ball.x + self.scene_offset[0],
-                    self.sphere_position()[1] - FLOOR_AIM_DOWN + self.scene_offset[1],
-                    self.ball.z,
-                ],
-                [0.0, 1.0, 0.0],
-            ),
+            &look_at(self.camera, self.camera_target(), [0.0, 1.0, 0.0]),
         )
     }
 
-    fn billboard_basis(&self) -> ([f32; 3], [f32; 3]) {
-        let target = [
-            self.ball.x + self.scene_offset[0],
-            self.sphere_position()[1] - FLOOR_AIM_DOWN + self.scene_offset[1],
-            self.ball.z,
-        ];
-        let forward = normalise([
-            target[0] - self.camera[0],
-            target[1] - self.camera[1],
-            target[2] - self.camera[2],
-        ]);
-        let right = normalise([-forward[2], 0.0, forward[0]]);
-        let up = [
-            right[1] * forward[2] - right[2] * forward[1],
-            right[2] * forward[0] - right[0] * forward[2],
-            right[0] * forward[1] - right[1] * forward[0],
-        ];
-        (right, up)
-    }
-
-    fn puff_instances(&self) -> Vec<PuffInstance> {
-        self.puffs
-            .iter()
-            .map(|puff| {
-                let fade = (1.0 - puff.age).clamp(0.0, 1.0);
-                let density = (self.smoke_density / EMIT_DENSITY).max(0.0);
-                let fire = (self.fire_intensity / FIRE_INTENSITY).max(0.0);
-                let size = (self.fire_size / 1.0).max(0.0);
-                let colour = fire_colour(puff.temperature * fade, self.fire_hue);
-                let alpha = PUFF_GAIN * density * fire * size * puff.alpha * fade * fade;
-                PuffInstance {
-                    position: puff.position,
-                    size: puff.size * (0.7 + fade * 0.9),
-                    colour,
-                    alpha,
-                }
-            })
-            .collect()
-    }
-
-    fn upload_uniforms(&self) {
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let view_proj = self.view_proj();
+    fn volume_uniforms(&self, temporal: &FireTemporal, tick: &SimTick) -> VolumeUniforms {
         let sphere = self.sphere_position();
-        let colour = fire_colour(0.6, self.fire_hue);
-        gpu.queue.write_buffer(
-            &gpu.scene_uniforms,
-            0,
-            bytemuck::bytes_of(&SceneUniforms {
-                view_proj,
-                camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
-                glow: [colour[0], colour[1], colour[2], self.sphere_glow()],
-                params: [self.time, self.ball.x, self.ball.z, FLOOR_OPACITY],
-                extra: [
-                    FLOOR_PLANE / FLOOR_TILE,
-                    sphere[1],
-                    value_noise(0.8 * self.time) * 0.12
-                        + value_noise(15.0 * self.time) * 0.06
-                        + 0.82,
-                    0.0,
-                ],
-            }),
-        );
-        gpu.queue.write_buffer(
-            &gpu.floor_uniforms,
-            0,
-            bytemuck::bytes_of(&FloorUniforms {
-                view_proj,
-                camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
-                params: [
-                    FLOOR_PLANE / FLOOR_TILE,
-                    self.fire_light()[3],
-                    self.time,
-                    FLOOR_OPACITY,
-                ],
-            }),
-        );
-        let (right, up) = self.billboard_basis();
-        gpu.queue.write_buffer(
-            &gpu.puff_uniforms,
-            0,
-            bytemuck::bytes_of(&PuffUniforms {
-                view_proj,
-                camera_right: [right[0], right[1], right[2], 0.0],
-                camera_up: [up[0], up[1], up[2], 0.0],
-            }),
-        );
-        gpu.queue.write_buffer(
-            &gpu.final_uniforms,
-            0,
-            bytemuck::bytes_of(&FinalUniforms {
-                resolution: [self.size.0 as f32, self.size.1 as f32],
-                _pad: [0.0; 2],
-            }),
-        );
-        let instances = self.puff_instances();
-        gpu.queue
-            .write_buffer(&gpu.puff_instances, 0, bytemuck::cast_slice(&instances));
+        let mut uniforms = VolumeUniforms::for_grid(self.grid);
+        uniforms.grid[3] = tick.step;
+        uniforms.world = [
+            VOLUME_WORLD_SIZE_X,
+            VOLUME_WORLD_SIZE_Y,
+            VOLUME_WORLD_SIZE_Z,
+            temporal.time,
+        ];
+        let origin = self.grid_origin();
+        uniforms.origin = [origin[0], origin[1], origin[2], 1.0];
+        // `uSpherePosition`; `uSphereSpeed` and `uSphereVelocity` are declared
+        // in the JS but never written, so they stay 0 (the emitter's wind is
+        // therefore still, exactly like the JS).
+        uniforms.sphere_pos = [sphere[0], sphere[1], sphere[2], 0.0];
+        uniforms.sphere_vel = [0.0, 0.0, 0.0, 0.25];
+        uniforms.camera = [
+            self.camera[0],
+            self.camera[1],
+            self.camera[2],
+            self.frame as f32,
+        ];
+        uniforms.set_camera(self.camera, self.camera_target(), [0.0, 1.0, 0.0]);
+
+        let (start, mid, end) = ramp_stops();
+        uniforms.fire_start = [start[0], start[1], start[2], self.fire_intensity];
+        uniforms.fire_mid = [mid[0], mid[1], mid[2], FIRE_GLOW_SPREAD];
+        uniforms.fire_end = [end[0], end[1], end[2], self.fire_hue];
+
+        uniforms.turb = [BUOYANCY, WEIGHT, tick.turbulence, TURBULENCE_DECAY];
+        uniforms.turb2 = [TURB_FREQUENCY, VEL_DAMPING, tick.cooling, tick.dissipation];
+        uniforms.emit = [self.smoke_density, EMIT_TEMPERATURE, self.fire_size, 1.0];
+        uniforms.emit2 = [WIND_STRENGTH, temporal.flicker, temporal.flame_height, 0.0];
+        uniforms.light = [
+            SHADOW_ABSORPTION,
+            SHADOW_AMBIENT,
+            MULTI_SCATTERING,
+            POWDER_STRENGTH,
+        ];
+        // `uAsymmetry` plus the `uSway` the point light's flame segment reads.
+        uniforms.light2 = [ASYMMETRY, temporal.sway[0], temporal.sway[2], 0.0];
+        let fire = self.fire_light(temporal);
+        uniforms.point_light = [fire[0], fire[1], fire[2], 0.0];
+        uniforms.set_key_light(self.key_light_position(), KEY_LIGHT_ATTENUATION);
+        let (volume_width, volume_height) = volumetric_size(self.size.0, self.size.1);
+        uniforms.view = [
+            (CAMERA_FOV_DEGREES.to_radians() * 0.5).tan(),
+            self.camera_aspect,
+            volume_width as f32,
+            volume_height as f32,
+        ];
+        uniforms.set_raymarch_steps(RAYMARCH_STEPS);
+        uniforms.set_emitter_model(self.emitter_model());
+        uniforms
     }
 
-    fn rebuild_targets(&mut self) {
-        let Some(gpu) = self.gpu.as_mut() else {
-            return;
-        };
-        gpu.scene_target = TextureTarget::new(
-            &gpu.device,
-            "point10-rolling-fire-scene",
-            self.size.0,
-            self.size.1,
-            HDR_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let (depth, depth_view) = create_depth(
-            &gpu.device,
-            "point10-rolling-fire-depth",
-            self.size.0,
-            self.size.1,
-        );
-        gpu._depth = depth;
-        gpu.depth_view = depth_view;
-        gpu.bloom.resize(self.size.0, self.size.1);
-        gpu.bloom.set_input(&gpu.scene_target.view);
-        gpu.composer.resize(self.size.0, self.size.1);
-        gpu.final_bind_group = create_final_bind_group(&gpu.device, gpu);
-        self.upload_uniforms();
+    fn sphere_uniforms(&self, temporal: &FireTemporal) -> SphereUniforms {
+        let (start, mid, end) = ramp_stops();
+        SphereUniforms {
+            view_proj: self.view_proj(),
+            model: self.emitter_model(),
+            camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
+            fire_start: [start[0], start[1], start[2], self.fire_intensity],
+            fire_mid: [mid[0], mid[1], mid[2], FIRE_GLOW_SPREAD],
+            fire_end: [end[0], end[1], end[2], self.fire_hue],
+            params: [
+                temporal.time,
+                self.sphere_glow(temporal),
+                self.bass,
+                temporal.flicker,
+            ],
+        }
+    }
+
+    fn floor_uniforms(&self, temporal: &FireTemporal) -> FloorUniforms {
+        let light = self.key_light_position();
+        let fire = self.fire_light(temporal);
+        FloorUniforms {
+            view_proj: self.view_proj(),
+            camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
+            light: [light[0], light[1], light[2], FLOOR_PLANE / FLOOR_TILE],
+            fire: [
+                fire[0],
+                fire[1],
+                fire[2],
+                self.fire_intensity / FIRE_INTENSITY,
+            ],
+            params: [self.time, FLOOR_OPACITY, self.ball.x, self.ball.z],
+            misc: [self.sphere_position()[1], 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+#[cfg(test)]
+impl RollingFire {
+    /// The live simulation, for the debug readback in the reference renderer.
+    pub(crate) fn debug_sim(&self) -> Option<&VolumeSim> {
+        self.gpu.as_ref().map(|gpu| &gpu.sim)
+    }
+}
+
+#[cfg(test)]
+impl BallOfFire {
+    /// The live simulation, for the debug readback in the reference renderer.
+    pub(crate) fn debug_sim(&self) -> Option<&VolumeSim> {
+        self.inner.debug_sim()
     }
 }
 
@@ -931,74 +1047,20 @@ impl Point10Scene for RollingFire {
         self.size = (ctx.width.max(1), ctx.height.max(1));
         self.camera_aspect = ctx.aspect();
 
-        // --- lava sphere ----------------------------------------------------
-        let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-rolling-fire-sphere-shader"),
-            source: wgpu::ShaderSource::Wgsl(sphere_wgsl().into()),
-        });
-        let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-rolling-fire-sphere-layout"),
-            entries: &[uniform_entry(
-                0,
-                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            )],
-        });
-        let scene_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-rolling-fire-sphere-uniforms"),
-            size: std::mem::size_of::<SceneUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-rolling-fire-sphere-bind-group"),
-            layout: &scene_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: scene_uniforms.as_entire_binding(),
-            }],
-        });
-        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-rolling-fire-sphere-pipeline"),
-            layout: Some(
-                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("point10-rolling-fire-sphere-pipeline-layout"),
-                    bind_group_layouts: &[Some(&scene_layout)],
-                    immediate_size: 0,
-                }),
-            ),
-            vertex: wgpu::VertexState {
-                module: &scene_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(depth_state()),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &scene_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let scene_mesh = MeshGpu::new(
-            &device,
-            "point10-rolling-fire-sphere",
-            &build_sphere(SPHERE_RADIUS, 32, 16),
-        );
+        // The emitter mesh is also the simulation's seed geometry: the JS's
+        // `SphereGeometry(SPHERE_RADIUS, 64, 40)` (`:447`), 65 x 41 vertices.
+        let sphere = build_sphere(SPHERE_RADIUS, 64, 40);
+        let emitter_positions: Vec<[f32; 3]> = sphere
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position)
+            .collect();
 
-        // --- floor ----------------------------------------------------------
+        let sim = VolumeSim::new(&device, &queue, self.grid, &emitter_positions);
+        let mut stage =
+            VolumeStage::new(&device, &queue, self.size.0, self.size.1, ctx.target_format);
+        stage.set_overlay(&queue, self.transparent_overlay);
+
         let loader = ctx.asset_loader();
         let floor_texture = load_texture(
             &device,
@@ -1008,311 +1070,58 @@ impl Point10Scene for RollingFire {
             ColourSpace::Srgb,
             Wrap::Repeat,
         );
-        let floor_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-rolling-fire-floor-shader"),
-            source: wgpu::ShaderSource::Wgsl(floor_wgsl().into()),
-        });
-        let floor_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-rolling-fire-floor-layout"),
-            entries: &[
-                uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-                texture_entry(1),
-                sampler_entry(2),
-            ],
-        });
-        let floor_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-rolling-fire-floor-uniforms"),
-            size: std::mem::size_of::<FloorUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let floor_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-rolling-fire-floor-bind-group"),
-            layout: &floor_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: floor_uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&floor_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&floor_texture.sampler),
-                },
-            ],
-        });
-        let floor_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-rolling-fire-floor-pipeline"),
-            layout: Some(
-                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("point10-rolling-fire-floor-pipeline-layout"),
-                    bind_group_layouts: &[Some(&floor_layout)],
-                    immediate_size: 0,
-                }),
-            ),
-            vertex: wgpu::VertexState {
-                module: &floor_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            primitive: wgpu::PrimitiveState {
+
+        let sphere_material = Material::new(
+            &device,
+            "point10-rolling-fire-sphere",
+            &sphere_program(),
+            std::mem::size_of::<SphereUniforms>() as u64,
+            Some(Vertex::layout()),
+            wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(depth_state()),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &floor_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let floor_mesh = MeshGpu::new(
-            &device,
-            "point10-rolling-fire-floor",
-            &build_floor(FLOOR_PLANE, FLOOR_Y),
-        );
-
-        // --- haze puffs -----------------------------------------------------
-        let puff_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-rolling-fire-puff-shader"),
-            source: wgpu::ShaderSource::Wgsl(puff_wgsl().into()),
-        });
-        let puff_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-rolling-fire-puff-layout"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
-        });
-        let puff_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-rolling-fire-puff-uniforms"),
-            size: std::mem::size_of::<PuffUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let puff_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-rolling-fire-puff-bind-group"),
-            layout: &puff_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: puff_uniforms.as_entire_binding(),
-            }],
-        });
-        let quad = UnitQuad::new(&device);
-        let puff_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-rolling-fire-puff-pipeline"),
-            layout: Some(
-                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("point10-rolling-fire-puff-pipeline-layout"),
-                    bind_group_layouts: &[Some(&puff_layout)],
-                    immediate_size: 0,
-                }),
-            ),
-            vertex: wgpu::VertexState {
-                module: &puff_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[
-                    Some(UnitQuad::vertex_layout()),
-                    Some(PuffInstance::layout()),
-                ],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &puff_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Zero,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let puff_instances = {
-            use wgpu::util::DeviceExt;
-            let empty = vec![
-                PuffInstance {
-                    position: [0.0; 3],
-                    size: 0.0,
-                    colour: [0.0; 3],
-                    alpha: 0.0,
-                };
-                PUFF_COUNT
-            ];
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("point10-rolling-fire-puff-instances"),
-                contents: bytemuck::cast_slice(&empty),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            })
-        };
-
-        // --- targets, bloom, final composite --------------------------------
-        let scene_target = TextureTarget::new(
-            &device,
-            "point10-rolling-fire-scene",
-            self.size.0,
-            self.size.1,
-            HDR_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let (depth, depth_view) = create_depth(
-            &device,
-            "point10-rolling-fire-depth",
-            self.size.0,
-            self.size.1,
-        );
-
-        let mut bloom = UnrealBloomPass::new(&device, &queue, self.size.0, self.size.1);
-        bloom.set_strength(BLOOM_BASE);
-        bloom.set_radius(1.0);
-        bloom.set_threshold(0.5);
-        bloom.set_input(&scene_target.view);
-
-        let final_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-rolling-fire-final-shader"),
-            source: wgpu::ShaderSource::Wgsl(final_wgsl().into()),
-        });
-        let final_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-rolling-fire-final-layout"),
-            entries: &[
-                uniform_entry(0, wgpu::ShaderStages::FRAGMENT),
-                texture_entry(1),
-                texture_entry(2),
-                sampler_entry(3),
-            ],
-        });
-        let final_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-rolling-fire-final-uniforms"),
-            size: std::mem::size_of::<FinalUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let final_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("point10-rolling-fire-final-sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-        let final_pipeline = ctx.fullscreen_pipeline_with_format(
-            "point10-rolling-fire-final-pipeline",
-            &final_shader,
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("point10-rolling-fire-final-pipeline-layout"),
-                bind_group_layouts: &[Some(&final_layout)],
-                immediate_size: 0,
-            }),
-            HDR_FORMAT,
+            Some(crate::point10::scenes::cube_mesh::depth_state()),
             None,
         );
-        let final_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-rolling-fire-final-bind-group"),
-            layout: &final_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: final_uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&scene_target.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(
-                        bloom
-                            .composite_view()
-                            .expect("the bloom pass always has a composite target"),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&final_sampler),
-                },
-            ],
-        });
+        let floor_material = FloorMaterial::new(
+            &device,
+            FLOOR_WGSL,
+            &floor_texture.view,
+            &floor_texture.sampler,
+        );
 
-        // `renderer.toneMapping = ACESFilmicToneMapping; exposure = 2`.
-        let mut composer =
-            Composer::new(&device, &queue, self.size.0, self.size.1, ctx.target_format);
-        composer
-            .output_mut()
-            .set_tone_mapping(ToneMapping::AcesFilmic);
-        composer.output_mut().set_exposure(2.0);
+        let sphere_mesh = MeshGpu::new(&device, "point10-rolling-fire-sphere-mesh", &sphere);
+        let floor_mesh = MeshGpu::new(
+            &device,
+            "point10-rolling-fire-floor-mesh",
+            &build_floor(FLOOR_PLANE, FLOOR_Y),
+        );
 
         self.gpu = Some(RollingFireGpu {
             device,
             queue,
-            scene_pipeline,
-            scene_uniforms,
-            scene_bind_group,
-            scene_mesh,
-            floor_pipeline,
-            floor_uniforms,
-            floor_bind_group,
+            sim,
+            stage,
+            sphere: sphere_material,
+            floor: floor_material,
+            sphere_mesh,
             floor_mesh,
             _floor_texture: floor_texture.texture,
-            puff_pipeline,
-            puff_uniforms,
-            puff_bind_group,
-            puff_instances,
-            quad,
-            scene_target,
-            _depth: depth,
-            depth_view,
-            bloom,
-            final_pipeline,
-            final_uniforms,
-            final_bind_group,
-            final_layout,
-            final_sampler,
-            composer,
         });
-
-        let emitter = self.sphere_position();
-        for puff in &mut self.puffs {
-            *puff = spawn_puff(puff.seed, emitter, SPHERE_RADIUS);
-        }
-        self.upload_uniforms();
     }
 
     fn resize(&mut self, width: u32, height: u32) {
         self.size = (width.max(1), height.max(1));
         self.camera_aspect = self.size.0 as f32 / self.size.1 as f32;
-        self.rebuild_targets();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let device = gpu.device.clone();
+        let queue = gpu.queue.clone();
+        let (width, height) = self.size;
+        gpu.stage.resize(&device, &queue, width, height);
     }
 
     fn update(&mut self, dt: f32, audio: &AudioBridge) {
@@ -1324,17 +1133,20 @@ impl Point10Scene for RollingFire {
         } else {
             1.0 / 60.0
         };
-        self.last_delta = delta;
-        self.simulation_time += delta * self.simulation_speed;
 
-        // The JS returns before any motion until the renderer is ready and the
-        // analyser has data (`:226-227`).
-        if !audio.is_available() {
-            self.upload_uniforms();
-            return;
-        }
+        // R-34: the JS analyser exists even with no signal, so a silent input
+        // is a zero `freqMag`, not a skipped update. Using a zero band vector
+        // keeps the smoothers decaying, the ball coasting, the hue easing, the
+        // spin turning and the sim stepping — exactly what the JS does in
+        // silence — while every drive term that divides by a band energy is
+        // naturally zero (the `hi_sway` guard returns 0).
+        let zero_bands = [0.0_f32; AUDIO_SAMPLES];
+        let freq_mag = if audio.is_available() {
+            &audio.freq_mag
+        } else {
+            &zero_bands
+        };
 
-        let freq_mag = &audio.freq_mag;
         let bass = band(freq_mag, 0, BASS_BINS);
         self.bass += (bass - self.bass) * (delta * 8.0).min(1.0);
 
@@ -1360,31 +1172,35 @@ impl Point10Scene for RollingFire {
         // `this._camYaw += (this._bass * 0.15 - this._camYaw) * min(1, dt*0.15)`.
         self.camera_yaw += (self.bass * 0.15 - self.camera_yaw) * (delta * 0.15).min(1.0);
 
-        // The snare band (`:272-279`).
         let snare = snare_band(freq_mag);
         self.snare += (snare - self.snare) * (delta * 12.0).min(1.0);
         self.fire_size = fire_size(self.hi, self.snare);
 
-        // The drop detector (`:287-290`).
+        // The drop detector + shortest-arc hue ease (`:287-290`).
         let sample = seeded_rand(0, self.seed as i32);
         if drop_color_pulse(&mut self.pulse, self.bass, delta, sample) {
             self.seed = self.seed.wrapping_add(1);
         }
         self.fire_hue = ease_phrase_hue(self.fire_hue, self.pulse.hue, delta, 1.2);
 
-        // The ball (`:1403-1414`).
-        self.ball.vx += self.kick[0];
-        self.ball.vz += self.kick[2];
-        self.ball = roll_ball(
-            self.ball,
-            self.accel,
-            delta,
-            ROLL_DAMP,
-            BALL_BOUNCE,
-            BALL_ROVE_RADIUS,
-            ROLL_MAX_SPEED,
-        );
+        // The ball (`:1403-1424`): bass push + beat kick, rolled on the level
+        // floor. Ball of Fire skips the whole block, so its ball is pinned at
+        // the start position.
+        if !self.freeze_ball {
+            self.ball.vx += self.kick[0];
+            self.ball.vz += self.kick[2];
+            self.ball = roll_ball(
+                self.ball,
+                self.accel,
+                delta,
+                ROLL_DAMP,
+                BALL_BOUNCE,
+                BALL_ROVE_RADIUS,
+                ROLL_MAX_SPEED,
+            );
+        }
         self.kick = [0.0; 3];
+        self.ball_spin += delta * 0.25;
 
         // The camera (`:1427-1453`).
         let (cos_yaw, sin_yaw) = self.camera_yaw.sin_cos();
@@ -1396,120 +1212,84 @@ impl Point10Scene for RollingFire {
             sphere[2] + CAMERA_START[0] * sin_yaw + CAMERA_START[2] * cos_yaw,
         ];
         let lerp = (delta * 1.2).min(1.0);
+        let (noise_x, noise_z) = (
+            self.noise.noise(self.time * 0.25, 0.0, 0.0),
+            self.noise.noise(0.0, 0.0, self.time * 0.3),
+        );
         self.camera = [
-            self.camera[0]
-                + (desired[0] - self.camera[0]) * lerp
-                + value_noise(self.time * 0.25) * 0.15,
+            self.camera[0] + (desired[0] - self.camera[0]) * lerp + noise_x * 0.15,
             self.camera[1] + (desired[1] - self.camera[1]) * lerp,
-            self.camera[2]
-                + (desired[2] - self.camera[2]) * lerp
-                + value_noise(self.time * 0.3 + 5.0) * 0.15,
+            self.camera[2] + (desired[2] - self.camera[2]) * lerp + noise_z * 0.15,
         ];
 
-        // The haze substitute for the fire volume.
-        for puff in &mut self.puffs {
-            advance_puff(
-                puff,
-                sphere,
-                delta,
-                self.simulation_speed,
-                self.smoke_lifespan,
-                SPHERE_RADIUS,
-            );
+        // The JS `_animate` accumulator (`:1335-1370`): `1/120 * speed` steps,
+        // capped at eight per frame, each with its own temporal uniforms. The
+        // steps are recorded here (so the clock advances with the scene) and
+        // submitted by `render`, which owns the queue.
+        let tick = self.clock.pending(
+            delta,
+            self.simulation_speed,
+            self.smoke_lifespan,
+            self.fire_lifespan,
+        );
+        self.pending_steps.clear();
+        let mut temporal = fire_temporal(&self.noise, self.clock.time());
+        for index in 0..tick.steps {
+            let step_temporal = fire_temporal(&self.noise, tick.time_of(index));
+            self.pending_steps
+                .push(self.volume_uniforms(&step_temporal, &tick));
+            temporal = step_temporal;
         }
-        self.upload_uniforms();
+        // With no step this frame, still refresh the uniforms so the raymarch
+        // and the emitters keep animating.
+        self.pending_idle = if self.pending_steps.is_empty() {
+            Some(self.volume_uniforms(&temporal, &tick))
+        } else {
+            None
+        };
+        self.last_temporal = temporal;
+        self.frame = self.frame.wrapping_add(1);
     }
 
     fn render(&mut self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let sphere_uniforms = self.sphere_uniforms(&self.last_temporal);
+        let floor_uniforms = self.floor_uniforms(&self.last_temporal);
         let bloom_strength = self.bloom_strength();
+        let idle_uniforms = self.pending_idle.take();
+        let steps = std::mem::take(&mut self.pending_steps);
+
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
+        let device = gpu.device.clone();
+        let queue = gpu.queue.clone();
 
-        // Floor (alpha blended, depth write) then the opaque lava sphere.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point10-rolling-fire-scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gpu.scene_target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &gpu.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+        if let Some(uniforms) = idle_uniforms {
+            gpu.sim.write(&queue, &uniforms);
+        }
+        for uniforms in &steps {
+            let mut sim_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("point10-rolling-fire-sim"),
             });
-            pass.set_pipeline(&gpu.scene_pipeline);
-            pass.set_bind_group(0, &gpu.scene_bind_group, &[]);
-            gpu.scene_mesh.draw(&mut pass);
-
-            pass.set_pipeline(&gpu.floor_pipeline);
-            pass.set_bind_group(0, &gpu.floor_bind_group, &[]);
-            gpu.floor_mesh.draw(&mut pass);
+            gpu.sim.write(&queue, uniforms);
+            gpu.sim.step(&mut sim_encoder);
+            queue.submit(Some(sim_encoder.finish()));
         }
 
-        // Additive haze.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point10-rolling-fire-haze"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gpu.scene_target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&gpu.puff_pipeline);
-            pass.set_bind_group(0, &gpu.puff_bind_group, &[]);
-            pass.set_vertex_buffer(1, gpu.puff_instances.slice(..));
-            gpu.quad.draw_instanced(&mut pass, PUFF_COUNT as u32);
-        }
-
-        gpu.bloom.set_strength(bloom_strength);
-        gpu.bloom.encode(encoder);
+        gpu.sphere
+            .write(&queue, bytemuck::bytes_of(&sphere_uniforms));
+        gpu.floor.write(&queue, bytemuck::bytes_of(&floor_uniforms));
 
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point10-rolling-fire-final"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: gpu.composer.scene_view(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&gpu.final_pipeline);
-            pass.set_bind_group(0, &gpu.final_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            // The opaque lava sphere, then the semi-transparent floor over it
+            // (three renders opaque geometry before transparent geometry).
+            let mut pass = gpu.stage.begin_scene(encoder);
+            gpu.sphere.draw(&mut pass, &gpu.sphere_mesh);
+            gpu.floor.draw(&mut pass, &gpu.floor_mesh);
         }
 
-        gpu.composer.render(encoder, target);
+        gpu.stage
+            .encode_post(encoder, &gpu.sim, bloom_strength, target);
     }
 
     fn dispose(&mut self) {
@@ -1521,10 +1301,114 @@ impl Point10Scene for RollingFire {
     }
 
     fn meta(&self) -> SceneMeta {
-        // `Point10RollingFire.js` sets `webgpu: true` and no category.
         SceneMeta::for_scene("Point10 Rolling Fire", "3d-scenes")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ball of Fire (`RollingFire.js:1477-1491`)
+// ---------------------------------------------------------------------------
+
+/// `Ball of Fire` — RollingFire with `_freezeBall = true`: the ball is pinned
+/// at its start position, floating above the floor at a constant height, while
+/// the fire, bloom, colour drops, camera and floor stay fully audio-reactive.
+///
+/// It writes its own meta (`"Point10 Ball Of Fire"`) and identical props
+/// (`Point10BallOfFire.js` passes the same `BallOfFire` class to
+/// `createPoint10Module`, so `sceneProps.js` resolves the same schema).
+pub struct BallOfFire {
+    inner: RollingFire,
+}
+
+impl Default for BallOfFire {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BallOfFire {
+    /// A frozen-ball scene at the JS grid.
+    pub fn new() -> Self {
+        let mut inner = RollingFire::new();
+        inner.freeze_ball = true;
+        // Not a layer: plays standalone (only Rolling Fire itself is
+        // foreground-pinned), and its canvas has no background of its own
+        // either (`:1486-1489`).
+        inner.transparent_overlay = true;
+        Self { inner }
+    }
+
+    /// A frozen-ball scene at a custom grid (tests / the reference renderer).
+    pub fn with_grid(grid: VolumeGrid) -> Self {
+        let mut scene = Self::new();
+        scene.inner.grid = grid;
+        scene
+    }
+
+    /// The shared scene state.
+    pub fn inner(&self) -> &RollingFire {
+        &self.inner
+    }
+
+    /// `this.role` — `"standalone"`, not the foreground pin.
+    pub fn role(&self) -> SceneRole {
+        SceneRole::Standalone
+    }
+
+    /// `this._freezeBall`.
+    pub fn frozen(&self) -> bool {
+        self.inner.freeze_ball
+    }
+
+    /// `this._transparentOverlay`.
+    pub fn transparent_overlay(&self) -> bool {
+        self.inner.transparent_overlay
+    }
+
+    /// Apply the shared RollingFire prop schema (the two scenes are identical
+    /// apart from the frozen ball).
+    pub fn apply_props(&mut self, props: impl FnMut(&str) -> Option<f32>) {
+        self.inner.apply_props(props);
+    }
+}
+
+impl Point10Scene for BallOfFire {
+    fn name(&self) -> &'static str {
+        "Point10 Ball Of Fire"
+    }
+
+    fn init(&mut self, ctx: &mut SceneContext) {
+        self.inner.init(ctx);
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.inner.resize(width, height);
+    }
+
+    fn update(&mut self, dt: f32, audio: &AudioBridge) {
+        self.inner.update(dt, audio);
+    }
+
+    fn render(&mut self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        self.inner.render(encoder, target);
+    }
+
+    fn dispose(&mut self) {
+        self.inner.dispose();
+    }
+
+    fn props(&self) -> Vec<SceneProp> {
+        self.inner.props()
+    }
+
+    fn meta(&self) -> SceneMeta {
+        SceneMeta::for_scene("Point10 Ball Of Fire", "3d-scenes")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
 
 /// The 400 x 400 floor plane at `y`, two triangles facing up.
 pub fn build_floor(size: f32, y: f32) -> Mesh {
@@ -1546,132 +1430,42 @@ pub fn build_floor(size: f32, y: f32) -> Mesh {
     mesh
 }
 
-impl TextureTarget {
-    fn new(
-        device: &wgpu::Device,
-        label: &str,
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-        usage: wgpu::TextureUsages,
-    ) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self {
-            _texture: texture,
-            view,
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Shaders
+// ---------------------------------------------------------------------------
 
-fn create_final_bind_group(device: &wgpu::Device, gpu: &RollingFireGpu) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("point10-rolling-fire-final-bind-group"),
-        layout: &gpu.final_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: gpu.final_uniforms.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&gpu.scene_target.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(
-                    gpu.bloom
-                        .composite_view()
-                        .expect("the bloom pass always has a composite target"),
-                ),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Sampler(&gpu.final_sampler),
-            },
-        ],
-    })
-}
-
-fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    }
-}
-
-fn sphere_wgsl() -> String {
+/// The lava sphere: `fire_colour.wgsl` + the Plane9 noise + the sphere material.
+fn sphere_program() -> String {
     format!(
-        "{}\n{SPHERE_WGSL}",
+        "{FIRE_COLOUR_WGSL}\n{}\n{SPHERE_WGSL}",
         crate::point10::shared::p9_glsl::P9_COMMON_WGSL
     )
 }
 
-fn floor_wgsl() -> String {
-    FLOOR_WGSL.to_string()
-}
-
-fn puff_wgsl() -> String {
-    PUFF_WGSL.to_string()
-}
-
-fn final_wgsl() -> String {
-    format!("{FULLSCREEN_TRIANGLE_WGSL}\n{FINAL_WGSL}")
+/// The sphere/floor shader sources, for the naga validation test.
+#[cfg(test)]
+fn shader_programs() -> Vec<(&'static str, String)> {
+    vec![
+        ("sphere", sphere_program()),
+        ("floor", FLOOR_WGSL.to_string()),
+    ]
 }
 
 const SPHERE_WGSL: &str = r#"
-struct SceneUniforms {
+struct SphereUniforms {
   view_proj: mat4x4<f32>,
+  model: mat4x4<f32>,
   camera_pos: vec4<f32>,
-  // rgb = fire colour, w = glow scale
-  glow: vec4<f32>,
-  // x time, y ball x, z ball z, w floor opacity
+  // rgb = uFireStartColor, w = uFireIntensity
+  fire_start: vec4<f32>,
+  // rgb = uFireMidColor, w = uFireGlowSpread
+  fire_mid: vec4<f32>,
+  // rgb = uFireEndColor, w = uFireHue
+  fire_end: vec4<f32>,
+  // x uTime, y emissive scale, z bass, w uFlicker
   params: vec4<f32>,
-  // x floor tile repeat, y ball y, z flicker
-  extra: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> u: SceneUniforms;
+@group(0) @binding(0) var<uniform> u: SphereUniforms;
 
 struct VsOut {
   @builtin(position) position: vec4<f32>,
@@ -1686,25 +1480,19 @@ fn vs_main(
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
 ) -> VsOut {
-  // The sphere sits at the ball's floor position; its world matrix is
-  // `translation(x, floorY + radius, z) * rotationY(time * 0.25)`.
-  let angle = u.params.x * 0.25;
-  let c = cos(angle);
-  let s = sin(angle);
-  let rotated = vec3<f32>(position.x * c + position.z * s, position.y, -position.x * s + position.z * c);
-  let world = rotated + vec3<f32>(u.params.y, u.extra.y, u.params.z);
+  let world = u.model * vec4<f32>(position, 1.0);
   var out: VsOut;
-  out.position = u.view_proj * vec4<f32>(world, 1.0);
-  out.normal = normalize(vec3<f32>(normal.x * c + normal.z * s, normal.y, -normal.x * s + normal.z * c));
+  out.position = u.view_proj * world;
+  out.normal = normalize((u.model * vec4<f32>(normal, 0.0)).xyz);
   out.local = position;
-  out.world = world;
+  out.world = world.xyz;
   return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-  // `MeshStandardMaterial({ color: 0x000000, roughness: 1 })` plus the
-  // three-octave lava emissive (`:1000-1034`).
+  // `emissiveNode` (`RollingFire.js:1000-1034`): three mx_noise_float octaves
+  // flowing down the sphere, `lavaT = noise^2.5`, `fireRamp(lavaT + 0.1)`.
   let p = in.local * 0.5;
   let flow = vec3<f32>(0.0, -u.params.x, 0.0);
   let n1 = p9_noise(p + flow) * 0.5 + 0.5;
@@ -1714,12 +1502,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let n3 = p9_noise(p3) * 0.5 + 0.5;
   let noise = n1 * 0.5 + n2 * 0.35 + n3 * 0.15;
   let lava_t = clamp(pow(noise, 2.5), 0.0, 1.0);
-  let emissive = u.glow.rgb * u.glow.w * (0.45 + lava_t * 1.1) * u.extra.z;
-  // A little diffuse so the unlit side is not a silhouette; the JS sphere is
-  // nearly black under the key light too.
+
+  let ramp = fire_ramp_stops(
+    clamp(lava_t + 0.1, 0.0, 1.0),
+    u.fire_start.rgb,
+    u.fire_mid.rgb,
+    u.fire_end.rgb,
+  );
+  // `fireHue(saturation(fireRamp(...), 1.1), uFireHue)`.
+  let coloured = fire_hue_stops(saturation(ramp, 1.1), u.fire_end.w);
+  // `u.params.y` is the whole CPU-side scalar
+  // `(emitTemp/33.36)^4 * emitDensity/44.08 * uFireIntensity * uFlicker *
+  // fadeIn * (1.5 + bass * 5.3)`.
+  let emissive = coloured * u.params.y;
+  // `MeshStandardMaterial({ color: 0x000000, roughness: 1 })`: a nearly black
+  // base, so only a small key term keeps the dark side from being a hole.
   let normal = normalize(in.normal);
-  let key = max(dot(normal, normalize(vec3<f32>(0.0, 1.0, 0.0))), 0.0) * 0.15;
-  return vec4<f32>(emissive + u.glow.rgb * key, 1.0);
+  let key = max(dot(normal, normalize(vec3<f32>(0.0, 1.0, 0.35))), 0.0) * 0.05;
+  return vec4<f32>(emissive + u.fire_start.rgb * key * u.params.y, 1.0);
 }
 "#;
 
@@ -1727,8 +1527,14 @@ const FLOOR_WGSL: &str = r#"
 struct FloorUniforms {
   view_proj: mat4x4<f32>,
   camera_pos: vec4<f32>,
-  // x repeat, y fire intensity, z time, w opacity
+  // xyz key light position, w tile repeat
+  light: vec4<f32>,
+  // rgb fire bounce colour, w intensity
+  fire: vec4<f32>,
+  // x time, y opacity, z ball x, w ball z
   params: vec4<f32>,
+  // x ball y
+  misc: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: FloorUniforms;
 @group(0) @binding(1) var floor_map: texture_2d<f32>;
@@ -1753,91 +1559,51 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-  // PlaneGeometry(400, 400) with `repeat = FLOOR_PLANE / FLOOR_TILE`.
-  let uv = in.world.xz / u.params.x + vec2<f32>(0.5);
+  // `PlaneGeometry(400, 400)` with `repeat = FLOOR_PLANE / FLOOR_TILE`.
+  let uv = in.world.xz / u.light.w + vec2<f32>(0.5);
   let albedo = textureSample(floor_map, floor_sampler, uv).rgb;
-  // A dim overhead spot above the ball (the JS key spotlight) plus the fire's
-  // bounce; the floor's PBR roughness map is folded into the flat term.
-  let to_light = vec3<f32>(u.camera_pos.x, 20.0, u.camera_pos.z) - in.world;
-  let distance = length(to_light);
-  let spot = max(dot(vec3<f32>(0.0, 1.0, 0.0), to_light / max(distance, 0.001)), 0.0)
-    * 1.6 / (1.0 + distance * distance * 0.002);
-  let fire = u.params.y * 0.12 / (1.0 + length(in.world.xz) * 0.15);
-  let lit = albedo * (0.06 + spot) + albedo * fire;
-  return vec4<f32>(lit, u.params.w);
-}
-"#;
 
-const PUFF_WGSL: &str = r#"
-struct PuffUniforms {
-  view_proj: mat4x4<f32>,
-  camera_right: vec4<f32>,
-  camera_up: vec4<f32>,
-}
-@group(0) @binding(0) var<uniform> u: PuffUniforms;
+  // The key `SpotLight(0xffffff, 700, 0, 0.4, 0.6, 2)` aimed straight down at
+  // the ball (`:1184-1196`): a 0.4 rad cone with a 0.6 penumbra, so only a pool
+  // below the fire is lit — the rest of the 400 m plane stays in the void.
+  let to_key = u.light.xyz - in.world;
+  let key_d2 = max(dot(to_key, to_key), 1.0);
+  let key_dir = to_key * inverseSqrt(key_d2);
+  let cos_theta = clamp(-key_dir.y, -1.0, 1.0);
+  // three: smoothstep(cos(angle), cos(angle * (1 - penumbra)), cosTheta).
+  let outer = cos(0.4);
+  let inner = cos(0.4 * (1.0 - 0.6));
+  let cone = smoothstep(outer, inner, cos_theta);
+  // Irradiance `700 / d²` (candela) and the Lambert `1 / PI` response.
+  let key = 700.0 / key_d2 * 0.31830989 * cone * max(cos_theta, 0.0);
 
-struct VsOut {
-  @builtin(position) position: vec4<f32>,
-  @location(0) colour: vec3<f32>,
-  @location(1) alpha: f32,
-  @location(2) uv: vec2<f32>,
-}
+  // The fire's bounce: the volume point light sits on the ball.
+  let to_fire = vec3<f32>(u.params.z, u.misc.x, u.params.w) - in.world;
+  let fire_d2 = dot(to_fire, to_fire);
+  let fire_dir = to_fire * inverseSqrt(max(fire_d2, 1e-4));
+  let fire = u.fire.w * 2.2 / (1.0 + fire_d2 * 0.6) * max(fire_dir.y, 0.0);
 
-@vertex
-fn vs_main(
-  @location(2) corner: vec2<f32>,
-  @location(3) uv: vec2<f32>,
-  @location(4) instance_position: vec3<f32>,
-  @location(5) instance_size: f32,
-  @location(6) instance_colour: vec3<f32>,
-  @location(7) instance_alpha: f32,
-) -> VsOut {
-  let world = instance_position
-    + u.camera_right.xyz * corner.x * instance_size
-    + u.camera_up.xyz * corner.y * instance_size;
-  var out: VsOut;
-  out.position = u.view_proj * vec4<f32>(world, 1.0);
-  out.colour = instance_colour;
-  out.alpha = instance_alpha;
-  out.uv = uv;
-  return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-  let radius = length(in.uv * 2.0 - 1.0);
-  let mask = pow(1.0 - smoothstep(0.0, 1.0, radius), 2.0);
-  return vec4<f32>(in.colour, in.alpha * mask);
-}
-"#;
-
-const FINAL_WGSL: &str = r#"
-struct FinalUniforms {
-  resolution: vec2<f32>,
-  _pad: vec2<f32>,
-}
-@group(0) @binding(0) var<uniform> u: FinalUniforms;
-@group(0) @binding(1) var scene_colour: texture_2d<f32>;
-@group(0) @binding(2) var bloom_colour: texture_2d<f32>;
-@group(0) @binding(3) var source_sampler: sampler;
-
-@fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-  let uv = position.xy / u.resolution;
-  let scene = textureSample(scene_colour, source_sampler, uv);
-  let bloom = textureSample(bloom_colour, source_sampler, uv);
-  let rgb = scene.rgb + bloom.rgb;
-  // `_transparentOverlay`: alpha = max(rgb).
-  return vec4<f32>(rgb, clamp(max(max(rgb.r, rgb.g), rgb.b), 0.0, 1.0));
+  let lit = albedo * (0.02 + key) + albedo * u.fire.rgb * fire;
+  return vec4<f32>(lit, u.params.y);
 }
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::point10::audio_bridge::BandPayload;
 
     fn close(a: f32, b: f32, tolerance: f32) {
         assert!((a - b).abs() < tolerance, "{a} != {b}");
+    }
+
+    fn loud_bridge() -> AudioBridge {
+        let mut payload = BandPayload::silent(44_100.0);
+        payload.freq_mag = [0.6; AUDIO_SAMPLES];
+        payload.byte_frequency_data = vec![0; 1024];
+        let mut bridge = AudioBridge::new();
+        bridge.update(0.1, Some(&payload), &Default::default());
+        bridge
     }
 
     #[test]
@@ -1948,48 +1714,23 @@ mod tests {
 
     #[test]
     fn sphere_glow_fades_in_and_rides_the_bass() {
+        let noise = ImprovedNoise;
+        let early = fire_temporal(&noise, 0.0);
         assert_eq!(
-            sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, 0.0, 1.0),
+            sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, &early, 1.0),
             0.0
         );
-        let quiet = sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, 3.0, 0.0);
-        let loud = sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, 3.0, 1.0);
+        let late = fire_temporal(&noise, 3.0);
+        let quiet = sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, &late, 0.0);
+        let loud = sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, &late, 1.0);
         assert!(quiet > 0.0);
         close(loud / quiet, (1.5 + 5.3) / 1.5, 1e-5);
-    }
-
-    #[test]
-    fn value_noise_is_bounded_and_smooth() {
-        for step in 0..100 {
-            let value = value_noise(step as f32 * 0.37);
-            assert!((-1.0..=1.0).contains(&value));
-        }
-        assert_eq!(value_noise(f32::NAN), value_noise(0.0));
-        assert_eq!(value_noise(3.25), value_noise(3.25));
-        // Interpolation stays between the lattice samples.
-        assert_ne!(value_noise(0.25), value_noise(0.75));
-    }
-
-    #[test]
-    fn puffs_spawn_around_the_sphere_and_advance() {
-        let emitter = [1.0, 2.0, 3.0];
-        let mut puff = spawn_puff(4, emitter, SPHERE_RADIUS);
-        assert_eq!(puff.age, 0.0);
-        let distance = ((puff.position[0] - emitter[0]).powi(2)
-            + (puff.position[1] - emitter[1]).powi(2)
-            + (puff.position[2] - emitter[2]).powi(2))
-        .sqrt();
-        assert!((distance - SPHERE_RADIUS).abs() < 1e-4);
-
-        let start = puff.position;
-        advance_puff(&mut puff, emitter, 0.1, 1.2, 1.5, SPHERE_RADIUS);
-        assert!(puff.age > 0.0);
-        assert_ne!(puff.position, start);
-        assert!(puff.temperature < 1.5);
-
-        puff.age = 1.0;
-        advance_puff(&mut puff, emitter, 0.1, 1.2, 1.5, SPHERE_RADIUS);
-        assert_eq!(puff.age, 0.0);
+        // The JS's double flicker (the emissive node itself multiplies it).
+        let flat = FireTemporal {
+            flicker: 1.0,
+            ..late
+        };
+        assert!(sphere_glow(EMIT_TEMPERATURE, EMIT_DENSITY, FIRE_INTENSITY, &flat, 0.0) > quiet);
     }
 
     #[test]
@@ -2002,10 +1743,13 @@ mod tests {
             assert_eq!(vertex.normal, [0.0, 1.0, 0.0]);
         }
         assert_eq!(FLOOR_Y, 0.8);
+        close(SPHERE_Y, 1.7, 1e-6);
     }
 
     #[test]
     fn preset_constants_match_the_js() {
+        assert_eq!((GRID_SIZE_X, GRID_SIZE_Y, GRID_SIZE_Z), (100, 100, 200));
+        assert_eq!(GRID.cell_count(), 2_000_000);
         assert_eq!(
             (
                 VOLUME_WORLD_SIZE_X,
@@ -2040,25 +1784,85 @@ mod tests {
         assert_eq!((FLOOR_TILE, FLOOR_PLANE), (10.0, 400.0));
         assert_eq!(CLEAR_ALPHA, 0.0);
         assert_eq!(CAMERA_START, [9.0, 3.5, 2.8]);
+        assert_eq!((RAYMARCH_STEPS, KEY_LIGHT_HEIGHT), (18, 20.0));
+        assert_eq!(KEY_LIGHT_ATTENUATION, 25.0);
+        assert_eq!(POINT_LIGHT_VOLUME_INTENSITY, 1.4);
+        assert_eq!((SIMULATION_SPEED, SMOKE_LIFESPAN), (1.2, 1.5));
+        assert_eq!(FIRE_LIFESPAN, 0.9);
     }
 
     #[test]
     fn uniforms_match_the_documented_sizes() {
-        assert_eq!(std::mem::size_of::<SceneUniforms>(), 128);
-        assert_eq!(std::mem::size_of::<FloorUniforms>(), 96);
-        assert_eq!(std::mem::size_of::<PuffUniforms>(), 96);
-        assert_eq!(std::mem::size_of::<PuffInstance>(), 32);
-        assert_eq!(std::mem::size_of::<FinalUniforms>(), 16);
+        assert_eq!(std::mem::size_of::<SphereUniforms>(), 208);
+        assert_eq!(std::mem::size_of::<FloorUniforms>(), 144);
+    }
+
+    #[test]
+    fn the_volume_uniforms_carry_the_scene_state() {
+        let mut scene = RollingFire::new();
+        scene.camera_aspect = 16.0 / 9.0;
+        scene.size = (256, 128);
+        scene.fire_size = 2.0;
+        scene.fire_hue = 1.25;
+        scene.ball = Ball {
+            x: 3.0,
+            z: -4.0,
+            vx: 0.0,
+            vz: 0.0,
+        };
+        scene.ball_spin = std::f32::consts::FRAC_PI_2;
+        let temporal = fire_temporal(&ImprovedNoise, 10.0);
+        let tick = SimTick {
+            steps: 2,
+            step: 0.01,
+            start_time: 0.0,
+            turbulence: 3.2 / 1.2_f32.sqrt(),
+            dissipation: 1.0 / 1.5,
+            cooling: 1.0 / 0.9,
+        };
+        let uniforms = scene.volume_uniforms(&temporal, &tick);
+
+        assert_eq!(uniforms.grid, [100.0, 100.0, 200.0, 0.01]);
+        assert_eq!(uniforms.world, [16.0, 16.0, 32.0, temporal.time]);
+        // The grid rides the ball; the ball sits worldY/2 above the origin.
+        close(uniforms.origin[0], 3.0, 1e-6);
+        close(uniforms.origin[1], SPHERE_Y - 8.0, 1e-6);
+        close(uniforms.origin[2], -4.0, 1e-6);
+        close(uniforms.origin[3], 1.0, 1e-6);
+        assert_eq!(uniforms.sphere_pos, [3.0, SPHERE_Y, -4.0, 0.0]);
+        // `uSphereSpeed` / `uSphereVelocity` are never written in the JS.
+        assert_eq!(uniforms.sphere_pos[3], 0.0);
+        assert_eq!(uniforms.sphere_vel, [0.0, 0.0, 0.0, 0.25]);
+        // Key light is 20 m above the ball with RollingFire's 25/d² term.
+        assert_eq!(uniforms.key_light, [3.0, SPHERE_Y + 20.0, -4.0, 25.0]);
+        assert_eq!(uniforms.misc[1], 18.0);
+        close(uniforms.emit[0], 16.0, 1e-6);
+        close(uniforms.emit[1], 14.0, 1e-6);
+        close(uniforms.emit[2], 2.0, 1e-6);
+        close(uniforms.fire_start[3], 26.0, 1e-6);
+        close(uniforms.fire_mid[3], 5.0, 1e-6);
+        close(uniforms.fire_end[3], 1.25, 1e-6);
+        assert_eq!(uniforms.turb, [3.0, 0.15, tick.turbulence, 0.1]);
+        assert_eq!(uniforms.turb2, [10.0, 0.25, tick.cooling, tick.dissipation]);
+        assert_eq!(uniforms.light, [2.0, 0.5, 1.0, 0.59]);
+        close(uniforms.light2[1], temporal.sway[0], 1e-6);
+        close(uniforms.light2[2], temporal.sway[2], 1e-6);
+        // Half-resolution raymarch target of a 256x128 frame.
+        assert_eq!(uniforms.view[2..4], [128.0, 64.0]);
+        close(uniforms.view[0], (60.0_f32.to_radians() * 0.5).tan(), 1e-6);
+        // The emitter model is the ball's world matrix.
+        let model = uniforms.emitter_model;
+        for row in model {
+            assert!(row.iter().all(|value| value.is_finite()));
+        }
+        close(model[3][0], 3.0, 1e-6);
+        close(model[3][1], SPHERE_Y, 1e-6);
+        close(model[3][2], -4.0, 1e-6);
     }
 
     #[test]
     fn wgsl_parses_and_validates() {
-        for (label, program) in [
-            ("sphere", sphere_wgsl()),
-            ("floor", floor_wgsl()),
-            ("puff", puff_wgsl()),
-            ("final", final_wgsl()),
-        ] {
+        for (label, program) in shader_programs() {
             let module = match naga::front::wgsl::parse_str(&program) {
                 Ok(module) => module,
                 Err(error) => panic!("{label} WGSL failed to parse: {error}"),
@@ -2074,17 +1878,20 @@ mod tests {
 
     #[test]
     fn shaders_keep_the_ported_maths() {
-        let sphere = sphere_wgsl();
+        let sphere = sphere_program();
         for needle in [
             "let n1 = p9_noise(p + flow) * 0.5 + 0.5;",
             "let lava_t = clamp(pow(noise, 2.5), 0.0, 1.0);",
-            "u.glow.w",
+            "fire_hue_stops(saturation(ramp, 1.1), u.fire_end.w)",
+            "u.params.y",
         ] {
             assert!(sphere.contains(needle), "sphere lost {needle}");
         }
-        let floor = floor_wgsl();
-        assert!(floor.contains("in.world.xz / u.params.x + vec2<f32>(0.5)"));
-        assert!(final_wgsl().contains("clamp(max(max(rgb.r, rgb.g), rgb.b), 0.0, 1.0)"));
+        let floor = FLOOR_WGSL;
+        assert!(floor.contains("in.world.xz / u.light.w + vec2<f32>(0.5)"));
+        assert!(floor.contains("700.0 / key_d2"));
+        assert!(floor.contains("let outer = cos(0.4);"));
+        assert!(floor.contains("u.fire.w * 2.2 / (1.0 + fire_d2 * 0.6)"));
     }
 
     #[test]
@@ -2093,6 +1900,9 @@ mod tests {
         assert_eq!(scene.meta().name, "Point10 Rolling Fire");
         assert_eq!(scene.meta().category, "3d-scenes");
         assert_eq!(scene.clear_alpha(), 0.0);
+        assert_eq!(scene.role(), SceneRole::Foreground);
+        assert!(scene.transparent_overlay());
+        assert!(!scene.frozen());
         let names: Vec<&str> = scene.props().iter().map(|prop| prop.name).collect();
         assert_eq!(
             &names[names.len() - 7..],
@@ -2107,6 +1917,25 @@ mod tests {
             ]
         );
         assert_eq!(names[0], "gain");
+    }
+
+    #[test]
+    fn ball_of_fire_is_the_frozen_standalone_variant() {
+        let scene = BallOfFire::new();
+        assert_eq!(scene.name(), "Point10 Ball Of Fire");
+        assert_eq!(scene.meta().name, "Point10 Ball Of Fire");
+        assert_eq!(scene.meta().author, "Point10");
+        assert_eq!(scene.meta().version, "1.0.0");
+        assert_eq!(scene.meta().module_type, "2d");
+        assert_eq!(scene.meta().category, "3d-scenes");
+        assert_eq!(scene.meta().audio_features, &["bass", "mid", "treble"]);
+        assert_eq!(scene.role(), SceneRole::Standalone);
+        assert!(scene.frozen());
+        assert!(scene.transparent_overlay());
+        // Identical props (`Point10BallOfFire.js` uses the same class, so the
+        // adapter resolves the same `ROLLING_FIRE_PROPS` schema).
+        assert_eq!(scene.props(), RollingFire::new().props());
+        assert_eq!(scene.inner().grid(), GRID);
     }
 
     #[test]
@@ -2131,14 +1960,56 @@ mod tests {
     }
 
     #[test]
-    fn update_rolls_the_ball_and_follows_it() {
-        use crate::point10::audio_bridge::BandPayload;
+    fn update_maps_the_audio_bands() {
         let mut scene = RollingFire::new();
-        let mut payload = BandPayload::silent(44_100.0);
-        payload.freq_mag = [0.6; AUDIO_SAMPLES];
-        payload.byte_frequency_data = vec![0; 1024];
-        let mut bridge = AudioBridge::new();
-        bridge.update(0.1, Some(&payload), &Default::default());
+        let bridge = loud_bridge();
+        scene.update(1.0 / 60.0, &bridge);
+
+        // bass = mean(first five bins) = 0.6, smoothed by `min(1, dt * 8)`.
+        close(scene.bass(), 0.6 * (1.0 / 60.0 * 8.0), 1e-6);
+        // hi-hats = mean(top 15%) = 0.6, smoothed by `dt * 10`.
+        close(scene.hi, 0.6 * (1.0 / 60.0 * 10.0), 1e-6);
+        // snares = bins 2%..13% = 0.6, smoothed by `dt * 12`.
+        close(scene.snare, 0.6 * (1.0 / 60.0 * 12.0), 1e-6);
+        // `uFireSize = 1 + hi * 2.5 + snare * 8`.
+        close(scene.fire_size(), fire_size(scene.hi, scene.snare), 1e-6);
+        // The flat spectrum steers at the band's middle, so the azimuth only
+        // advances by `BALL_DIR_SPIN` (the centroid sway is ~0).
+        close(scene.ball_direction(), BALL_DIR_SPIN * (1.0 / 60.0), 1e-4);
+        // The first bass rise is a beat (0.08 past the 0.04 floor), so the
+        // kick is applied to the ball this frame.
+        assert_ne!(scene.ball(), Ball::new());
+        // The camera yaw eases toward `bass * 0.15` at `dt * 0.15`.
+        close(
+            scene.camera_yaw(),
+            scene.bass() * 0.15 * (1.0 / 60.0 * 0.15),
+            1e-9,
+        );
+    }
+
+    /// The simulation clock is the JS `_animate` accumulator: `1/120 * speed`
+    /// steps from a frame delta capped at 1/30 s, at most eight per frame.
+    #[test]
+    fn the_simulation_clock_runs_the_js_fixed_step() {
+        let mut scene = RollingFire::new();
+        let silent = AudioBridge::new();
+        scene.update(1.0 / 60.0, &silent);
+        // 1/60 s * 1.2 = 0.02 s of sim time at 0.01 s per step: two steps.
+        close(scene.simulation_time(), 0.02, 1e-6);
+        close(scene.last_temporal.time, 0.02, 1e-6);
+        // A one-second frame is capped to 1/30 s: four steps, 0.04 s.
+        scene.update(1.0, &silent);
+        close(scene.simulation_time(), 0.06, 1e-6);
+        // A zero delta is the JS `this._dt || 1 / 60` fallback, so the sim
+        // still steps (the JS never stalls on a paused clock).
+        scene.update(0.0, &silent);
+        close(scene.simulation_time(), 0.08, 1e-6);
+    }
+
+    #[test]
+    fn update_rolls_the_ball_and_follows_it() {
+        let mut scene = RollingFire::new();
+        let bridge = loud_bridge();
 
         for _ in 0..120 {
             scene.update(1.0 / 60.0, &bridge);
@@ -2146,12 +2017,78 @@ mod tests {
         assert!(scene.bass() > 0.0);
         assert!(scene.fire_size() > 1.0);
         assert_ne!(scene.ball(), Ball::new());
+        assert!(scene.ball_direction() > 0.0);
         // The camera chases the ball, so it must have moved from its start.
         assert_ne!(scene.camera_position(), CAMERA_START);
+        // The key light and grid origin track the ball (`:1457`, `:1322`).
+        let sphere = scene.sphere_position();
+        assert_eq!(scene.key_light_position()[1], sphere[1] + 20.0);
+        assert_eq!(scene.grid_origin()[1], sphere[1] - 8.0);
+    }
 
-        // Without audio the JS update body returns early.
-        let frozen = scene.ball();
-        scene.update(1.0 / 60.0, &AudioBridge::new());
-        assert_eq!(scene.ball(), frozen);
+    /// R-34: with no audio the JS keeps animating (its analyser exists in
+    /// silence, reporting zero bands). The port must advance the simulation
+    /// clock, the ball/camera/hue/spin path and the fire hull, not return
+    /// early.
+    #[test]
+    fn no_audio_idles_like_the_js_instead_of_freezing() {
+        let mut scene = RollingFire::new();
+        let silent = AudioBridge::new();
+        assert!(!silent.is_available());
+
+        for _ in 0..120 {
+            scene.update(1.0 / 60.0, &silent);
+        }
+        // The sim clock advances (two 1/120 s steps per 1/60 s frame at 1.2x).
+        assert!(scene.simulation_time() > 0.0);
+        // The steer spins and the camera settles onto the follow offset even
+        // in silence.
+        assert!(scene.ball_direction() > 0.0);
+        assert_ne!(scene.camera_position(), CAMERA_START);
+        // It lerps toward the follow offset at `delta * 1.2` per frame, so 120
+        // frames get most of the way there even without any music.
+        assert!((scene.camera_position()[1] - (SPHERE_Y + CAMERA_START[1])).abs() < 0.3);
+        // Zero bands mean zero acceleration, so the ball has not moved.
+        assert_eq!(scene.ball(), Ball::new());
+        // The smoothers decayed to zero and the emission scale is the idle
+        // multiplier of 1.
+        assert_eq!(scene.bass(), 0.0);
+        assert_eq!(scene.fire_size(), 1.0);
+        assert_eq!(scene.fire_hue(), 0.0);
+
+        // Momentum from the loud run keeps moving under silence: run loud,
+        // then one silent frame must still advance the ball's position and the
+        // clock.
+        let mut rolling = RollingFire::new();
+        let bridge = loud_bridge();
+        for _ in 0..120 {
+            rolling.update(1.0 / 60.0, &bridge);
+        }
+        let ball = rolling.ball();
+        let time = rolling.simulation_time();
+        let spin = rolling.ball_direction();
+        rolling.update(1.0 / 60.0, &silent);
+        assert_ne!(rolling.ball(), ball, "the ball must keep coasting");
+        assert!(rolling.simulation_time() > time);
+        assert!(rolling.ball_direction() > spin);
+    }
+
+    #[test]
+    fn ball_of_fire_freezes_the_ball_but_keeps_the_scene_alive() {
+        let mut scene = BallOfFire::new();
+        let bridge = loud_bridge();
+        for _ in 0..120 {
+            scene.update(1.0 / 60.0, &bridge);
+        }
+        // The ball never leaves the start position, whatever the audio does.
+        assert_eq!(scene.inner().ball(), Ball::new());
+        // But everything else reacts: the camera orbits, the fire pulses, the
+        // hue can flip and the grid still emits around the frozen ball.
+        assert!(scene.inner().bass() > 0.0);
+        assert!(scene.inner().fire_size() > 1.0);
+        assert_ne!(scene.inner().camera_position(), CAMERA_START);
+        // The simulation clock advances with the scene (the GPU steps are
+        // submitted by `render`, but the accumulator lives in `update`).
+        assert!(scene.inner().simulation_time() > 0.0);
     }
 }

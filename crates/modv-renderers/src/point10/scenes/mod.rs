@@ -23,7 +23,7 @@
 //! | [`boxy`] | Boxy | `scenes/Boxy.js` |
 //! | [`sound_cube`] | Sound Cube | `scenes/SoundCube.js` |
 //! | [`geometric_tunnel`] | Geometric Tunnel | `scenes/GeometricTunnel.js` |
-//! | [`rolling_fire`] | Rolling Fire | `scenes/RollingFire.js` |
+//! | [`rolling_fire`] | Rolling Fire / Ball Of Fire | `scenes/RollingFire.js` |
 //! | [`smoke_room`] | Smoke Room | `scenes/SmokeRoom.js` |
 //! | [`latent_backrooms`] | Latent Backrooms | `scenes/LatentBackrooms.js` |
 //!
@@ -32,9 +32,9 @@
 //! registered from there by [`crate::point10::all_scenes`].
 //!
 //! [`dvd_logo`] is not a scene either: it builds the DVD wordmark mesh from the
-//! inlined SVG path for [`dvd_room`], which — like [`smoke_room`] — renders
-//! through [`crate::point10::volume`] rather than the earlier puff
-//! substitutes.
+//! inlined SVG path for [`dvd_room`], which — like [`smoke_room`] and
+//! [`rolling_fire`] — renders through [`crate::point10::volume`] rather than an
+//! approximation. [`rolling_fire`] also holds `BallOfFire`, the frozen variant.
 //!
 //! [`particle_quad`] is not a scene: it is the instanced billboard pipeline
 //! ParticleField and SpiralParticles share. [`cube_mesh`] is the batch-4

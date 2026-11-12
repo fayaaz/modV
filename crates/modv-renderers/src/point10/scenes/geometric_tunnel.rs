@@ -3059,7 +3059,6 @@ mod tests {
         assert_eq!(bad.turn, 2.6);
     }
 
-
     #[test]
     fn frame_hoops_use_the_tunnel_radius_and_hoop_depth() {
         // R-31: the JS frame geometry is authored at RADIUS with

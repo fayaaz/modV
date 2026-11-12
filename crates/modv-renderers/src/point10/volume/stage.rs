@@ -18,8 +18,9 @@
 //! outputNode(scenePassColor + bloom)` with `ACESFilmicToneMapping` and
 //! `toneMappingExposure = 2`. Every step is kept: the volume light is added on
 //! top of the geometry, the bloom threshold (0.5) and radius (1) are the JS's,
-//! and the final alpha is `max(rgb)` so empty pixels stay transparent for the
-//! layer stack.
+//! and the final alpha is `max(rgb)` when the scene sets `_transparentOverlay`
+//! (all four volume scenes do) so empty pixels stay transparent for the layer
+//! stack; otherwise the stage writes an opaque frame.
 //!
 //! # Bloom
 //!
@@ -29,8 +30,10 @@
 //! `lerpBloomFactor(factor, radius)` weights, but `BloomNode` composites
 //! `sum(mips) * strength` while the classic pass adds a historical `3 *`
 //! multiplier. The stage therefore drives [`UnrealBloomPass`] with
-//! [`UnrealBloomPass::set_bloom_scale`] set to `1.0`, so
-//! `min(0.12 + 2.2 * bass, 2.8)` means the same thing here as in the JS.
+//! [`UnrealBloomPass::set_bloom_scale`] set to `1.0`, so the scenes' own
+//! strengths mean the same thing here as in the JS
+//! (`min(0.12 + 2.2 * bass, 2.8)` for SmokeRoom/DvdRoom,
+//! `min(0.12 + 3.6 * bass, 4)` for RollingFire/BallOfFire).
 //!
 //! The stage owns the size-dependent targets, the bloom pass and the
 //! [`Composer`] that presents the tone-mapped frame, so the scenes only hand it
@@ -111,12 +114,16 @@ struct CombineUniforms {
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FinalUniforms {
     resolution: [f32; 2],
-    _pad: [f32; 2],
+    /// 1 = `_transparentOverlay` (alpha = max(rgb)); 0 = opaque output.
+    overlay: f32,
+    _pad: f32,
 }
 
 /// The shared geometry → volume → bloom → output chain.
 pub struct VolumeStage {
     size: (u32, u32),
+    /// `_transparentOverlay`: alpha = max(rgb) when true, 1 when false.
+    overlay: bool,
     scene: TextureTarget,
     _depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
@@ -290,6 +297,7 @@ impl VolumeStage {
 
         let stage = Self {
             size,
+            overlay: true,
             scene,
             _depth: depth,
             depth_view,
@@ -325,6 +333,17 @@ impl VolumeStage {
     /// uniforms).
     pub fn volume_size(&self) -> (u32, u32) {
         volumetric_size(self.size.0, self.size.1)
+    }
+
+    /// Set the output alpha rule (`_transparentOverlay`): `true` writes
+    /// `alpha = max(rgb)` so empty pixels stay clear for the layer stack;
+    /// `false` forces an opaque frame.
+    pub fn set_overlay(&mut self, queue: &wgpu::Queue, overlay: bool) {
+        if self.overlay == overlay {
+            return;
+        }
+        self.overlay = overlay;
+        self.write_final_uniforms(queue);
     }
 
     /// The HDR geometry target the scene draws glass/logo/sphere into.
@@ -484,12 +503,17 @@ impl VolumeStage {
                 _pad: [0.0; 2],
             }),
         );
+        self.write_final_uniforms(queue);
+    }
+
+    fn write_final_uniforms(&self, queue: &wgpu::Queue) {
         queue.write_buffer(
             &self.final_uniforms,
             0,
             bytemuck::bytes_of(&FinalUniforms {
                 resolution: [self.size.0 as f32, self.size.1 as f32],
-                _pad: [0.0; 2],
+                overlay: if self.overlay { 1.0 } else { 0.0 },
+                _pad: 0.0,
             }),
         );
     }
@@ -832,6 +856,7 @@ mod tests {
             final_shader.contains("clamp(max(max(rgb.r, rgb.g), rgb.b), 0.0, 1.0)"),
             "the final pass must write alpha = max(rgb)"
         );
+        assert!(final_shader.contains("select(1.0, overlay_alpha, u.overlay > 0.5)"));
         assert!(final_shader.contains("scene.rgb + bloom.rgb"));
     }
 }

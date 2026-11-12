@@ -17,14 +17,16 @@
 //!   postfx/                RenderPass, UnrealBloomPass, ShaderPass, OutputPass, Composer
 //!   volume/                the GPU fire/smoke simulation (compute passes + raymarch),
 //!                          the room/audio maths and the shared HDR stage that
-//!                          SmokeRoom and DVD Room configure
+//!                          SmokeRoom, DVD Room, RollingFire and Ball of Fire
+//!                          configure
 //!   scenes/                ParticleField, SpiralParticles, Waveform, SquareTunnel,
 //!                          LightTunnel, Wormhole, ItIsComingForYou, WaterRipple,
 //!                          GlassLens, Mycelium, AroundPlus, UltraHdr, MirrorCube,
 //!                          ColorCube, Boxy, SoundCube, HollowCube,
 //!                          AttractorParticles, DvdRoom, GeometricTunnel,
-//!                          RollingFire, SmokeRoom, LatentBackrooms (+ the
-//!                          cube_mesh, particle_quad and fire_common helpers)
+//!                          RollingFire, BallOfFire, SmokeRoom, LatentBackrooms
+//!                          (+ the cube_mesh, particle_quad and fire_common
+//!                          helpers)
 //! ```
 //!
 //! # Batch order
@@ -36,13 +38,13 @@
 //! |------:|--------|----------|
 //! | — | shared helpers | `particleAlpha`, `particleSprite`, `random` have no scene dependency and three later scenes need them |
 //! | — | audio bridge | every scene reads `P10Audio`; the bridge is the only audio entry point |
-//! | — | postfx chain | 20 of 25 scenes use `EffectComposer` (RenderPass → UnrealBloom → ShaderPass → OutputPass) |
+//! | — | postfx chain | 20 of 26 scenes use `EffectComposer` (RenderPass → UnrealBloom → ShaderPass → OutputPass) |
 //! | 1 | **ChromaticWave**, ParticleField, SpiralParticles, Waveform | uses everything above, no `P9Glsl`/texture assets |
 //! | 2 | **SquareTunnel**, LightTunnel, Wormhole, ItIsComingForYou | needs `plane9/P9Glsl` + `shared/textures` + `shared/random` |
 //! | 3 | WaterRipple, GlassLens, Mycelium, AroundPlus | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
 //! | 4 | **UltraHDR**, MirrorCube, ColorCube, Boxy, SoundCube | `P9Glsl` lighting (`shared/p9_shading`), `BoxGeometry`, `preserveBloomAlpha` |
 //! | 5a | HollowCube, AttractorParticles, DvdRoom | first of the WebGPU/TSL group; DvdRoom runs the ported volume simulation |
-//! | 5b | GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | adds the SSAO/Afterimage passes; SmokeRoom runs the ported volume simulation, RollingFire keeps its puff substitute |
+//! | 5b | GeometricTunnel, RollingFire, BallOfFire, SmokeRoom, LatentBackrooms | adds the SSAO/Afterimage passes; RollingFire, Ball of Fire and SmokeRoom run the ported volume simulation |
 //!
 //! ChromaticLine was ported ahead of this batch (`chromatic_line.rs`, a
 //! fixture-driven port with its own `SyntheticSine`); it now shares its
@@ -582,8 +584,8 @@ impl UnitQuad {
 /// order 10, 11, 17, 18), the batch-4 scenes `UltraHDR, MirrorCube,
 /// ColorCube, Boxy, SoundCube` (inventory order 12, 14, 15, 16, 19) and the
 /// batch-5a scenes `HollowCube, AttractorParticles, DvdRoom`, and the batch-5b
-/// scenes `GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms` — the
-/// complete 25-scene set.
+/// scenes `GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms`, plus
+/// `BallOfFire` (the frozen RollingFire variant) — the complete 26-scene set.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
         Box::new(chromatic::line::ChromaticLine::new()),
@@ -609,6 +611,7 @@ pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
         Box::new(scenes::dvd_room::DvdRoom::new()),
         Box::new(scenes::geometric_tunnel::GeometricTunnel::new()),
         Box::new(scenes::rolling_fire::RollingFire::new()),
+        Box::new(scenes::rolling_fire::BallOfFire::new()),
         Box::new(scenes::smoke_room::SmokeRoom::new()),
         Box::new(scenes::latent_backrooms::LatentBackrooms::new()),
     ]
@@ -621,7 +624,7 @@ mod tests {
     #[test]
     fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 25);
+        assert_eq!(scenes.len(), 26);
 
         assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
         assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
@@ -648,11 +651,13 @@ mod tests {
         assert_eq!(scenes[18].name(), "Point10 Hollow Cube");
         assert_eq!(scenes[19].name(), "Point10 Attractor Particles");
         assert_eq!(scenes[20].name(), "Point10 DVD Room");
-        // Batch 5b — the last four of the 25 vendored scenes.
+        // Batch 5b — the last four of the 25 vendored scenes, plus the
+        // Ball of Fire wrapper (the frozen RollingFire subclass).
         assert_eq!(scenes[21].name(), "Point10 Geometric Tunnel");
         assert_eq!(scenes[22].name(), "Point10 Rolling Fire");
-        assert_eq!(scenes[23].name(), "Point10 Smoke Room");
-        assert_eq!(scenes[24].name(), "Point10 Latent Backrooms");
+        assert_eq!(scenes[23].name(), "Point10 Ball Of Fire");
+        assert_eq!(scenes[24].name(), "Point10 Smoke Room");
+        assert_eq!(scenes[25].name(), "Point10 Latent Backrooms");
     }
 
     #[test]

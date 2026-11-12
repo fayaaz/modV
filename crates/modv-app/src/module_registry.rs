@@ -118,7 +118,7 @@ use modv_renderers::point10::scenes::light_tunnel::LightTunnel;
 use modv_renderers::point10::scenes::mirror_cube::MirrorCube;
 use modv_renderers::point10::scenes::mycelium::Mycelium;
 use modv_renderers::point10::scenes::particle_field::ParticleField;
-use modv_renderers::point10::scenes::rolling_fire::RollingFire;
+use modv_renderers::point10::scenes::rolling_fire::{BallOfFire, RollingFire};
 use modv_renderers::point10::scenes::smoke_room::SmokeRoom;
 use modv_renderers::point10::scenes::sound_cube::SoundCube;
 use modv_renderers::point10::scenes::spiral_particles::SpiralParticles;
@@ -275,6 +275,8 @@ pub enum Point10SceneKind {
     GeometricTunnel(GeometricTunnel),
     /// `Point10 Rolling Fire` (`scenes/rolling_fire.rs`).
     RollingFire(RollingFire),
+    /// `Point10 Ball Of Fire` (`scenes/rolling_fire.rs`).
+    BallOfFire(BallOfFire),
     /// `Point10 Smoke Room` (`scenes/smoke_room.rs`).
     SmokeRoom(SmokeRoom),
     /// `Point10 Latent Backrooms` (`scenes/latent_backrooms.rs`).
@@ -311,6 +313,7 @@ impl Point10SceneKind {
             "Point10 DVD Room" => Self::DvdRoom(DvdRoom::new()),
             "Point10 Geometric Tunnel" => Self::GeometricTunnel(GeometricTunnel::new()),
             "Point10 Rolling Fire" => Self::RollingFire(RollingFire::new()),
+            "Point10 Ball Of Fire" => Self::BallOfFire(BallOfFire::new()),
             "Point10 Smoke Room" => Self::SmokeRoom(SmokeRoom::new()),
             "Point10 Latent Backrooms" => Self::LatentBackrooms(LatentBackrooms::new()),
             _ => return None,
@@ -326,6 +329,7 @@ impl Point10SceneKind {
     pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
         match self {
             Self::ChromaticLine(scene) => scene.apply_props(|key| get(key)),
+            Self::BallOfFire(scene) => scene.apply_props(|key| get(key)),
             Self::GeometricTunnel(scene) => scene.apply_props(|key| get(key)),
             Self::RollingFire(scene) => scene.apply_props(|key| get(key)),
             Self::SmokeRoom(scene) => scene.apply_props(|key| get(key)),
@@ -359,6 +363,7 @@ impl Point10Scene for Point10SceneKind {
     fn name(&self) -> &'static str {
         match self {
             Self::ChromaticLine(scene) => scene.name(),
+            Self::BallOfFire(scene) => scene.name(),
             Self::GeometricTunnel(scene) => scene.name(),
             Self::RollingFire(scene) => scene.name(),
             Self::SmokeRoom(scene) => scene.name(),
@@ -389,6 +394,7 @@ impl Point10Scene for Point10SceneKind {
     fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
         match self {
             Self::ChromaticLine(scene) => scene.init(ctx),
+            Self::BallOfFire(scene) => scene.init(ctx),
             Self::GeometricTunnel(scene) => scene.init(ctx),
             Self::RollingFire(scene) => scene.init(ctx),
             Self::SmokeRoom(scene) => scene.init(ctx),
@@ -419,6 +425,7 @@ impl Point10Scene for Point10SceneKind {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Self::ChromaticLine(scene) => scene.resize(width, height),
+            Self::BallOfFire(scene) => scene.resize(width, height),
             Self::GeometricTunnel(scene) => scene.resize(width, height),
             Self::RollingFire(scene) => scene.resize(width, height),
             Self::SmokeRoom(scene) => scene.resize(width, height),
@@ -449,6 +456,7 @@ impl Point10Scene for Point10SceneKind {
     fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
         match self {
             Self::ChromaticLine(scene) => scene.update(dt, audio),
+            Self::BallOfFire(scene) => scene.update(dt, audio),
             Self::GeometricTunnel(scene) => scene.update(dt, audio),
             Self::RollingFire(scene) => scene.update(dt, audio),
             Self::SmokeRoom(scene) => scene.update(dt, audio),
@@ -483,6 +491,7 @@ impl Point10Scene for Point10SceneKind {
     ) {
         match self {
             Self::ChromaticLine(scene) => scene.render(encoder, target),
+            Self::BallOfFire(scene) => scene.render(encoder, target),
             Self::GeometricTunnel(scene) => scene.render(encoder, target),
             Self::RollingFire(scene) => scene.render(encoder, target),
             Self::SmokeRoom(scene) => scene.render(encoder, target),
@@ -513,6 +522,7 @@ impl Point10Scene for Point10SceneKind {
     fn dispose(&mut self) {
         match self {
             Self::ChromaticLine(scene) => scene.dispose(),
+            Self::BallOfFire(scene) => scene.dispose(),
             Self::GeometricTunnel(scene) => scene.dispose(),
             Self::RollingFire(scene) => scene.dispose(),
             Self::SmokeRoom(scene) => scene.dispose(),
@@ -543,6 +553,7 @@ impl Point10Scene for Point10SceneKind {
     fn props(&self) -> Vec<SceneProp> {
         match self {
             Self::ChromaticLine(scene) => scene.props(),
+            Self::BallOfFire(scene) => scene.props(),
             Self::GeometricTunnel(scene) => scene.props(),
             Self::RollingFire(scene) => scene.props(),
             Self::SmokeRoom(scene) => scene.props(),
@@ -573,6 +584,7 @@ impl Point10Scene for Point10SceneKind {
     fn meta(&self) -> SceneMeta {
         match self {
             Self::ChromaticLine(scene) => scene.meta(),
+            Self::BallOfFire(scene) => scene.meta(),
             Self::GeometricTunnel(scene) => scene.meta(),
             Self::RollingFire(scene) => scene.meta(),
             Self::SmokeRoom(scene) => scene.meta(),
@@ -1476,7 +1488,7 @@ mod tests {
         }
 
         // Built-in shader + 2D + Point10 definitions, all unique.
-        assert!(map.len() >= 37 + 15 + 25);
+        assert!(map.len() >= 37 + 15 + 26);
         assert_eq!(map["Bands"]["props"]["u_ringWidth"]["type"], json!("float"));
         assert_eq!(map["Bands"]["props"]["u_ringWidth"]["min"], json!(0.01));
     }
@@ -1496,7 +1508,7 @@ mod tests {
         // Point10 names are their own kind, not 2D modules.
         assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
         assert_eq!(registry.kind("Point10 Not A Scene"), None);
-        assert_eq!(registry.point10_definitions().len(), 25);
+        assert_eq!(registry.point10_definitions().len(), 26);
     }
 
     #[test]
@@ -1533,6 +1545,7 @@ mod tests {
                 "Point10 DVD Room",
                 "Point10 Geometric Tunnel",
                 "Point10 Rolling Fire",
+                "Point10 Ball Of Fire",
                 "Point10 Smoke Room",
                 "Point10 Latent Backrooms",
             ]

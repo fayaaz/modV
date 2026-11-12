@@ -23,12 +23,14 @@
 //   emit2       x wind strength, y flicker, z flame height, w unused
 //   light       x shadow absorption, y shadow ambient, z multi scattering,
 //               w powder strength
-//   light2      x asymmetry, y unused, z unused, w unused
+//   light2      x asymmetry, yz `uSway` (x/z), w unused
 //   point_light rgb the volume point-light colour (already hue-equalised,
 //               flickered and fade-in scaled), w unused
+//   key_light   xyz the overhead key light ("sun"/spot) position, w the
+//               inverse-square attenuation numerator applied to the fire
 //   view        x tan(fov/2), y aspect, z raymarch target width,
 //               w raymarch target height
-//   misc        x emitter vertex count, yzw unused
+//   misc        x emitter vertex count, y raymarch steps, zw unused
 //   emitter_model  the emitter's world matrix (`uSphereMatrix`)
 struct VolumeUniforms {
   grid: vec4<f32>,
@@ -50,6 +52,7 @@ struct VolumeUniforms {
   light: vec4<f32>,
   light2: vec4<f32>,
   point_light: vec4<f32>,
+  key_light: vec4<f32>,
   view: vec4<f32>,
   misc: vec4<f32>,
   emitter_model: mat4x4<f32>,
@@ -60,11 +63,10 @@ struct VolumeUniforms {
 // `SPHERE_RADIUS` (`SmokeRoom.js:73`): the emitter radius the sphere buoyancy
 // uses, scaled by `uBoxScale` like the JS.
 const SPHERE_RADIUS: f32 = 0.9;
-// `uKeyLightPos` (`:1233`): the overhead sun, also the raymarch shadow target.
-const KEY_LIGHT: vec3<f32> = vec3<f32>(0.0, 80.0, 0.0);
-// `ROYGBIV_HUES[4]`, the reference hue `fireHue` equalises every other state to.
-const ROYGBIV_GREEN: f32 = 2.0943951; // 2 * PI / 3
-// `VOLUME_WORLD_SIZE_Y` is 12 in both scenes and every JS division uses it.
+// `uKeyLightPos` (`SmokeRoom.js:1233`) is the uniform (`u.key_light.xyz`): the
+// overhead sun in the room scenes, the ball-tracking spot in RollingFire.
+// `VOLUME_WORLD_SIZE_Y` is 12 in both room scenes and every JS division uses
+// it; it is unused by the passes (they read `u.world.y`).
 const WORLD_SIZE_Y: f32 = 12.0;
 
 // Grid dimensions as floats (the uniform stores them pre-scaled).
@@ -273,31 +275,15 @@ fn mx_noise(p: vec3<f32>) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Colour — `fireRamp` (SmokeRoom `:850-858`), TSL `hue`/`luminance`
-// (`ColorAdjustment.js`) and `fireHue` (`:92-96`).
+// Colour — the pure ramp/hue maths live in `fire_colour.wgsl` (assembled in
+// front of this program, so the lava emitters can reuse it); these wrappers
+// bind it to the volume's uniform stops.
 // ---------------------------------------------------------------------------
 
 fn fire_ramp(t: f32) -> vec3<f32> {
-  var colour = mix(vec3<f32>(0.0), u.fire_end.rgb, smoothstep(0.05, 0.35, t));
-  colour = mix(colour, u.fire_mid.rgb, smoothstep(0.35, 0.65, t));
-  return mix(colour, u.fire_start.rgb, smoothstep(0.65, 1.0, t));
-}
-
-fn hue_rotate(colour: vec3<f32>, angle: f32) -> vec3<f32> {
-  let k = vec3<f32>(0.57735);
-  let cos_angle = cos(angle);
-  let rotated = colour * cos_angle
-    + cross(k, colour) * sin(angle)
-    + k * (dot(k, colour) * (1.0 - cos_angle));
-  return max(rotated, vec3<f32>(0.0));
-}
-
-fn luminance(colour: vec3<f32>) -> f32 {
-  return dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722));
+  return fire_ramp_stops(t, u.fire_start.rgb, u.fire_mid.rgb, u.fire_end.rgb);
 }
 
 fn fire_hue(colour: vec3<f32>, angle: f32) -> vec3<f32> {
-  let rotated = hue_rotate(colour, angle);
-  let green = hue_rotate(colour, ROYGBIV_GREEN);
-  return rotated * (luminance(green) / max(luminance(rotated), 0.001));
+  return fire_hue_stops(colour, angle);
 }

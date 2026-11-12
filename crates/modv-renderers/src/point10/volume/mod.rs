@@ -3,10 +3,17 @@
 //!
 //! SmokeRoom and DvdRoom are the same scene with a different emitter (a lava
 //! sphere vs. a bouncing extruded DVD logo). The JS builds the *same* grid,
-//! the same seven compute passes and the same 16-step `VolumeNodeMaterial`
-//! raymarch in both; only the emitter geometry, its world matrix and a few
-//! light/tuning values differ. This module is that shared engine, so the two
-//! Rust scenes configure it instead of approximating the field.
+//! the same seven compute passes and the same `VolumeNodeMaterial` raymarch in
+//! both; only the emitter geometry, its world matrix and a few
+//! light/tuning values differ. This module is that shared engine, so the Rust
+//! scenes configure it instead of approximating the field.
+//!
+//! RollingFire / Ball of Fire run the same engine at their own parameters: a
+//! `100 x 100 x 200` grid over a `16 x 16 x 32` volume, the grid origin
+//! following the rolling ball, an 18-step raymarch, a moving 20 m overhead key
+//! light with a `25/d²` fire term, and `uPointLightVolumeIntensity` 1.4. Those
+//! differences are all uniforms (`key_light`, `misc[1]`, `origin`, …), so the
+//! passes themselves are shared.
 //!
 //! # Grid
 //!
@@ -51,10 +58,13 @@
 //!
 //! # Raymarch
 //!
-//! [`VolumeSim::render`] records the 16-step analytic box raymarch
+//! [`VolumeSim::render`] records the analytic box raymarch
 //! (`passes/raymarch.wgsl`) into a half-resolution HDR target, matching
 //! `volumetricPass.setResolutionScale(0.5)` and its `gaussianBlur`/combine
-//! chain in [`stage::VolumeStage`].
+//! chain in [`stage::VolumeStage`]. The step count is the scene's
+//! `volumetricMaterial.steps` (`VolumeUniforms::misc[1]`: 16 for the room
+//! scenes, 18 for RollingFire), and the box is centred on the grid origin so a
+//! scene can move the volume with its emitter.
 
 #![forbid(unsafe_code)]
 
@@ -81,7 +91,8 @@ pub const CELL_COUNT: u32 = GRID_SIZE_X * GRID_SIZE_Y * GRID_SIZE_Z;
 /// leaves the final pressure in texture A, which `project` samples.
 pub const PRESSURE_ITERATIONS: u32 = 2;
 
-/// `volumetricMaterial.steps = 16` (`SmokeRoom.js:840`).
+/// `volumetricMaterial.steps = 16` (`SmokeRoom.js:840`). RollingFire runs 18;
+/// the scene writes its own count into `VolumeUniforms::misc[1]`.
 pub const RAYMARCH_STEPS: u32 = 16;
 /// Shadow-march steps inside `scatteringNode` (`SmokeRoom.js:900`).
 pub const SHADOW_STEPS: u32 = 2;
@@ -206,9 +217,13 @@ pub struct VolumeUniforms {
     /// rgb the volume point-light colour (hue-equalised, flickered and
     /// fade-in scaled on the CPU), w unused.
     pub point_light: [f32; 4],
+    /// xyz the overhead key light position, w the inverse-square attenuation
+    /// numerator (`400` for the 80 m room sun, `25` for RollingFire's 20 m
+    /// spot).
+    pub key_light: [f32; 4],
     /// x tan(fov/2), y aspect, z raymarch width, w raymarch height.
     pub view: [f32; 4],
-    /// x emitter vertex count, yzw unused.
+    /// x emitter vertex count, y raymarch steps, zw unused.
     pub misc: [f32; 4],
     /// `uSphereMatrix`: the emitter's world matrix.
     pub emitter_model: Mat4,
@@ -256,8 +271,11 @@ impl Default for VolumeUniforms {
             light: [2.0, 0.5, 1.0, 0.59],
             light2: [0.0, 0.0, 0.0, 0.0],
             point_light: [0.0, 0.0, 0.0, 0.0],
+            // `uKeyLightPos = (0, 80, 0)` (`SmokeRoom.js:1233`) and the
+            // raymarch's `400 / d²` fire attenuation at ~80 m.
+            key_light: [0.0, 80.0, 0.0, 400.0],
             view: [0.577_35, 1.0, 1.0, 1.0],
-            misc: [0.0, 0.0, 0.0, 0.0],
+            misc: [0.0, RAYMARCH_STEPS as f32, 0.0, 0.0],
             emitter_model: identity(),
         }
     }
@@ -277,6 +295,17 @@ impl VolumeUniforms {
         self.grid[0] = grid.x as f32;
         self.grid[1] = grid.y as f32;
         self.grid[2] = grid.z as f32;
+    }
+
+    /// Set the raymarch step count (`volumetricMaterial.steps`).
+    pub fn set_raymarch_steps(&mut self, steps: u32) {
+        self.misc[1] = steps as f32;
+    }
+
+    /// Set the overhead key light and its inverse-square attenuation numerator
+    /// (`uKeyLightPos` + the `25/d²` or `400/d²` fire term).
+    pub fn set_key_light(&mut self, position: [f32; 3], attenuation: f32) {
+        self.key_light = [position[0], position[1], position[2], attenuation.max(0.0)];
     }
 
     /// Set the camera basis + position from an eye/target/up triple (the JS
@@ -1113,10 +1142,21 @@ fn half_to_f32(half: u16) -> f32 {
     f32::from_bits(bits)
 }
 
-/// Assemble a shader as `common.wgsl` + the pass body.
+/// Assemble a shader as `fire_colour.wgsl` + `common.wgsl` + the pass body.
+///
+/// The fire ramp / hue maths are argument-taking so scene shaders (the lava
+/// emitters) can reuse them without binding the volume uniform block.
 fn program(body: &str) -> String {
-    format!("{}\n{}", include_str!("common.wgsl"), body)
+    format!(
+        "{}\n{}\n{}",
+        FIRE_COLOUR_WGSL,
+        include_str!("common.wgsl"),
+        body
+    )
 }
+
+/// The pure fire-ramp/hue WGSL shared with the emitter shaders.
+pub(crate) const FIRE_COLOUR_WGSL: &str = include_str!("fire_colour.wgsl");
 
 /// Every shader program the volume owns (for the naga validation test).
 #[cfg(test)]
@@ -1210,8 +1250,8 @@ mod tests {
 
     #[test]
     fn uniforms_match_the_wgsl_layout() {
-        // 21 rows of vec4 + the emitter matrix.
-        assert_eq!(std::mem::size_of::<VolumeUniforms>(), 21 * 16 + 64);
+        // 22 rows of vec4 + the emitter matrix.
+        assert_eq!(std::mem::size_of::<VolumeUniforms>(), 22 * 16 + 64);
         assert_eq!(std::mem::size_of::<VolumeUniforms>() % 16, 0);
         assert_eq!(VOLUME_FORMAT, wgpu::TextureFormat::Rgba16Float);
 
@@ -1245,6 +1285,20 @@ mod tests {
         assert_eq!(defaults.emit2[0], 6.5);
         assert_eq!(defaults.fire_mid[3], 5.0);
         assert_eq!(defaults.fire_start[3], 40.0);
+        // The room scenes' overhead sun and the 16-step raymarch.
+        assert_eq!(defaults.key_light, [0.0, 80.0, 0.0, 400.0]);
+        assert_eq!(defaults.misc[1], 16.0);
+    }
+
+    #[test]
+    fn key_light_and_step_count_are_scene_configurable() {
+        let mut uniforms = VolumeUniforms::default();
+        uniforms.set_key_light([1.0, 21.7, -2.0], 25.0);
+        assert_eq!(uniforms.key_light, [1.0, 21.7, -2.0, 25.0]);
+        uniforms.set_key_light([0.0, 0.0, 0.0], -1.0);
+        assert_eq!(uniforms.key_light[3], 0.0);
+        uniforms.set_raymarch_steps(18);
+        assert_eq!(uniforms.misc[1], 18.0);
     }
 
     #[test]
@@ -1289,6 +1343,20 @@ mod tests {
 
     #[test]
     fn shaders_keep_the_ported_maths() {
+        // The pure ramp/hue maths live in `fire_colour.wgsl` so the emitter
+        // shaders can reuse them.
+        let colour = FIRE_COLOUR_WGSL;
+        for needle in [
+            "fn fire_ramp_stops(",
+            "fn fire_hue_stops(",
+            "fn hue_rotate(",
+            "fn luminance(",
+            "const ROYGBIV_GREEN: f32 = 2.0943951;",
+            "smoothstep(0.05, 0.35, t)",
+        ] {
+            assert!(colour.contains(needle), "fire_colour.wgsl lost {needle}");
+        }
+
         let common = include_str!("common.wgsl");
         for needle in [
             "fn fire_ramp(",
@@ -1296,10 +1364,7 @@ mod tests {
             "fn snoise(",
             "fn snoise_vec3(",
             "fn perlin_noise(",
-            "const ROYGBIV_GREEN: f32 = 2.0943951;",
-            "smoothstep(0.05, 0.35, t)",
             "const SPHERE_RADIUS: f32 = 0.9;",
-            "const KEY_LIGHT: vec3<f32> = vec3<f32>(0.0, 80.0, 0.0);",
         ] {
             assert!(common.contains(needle), "common.wgsl lost {needle}");
         }
@@ -1335,13 +1400,16 @@ mod tests {
 
         let raymarch = include_str!("passes/raymarch.wgsl");
         for needle in [
-            "const RAYMARCH_STEPS: u32 = 16u;",
             "const SHADOW_STEP_SIZE: f32 = 0.35;",
+            "clamp(u32(u.misc.y), MIN_RAYMARCH_STEPS, MAX_RAYMARCH_STEPS)",
+            "normalize(u.key_light.xyz - p)",
+            "u.key_light.w / max(dot(light_delta, light_delta), 1e-3)",
+            "let box_centre = u.origin.xyz + vec3<f32>(0.0, u.world.y * 0.5, 0.0);",
             "exp(-tau * 0.25) * 0.5",
             "1.0 - exp(-tau * 2.0)",
             "0.618033988749895",
-            "400.0 / max(dot(light_delta, light_delta), 1e-3)",
             "let fire_power = 6.0 - u.fire_mid.w;",
+            "u.sphere_pos.xyz + vec3<f32>(u.light2.y, 0.0, u.light2.z)",
         ] {
             assert!(raymarch.contains(needle), "raymarch lost {needle}");
         }

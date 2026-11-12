@@ -1,4 +1,5 @@
-// `VolumeNodeMaterial` raymarch (`SmokeRoom.js:838-954`, 16 steps).
+// `VolumeNodeMaterial` raymarch (`SmokeRoom.js:838-954`; 16 steps in the room
+// scenes, 18 in RollingFire — `u.misc.y`).
 //
 // The JS renders the volume box with `side: BackSide` / `depthTest: false`
 // into a half-resolution pass, then `VolumetricLightingModel` marches from the
@@ -25,10 +26,13 @@
 @group(0) @binding(2) var vel_tex: texture_3d<f32>;
 @group(0) @binding(3) var linear_sampler: sampler;
 
-const RAYMARCH_STEPS: u32 = 16u;
+const HENYEY_GREENSTEIN_K: f32 = 0.079577;
 const SHADOW_STEPS: u32 = 2u;
 const SHADOW_STEP_SIZE: f32 = 0.35;
-const HENYEY_GREENSTEIN_K: f32 = 0.079577;
+// The window the JS clamps a dynamic raymarch step count to (`steps` is
+// `volumetricMaterial.steps`: 16 in the room scenes, 18 in RollingFire).
+const MIN_RAYMARCH_STEPS: u32 = 1u;
+const MAX_RAYMARCH_STEPS: u32 = 32u;
 
 struct VolumeSample {
   density: f32,
@@ -59,11 +63,11 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
   return one_minus_g2 / pow(max(denom, 1e-4), 1.5) * HENYEY_GREENSTEIN_K;
 }
 
-// Distance from `p` to the emitter's flame segment (sphere position →
-// `+flameHeight` on Y), the JS `distToSegment` that drives the point light's
-// soft attenuation and distance ramp.
+// Distance from `p` to the emitter's flame segment (emitter position + `uSway`
+// → `+flameHeight` on Y), the JS `distToSegment` that drives the point light's
+// soft attenuation and distance ramp. `u.light2.yz` carry `uSway.xz`.
 fn distance_to_flame(p: vec3<f32>) -> f32 {
-  let a = u.sphere_pos.xyz;
+  let a = u.sphere_pos.xyz + vec3<f32>(u.light2.y, 0.0, u.light2.z);
   let h = vec3<f32>(0.0, u.emit2.z, 0.0);
   let v = p - a;
   let t = clamp(dot(v, h) / max(dot(h, h), 1e-4), 0.0, 1.0);
@@ -149,8 +153,13 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   );
   let ro = u.camera.xyz;
 
+  // The volume box is centred where `uvw = 0.5` maps to (`uvw_to_world(0.5)`),
+  // i.e. `origin + (0, world.y / 2, 0)`. The room scenes keep the origin at
+  // `(0, -h/2, 0)` so the box sits on the world origin; RollingFire moves the
+  // origin with the rolling ball, so the box must move with it.
   let half_extents = u.world.xyz * 0.5;
-  let hit = intersect_box(ro, ray_dir, half_extents);
+  let box_centre = u.origin.xyz + vec3<f32>(0.0, u.world.y * 0.5, 0.0);
+  let hit = intersect_box(ro - box_centre, ray_dir, half_extents);
   let t_enter = max(hit.x, 0.0);
   let t_exit = hit.y;
   if (t_exit <= t_enter) {
@@ -160,7 +169,8 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   // The JS marches from whichever end is farther than `2 * modelRadius`.
   let model_radius = length(half_extents);
   let front_to_back = t_exit > model_radius * 2.0;
-  let step_size = t_exit / f32(RAYMARCH_STEPS);
+  let steps = clamp(u32(u.misc.y), MIN_RAYMARCH_STEPS, MAX_RAYMARCH_STEPS);
+  let step_size = t_exit / f32(steps);
 
   let offset = fract(
     interleaved_gradient_noise(position.xy)
@@ -171,12 +181,12 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   var colour = vec3<f32>(0.0);
   var transmittance = vec3<f32>(1.0);
 
-  for (var i = 0u; i < RAYMARCH_STEPS; i = i + 1u) {
+  for (var i = 0u; i < steps; i = i + 1u) {
     let distance_from_camera = select(t_exit - dist_travelled, dist_travelled, front_to_back);
     let p = ro + ray_dir * distance_from_camera;
 
     let sample_value = volume_sample(p);
-    let local_light_dir = normalize(KEY_LIGHT - p);
+    let local_light_dir = normalize(u.key_light.xyz - p);
     let local_view_dir = normalize(ro - p);
     let scattering = scattering_at(p, sample_value.density, local_light_dir, local_view_dir);
 
@@ -201,8 +211,11 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         * u.fire_start.w,
       u.fire_end.w,
     );
-    let light_delta = p - KEY_LIGHT;
-    let attenuation = 400.0 / max(dot(light_delta, light_delta), 1e-3);
+    // `uKeyLightPos` is 80 m above the room emitter and 20 m above Rolling
+    // Fire's ball; the attenuation numerator follows it (`u.key_light.w`), so
+    // both scenes land at the same irradiance on the emitter.
+    let light_delta = p - u.key_light.xyz;
+    let attenuation = u.key_light.w / max(dot(light_delta, light_delta), 1e-3);
     let emissive = fire * (sample_value.density + 0.15) * attenuation;
 
     let step_light = scattering_density * 0.01 + emissive * 0.01;

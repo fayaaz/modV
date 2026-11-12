@@ -412,19 +412,46 @@ pub fn fire_temporal(noise: &ImprovedNoise, time: f32) -> FireTemporal {
 /// The `uFireIntensity`/`uEmitTemperature`/`uEmitDensity`/fade-in scaling the
 /// volume point light and the emitter material share
 /// (`SmokeRoom.js:1178-1189`).
-fn emission_scale(emit_temperature: f32, emit_density: f32, fire_intensity: f32) -> f32 {
+pub fn emission_scale(emit_temperature: f32, emit_density: f32, fire_intensity: f32) -> f32 {
     let temp_scale = (emit_temperature / 33.36).max(0.0);
     let temp_factor = temp_scale.powi(4);
     let density_scale = (emit_density / 44.08).max(0.0);
     temp_factor * density_scale * fire_intensity
 }
 
+/// `smoothstep(0, 3, time)` — the three-second emissive fade-in
+/// (`_updateTemporalUniforms`'s `smoothstep(0.0, 3.0, uTime)`).
+pub fn fade_in(time: f32) -> f32 {
+    smoothstep01(time / 3.0)
+}
+
 /// The volume's point-light colour (`pointLightColor` with `isVolume == 1`).
 ///
 /// Returns the linear rgb already multiplied by the temperature/density
-/// scalars, `uPointLightVolumeIntensity` (2), the flicker and the 3-second
-/// fade-in — the constants the raymarch's `scatteringNode` multiplies by the
-/// local density and phase.
+/// scalars, `intensity` (`uPointLightVolumeIntensity`), the flicker and the
+/// 3-second fade-in — the constants the raymarch's `scatteringNode` multiplies
+/// by the local density and phase.
+pub fn volume_point_light_scaled(
+    temporal: &FireTemporal,
+    emit_temperature: f32,
+    emit_density: f32,
+    fire_intensity: f32,
+    hue: f32,
+    intensity: f32,
+) -> [f32; 3] {
+    let colour_t = (emit_temperature / 33.36 * 0.5 + 0.2 + temporal.color_noise).clamp(0.0, 1.0);
+    let base = fire_colour(colour_t, hue);
+    let base = saturation(base, 1.1);
+    let fade_in = fade_in(temporal.time);
+    let scale = emission_scale(emit_temperature, emit_density, fire_intensity)
+        * intensity
+        * temporal.flicker
+        * fade_in;
+    [base[0] * scale, base[1] * scale, base[2] * scale]
+}
+
+/// [`volume_point_light_scaled`] at the room scenes' `uPointLightVolumeIntensity`
+/// of 2 (`SmokeRoom.js:509`).
 pub fn volume_point_light(
     temporal: &FireTemporal,
     emit_temperature: f32,
@@ -432,15 +459,14 @@ pub fn volume_point_light(
     fire_intensity: f32,
     hue: f32,
 ) -> [f32; 3] {
-    let colour_t = (emit_temperature / 33.36 * 0.5 + 0.2 + temporal.color_noise).clamp(0.0, 1.0);
-    let base = fire_colour(colour_t, hue);
-    let base = saturation(base, 1.1);
-    let fade_in = smoothstep01(temporal.time / 3.0);
-    let scale = emission_scale(emit_temperature, emit_density, fire_intensity)
-        * 2.0
-        * temporal.flicker
-        * fade_in;
-    [base[0] * scale, base[1] * scale, base[2] * scale]
+    volume_point_light_scaled(
+        temporal,
+        emit_temperature,
+        emit_density,
+        fire_intensity,
+        hue,
+        2.0,
+    )
 }
 
 /// The lava/logo material's emissive scale (`SmokeRoom.js:1052-1062`).
@@ -721,6 +747,16 @@ mod tests {
             late_light[0] > 5.0 * emitter_glow(22.0, 28.0, 40.0, &late),
             "volume light must be much brighter than the surface emissive"
         );
+
+        // The intensity is the scene's `uPointLightVolumeIntensity`: the room
+        // scenes use 2, RollingFire 1.4.
+        let fire = volume_point_light_scaled(&late, 14.0, 16.0, 26.0, 0.0, 1.4);
+        let two = volume_point_light_scaled(&late, 14.0, 16.0, 26.0, 0.0, 2.0);
+        close(two[0] / fire[0], 2.0 / 1.4, 1e-5);
+        assert_eq!(fade_in(0.0), 0.0);
+        close(fade_in(1.5), 0.5, 1e-6);
+        close(fade_in(3.0), 1.0, 1e-6);
+        close(fade_in(9.0), 1.0, 1e-6);
     }
 
     #[test]
