@@ -43,6 +43,7 @@ use crate::cli::Cli;
 use crate::compositor::{Compositor, FrameInfo, RowFadeInfo};
 use crate::report::{AdapterSummary, report_json};
 use crate::scene_preview;
+use crate::scene_transition::SceneTransitionInfo;
 use crate::store_ops::Store;
 use crate::supervisor::{EngineSupervisor, PreviewKind};
 
@@ -386,6 +387,24 @@ impl WindowedApp {
             }
         }
 
+        // 1a. A whole-scene shader transition composites the outgoing Scene
+        // itself, so it needs that frame captured. The main texture of the last
+        // presented frame *is* the outgoing Scene: copy it once here, before
+        // this frame renders the incoming Scene over it. When the capture is
+        // unavailable (first frame, resized surface) the change is downgraded
+        // to the Fade ghost path instead of blanking the output.
+        if self.store.take_pending_transition_capture().is_some() {
+            let captured = self
+                .compositor
+                .as_mut()
+                .is_some_and(Compositor::capture_transition_source);
+            if !captured && self.store.fall_back_scene_transition_to_fade() {
+                eprintln!(
+                    "engine: WARN no outgoing frame to capture; Scene transition falls back to Fade"
+                );
+            }
+        }
+
         // 1b. Advance the Scene/performance state machine before rendering
         // (`loop.js:94-111`). Cheap when idle: `scenes_tick_due` is false
         // unless performance mode runs or a crossfade is active.
@@ -412,6 +431,41 @@ impl WindowedApp {
             supervisor.broadcast_deltas(&mut self.store);
         }
 
+        // 1d. Resolve the whole-scene transition for this frame. A shader
+        // effect needs its captured outgoing frame; when the capture vanished
+        // (a resize between frames invalidated it) downgrade to Fade without
+        // dropping the change. Fade/None/unknown kinds stay on the alpha path,
+        // so any capture from a previous change is released.
+        let mut scene_transition = None;
+        if let Some(transition) = self.store.performance_runtime().transition.clone()
+            && let Some(effect) = transition.shader_effect()
+        {
+            let captured = self
+                .compositor
+                .as_ref()
+                .is_some_and(Compositor::has_transition_capture);
+            if captured {
+                scene_transition = Some(SceneTransitionInfo {
+                    effect,
+                    progress: transition.progress(),
+                    from_groups: transition
+                        .from
+                        .iter()
+                        .map(|(group_id, _)| group_id.clone())
+                        .collect(),
+                });
+            } else if self.store.fall_back_scene_transition_to_fade() {
+                eprintln!(
+                    "engine: WARN lost the captured outgoing frame; Scene transition falls back to Fade"
+                );
+            }
+        }
+        if scene_transition.is_none()
+            && let Some(compositor) = &mut self.compositor
+        {
+            compositor.clear_transition_capture();
+        }
+
         let frame_info = FrameInfo {
             time_seconds: self.start.elapsed().as_secs_f32(),
             frame_index: self.frames_done,
@@ -436,6 +490,7 @@ impl WindowedApp {
                     progress: transition.progress(),
                 })
                 .collect(),
+            scene_transition,
         };
 
         // 2. Render the state into the compositor's main texture.

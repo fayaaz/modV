@@ -27,12 +27,15 @@
 //!   `applySceneRowNow`, which reuses the old Group id in JS) and starts at
 //!   alpha 0, both fade over `transitionSeconds`, and the ghost is removed
 //!   when the fade completes.
-//! * **Whole-scene Fade** — a manual `scenes/applyScene` during performance
-//!   keeps the outgoing Groups alive for `transitionSeconds` and crossfades
-//!   their alphas against the incoming set, exactly like `applySceneNow`'s
-//!   Fade branch. Shader/ISF transitions are not available in the engine yet
-//!   (WS-4); [`Store::pick_scene_transition_name`] returns `"Fade"` for any
-//!   allowed shader name, which is the JS `fallbackToFade` behaviour.
+//! * **Whole-scene transitions** — a manual `scenes/applyScene` during
+//!   performance mode picks a crossfade style. `Fade` keeps the outgoing
+//!   Groups alive for `transitionSeconds` and crossfades their alphas against
+//!   the incoming set (exactly like `applySceneNow`'s Fade branch). One of the
+//!   six native shader effects ([`crate::scene_transition`]) instead keeps the
+//!   outgoing Groups at full alpha, marks them as hidden for the compositor
+//!   and records a pending capture so the engine can freeze the outgoing
+//!   frame; the shader then composites both Scenes itself and completion
+//!   removes the outgoing Groups. `None` switches instantly.
 //! * **`stopPerformance` finalises** — in-flight row/whole-scene crossfades
 //!   are completed (final alphas, ghosts removed) before the flag is turned
 //!   off, so nothing stale survives.
@@ -200,15 +203,17 @@ impl RowTransition {
     }
 }
 
-/// An in-flight whole-scene crossfade (`transition`, `scenes.js:2765-2777`).
+/// An in-flight whole-scene transition (`transition`, `scenes.js:2765-2777`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct WholeSceneTransition {
     /// Outgoing Groups with the alpha they started at.
     pub from: Vec<(String, f64)>,
     /// Incoming Groups with their target alpha.
     pub to: Vec<(String, f64)>,
-    /// Transition name. Only [`FADE_TRANSITION`] executes today; a shader
-    /// name is mapped to Fade before the transition is recorded.
+    /// Transition name. [`FADE_TRANSITION`] runs the per-Group alpha path; a
+    /// native name (`NONE_TRANSITION` never reaches here) runs the matching
+    /// [`crate::scene_transition::TransitionEffect`] over the captured outgoing
+    /// frame.
     pub kind: String,
     /// Seconds elapsed.
     pub elapsed: f64,
@@ -225,6 +230,15 @@ impl WholeSceneTransition {
             normalize_transition_duration(None)
         };
         (self.elapsed / duration).min(1.0)
+    }
+
+    /// The shader effect this transition runs, if any.
+    ///
+    /// An unknown name (a custom ISF transition the engine cannot load) is not
+    /// a shader here: it degrades to the Fade alpha path, which is the JS
+    /// `fallbackToFade` behaviour.
+    pub fn shader_effect(&self) -> Option<crate::scene_transition::TransitionEffect> {
+        crate::scene_transition::TransitionEffect::from_name(&self.kind)
     }
 }
 
@@ -427,24 +441,20 @@ impl Store {
 
     /// `pickTransitionName` with the engine's available set.
     ///
-    /// The engine can only execute `Fade` (the ISF transition renderer is
-    /// WS-4); every other allowed name is therefore treated exactly like the
-    /// JS `fallbackToFade` path — the Scene change still happens and
-    /// crossfades instead of failing. `None` is preserved so a manual change
-    /// while performance is stopped can still switch instantly.
+    /// The engine executes `Fade` (the per-Group alpha path) and the six native
+    /// shader effects ([`crate::scene_transition`]); `None` is preserved so a
+    /// manual change can still switch instantly. An allowed name that is not
+    /// available (a custom ISF transition the engine cannot load) is filtered
+    /// out by [`pick_transition_name`] and the change fades instead, which is
+    /// the JS `fallbackToFade` path — the Scene change itself never fails.
     pub(crate) fn pick_scene_transition_name(&mut self) -> String {
         let enabled = self.performance.enabled;
         let allowed = normalize_transition_list(self.scenes.performance.get("allowedTransitions"));
         let mut available = vec![FADE_TRANSITION.to_string(), NONE_TRANSITION.to_string()];
         available.extend(NATIVE_TRANSITION_NAMES.iter().map(|name| name.to_string()));
-        let picked = pick_transition_name(enabled, &allowed, &available, || {
+        pick_transition_name(enabled, &allowed, &available, || {
             self.performance.rng.next_f64()
-        });
-        if picked != NONE_TRANSITION {
-            FADE_TRANSITION.to_string()
-        } else {
-            picked
-        }
+        })
     }
 
     /// Create `RowRuntime` for a cell using the Scene's resolved timing.
@@ -843,9 +853,10 @@ impl Store {
         }
     }
 
-    /// `completeTransition` for the whole-scene crossfade (`scenes.js:1870-1890`):
+    /// `completeTransition` for the whole-scene transition (`scenes.js:1870-1890`):
     /// bake the incoming alphas, remove the outgoing Groups, clear the flag.
     pub(crate) fn complete_whole_scene_transition(&mut self) {
+        self.pending_transition_capture = None;
         let Some(transition) = self.performance.transition.take() else {
             return;
         };
@@ -858,7 +869,11 @@ impl Store {
         self.deltas.push("scenes/SET_TRANSITIONING", json!(false));
     }
 
-    /// Record the whole-scene crossfade started by `applySceneNow`.
+    /// Record the whole-scene transition started by `applySceneNow`.
+    ///
+    /// A native shader kind leaves a pending capture request for the window
+    /// loop (see [`Store::take_pending_transition_capture`]); `Fade` and
+    /// unknown kinds do not, and keep the alpha path.
     pub(crate) fn begin_whole_scene_transition(
         &mut self,
         from: Vec<(String, f64)>,
@@ -867,6 +882,8 @@ impl Store {
     ) {
         let duration =
             normalize_transition_duration(self.scenes.performance.get("transitionSeconds"));
+        self.pending_transition_capture =
+            crate::scene_transition::TransitionEffect::from_name(&kind);
         self.performance.transition = Some(WholeSceneTransition {
             from,
             to,
@@ -878,20 +895,69 @@ impl Store {
         self.deltas.push("scenes/SET_TRANSITIONING", json!(true));
     }
 
-    /// Advance the whole-scene crossfade (`scenes.js:3860-3910`).
+    /// Take the capture request a just-started shader transition left behind.
+    ///
+    /// The window loop calls this before rendering the first frame of the
+    /// incoming Scene: main still holds the outgoing Scene at that point, so
+    /// the compositor can copy it once. The request is consumed either way.
+    pub fn take_pending_transition_capture(
+        &mut self,
+    ) -> Option<crate::scene_transition::TransitionEffect> {
+        self.pending_transition_capture.take()
+    }
+
+    /// Downgrade the active whole-scene transition to the Fade alpha path.
+    ///
+    /// Used when the outgoing frame could not be captured (no main texture yet,
+    /// a resize invalidated it, or the effect failed to compile). The change is
+    /// never dropped: the incoming Groups are reset to alpha 0 and the outgoing
+    /// ones to the alpha they recorded when the change started — exactly the
+    /// Fade setup — so `scenes/tick` crossfades them as usual and the Scene
+    /// change still completes. Returns `true` when a shader transition was
+    /// downgraded.
+    pub fn fall_back_scene_transition_to_fade(&mut self) -> bool {
+        self.pending_transition_capture = None;
+        let Some(transition) = self.performance.transition.as_ref() else {
+            return false;
+        };
+        if transition.shader_effect().is_none() {
+            return false;
+        }
+        let from = transition.from.clone();
+        let to = transition.to.clone();
+        if let Some(transition) = self.performance.transition.as_mut() {
+            transition.kind = FADE_TRANSITION.to_string();
+        }
+        for (group_id, _) in &to {
+            self.set_group_alpha(group_id, 0.0, true);
+        }
+        for (group_id, alpha) in &from {
+            self.set_group_alpha(group_id, *alpha, true);
+        }
+        true
+    }
+
+    /// Advance the whole-scene transition (`scenes.js:3860-3910`).
+    ///
+    /// A shader transition advances only its timeline: both Scenes render at
+    /// their final opacity and the effect does the blending, exactly like the
+    /// JS `if (!transition.shader)` guard around the alpha loop. The Fade path
+    /// keeps animating the Groups' alphas.
     fn advance_whole_scene_transition(&mut self, delta: f64, emit_progress: bool) {
         let Some(mut transition) = self.performance.transition.clone() else {
             return;
         };
         transition.elapsed += delta;
         let progress = transition.progress();
-        let eased = smoothstep(progress);
 
-        for (group_id, alpha) in &transition.to {
-            self.set_group_alpha(group_id, alpha * eased, emit_progress);
-        }
-        for (group_id, alpha) in &transition.from {
-            self.set_group_alpha(group_id, alpha * (1.0 - eased), emit_progress);
+        if transition.shader_effect().is_none() {
+            let eased = smoothstep(progress);
+            for (group_id, alpha) in &transition.to {
+                self.set_group_alpha(group_id, alpha * eased, emit_progress);
+            }
+            for (group_id, alpha) in &transition.from {
+                self.set_group_alpha(group_id, alpha * (1.0 - eased), emit_progress);
+            }
         }
 
         if progress >= 1.0 {
@@ -1303,6 +1369,167 @@ mod tests {
         }
         for (group_id, alpha) in &transition.to {
             assert_eq!(store.state().find_group(group_id).unwrap().alpha, *alpha);
+        }
+    }
+
+    #[test]
+    fn manual_change_with_a_shader_transition_records_the_effect_and_capture() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({
+                    "config": {
+                        "allowedTransitions": ["Three Crossfade"],
+                        "transitionSeconds": 1,
+                    }
+                }),
+            )
+            .expect("config");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+            .expect("apply b");
+        store.drain_deltas();
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-c" }))
+            .expect("apply c");
+
+        let transition = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("a transition is recorded");
+        assert_eq!(transition.kind, "Three Crossfade");
+        assert_eq!(
+            transition.shader_effect(),
+            Some(crate::scene_transition::TransitionEffect::Crossfade)
+        );
+        assert_eq!(
+            store.take_pending_transition_capture(),
+            Some(crate::scene_transition::TransitionEffect::Crossfade),
+            "the window loop is asked to capture the outgoing frame"
+        );
+        assert!(
+            store.take_pending_transition_capture().is_none(),
+            "the capture request is one-shot"
+        );
+
+        // Both Scenes render at final opacity: the shader does the blending.
+        for (group_id, _) in &transition.to {
+            assert_eq!(store.state().find_group(group_id).unwrap().alpha, 1.0);
+        }
+        for (group_id, alpha) in &transition.from {
+            assert_eq!(store.state().find_group(group_id).unwrap().alpha, *alpha);
+        }
+
+        // Half-way: the timeline advanced, the alphas did not.
+        tick(&mut store, 0.5);
+        let mid = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("still running");
+        assert!((mid.progress() - 0.5).abs() < 0.02, "{}", mid.progress());
+        for (group_id, _) in &transition.to {
+            assert_eq!(store.state().find_group(group_id).unwrap().alpha, 1.0);
+        }
+
+        tick(&mut store, 0.6);
+        assert!(store.whole_scene_transition().is_none(), "completes at 1.0");
+        for (group_id, _) in &transition.from {
+            assert!(
+                store.state().find_group(group_id).is_none(),
+                "the outgoing Scene is removed at completion"
+            );
+        }
+        for (group_id, alpha) in &transition.to {
+            assert_eq!(store.state().find_group(group_id).unwrap().alpha, *alpha);
+        }
+    }
+
+    #[test]
+    fn unavailable_or_empty_allowed_lists_still_fade() {
+        for allowed in [json!([]), json!(["E2E Missing Transition"])] {
+            let mut store = store_with_scenes();
+            store
+                .dispatch(
+                    "scenes/updatePerformance",
+                    json!({ "config": { "allowedTransitions": allowed, "transitionSeconds": 1 } }),
+                )
+                .expect("config");
+            store
+                .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+                .expect("apply b");
+            store
+                .dispatch("scenes/applyScene", json!({ "sceneId": "scene-c" }))
+                .expect("apply c");
+            let transition = store
+                .whole_scene_transition()
+                .cloned()
+                .expect("a transition is recorded");
+            assert_eq!(transition.kind, FADE_TRANSITION, "allowed: {allowed}");
+            assert_eq!(transition.shader_effect(), None);
+            assert_eq!(
+                store.take_pending_transition_capture(),
+                None,
+                "Fade needs no capture"
+            );
+        }
+    }
+
+    #[test]
+    fn shader_transition_falls_back_to_fade_without_losing_the_change() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({
+                    "config": {
+                        "allowedTransitions": ["Three Wipe"],
+                        "transitionSeconds": 1,
+                    }
+                }),
+            )
+            .expect("config");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+            .expect("apply b");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-c" }))
+            .expect("apply c");
+        let shader = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("shader transition");
+        assert_eq!(shader.kind, "Three Wipe");
+
+        assert!(store.fall_back_scene_transition_to_fade());
+        let fade = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("transition survives the fallback");
+        assert_eq!(fade.kind, FADE_TRANSITION);
+        assert_eq!(fade.duration, shader.duration);
+        for (group_id, _) in &fade.to {
+            assert_eq!(store.state().find_group(group_id).unwrap().alpha, 0.0);
+        }
+        for (group_id, alpha) in &fade.from {
+            assert_eq!(store.state().find_group(group_id).unwrap().alpha, *alpha);
+        }
+        assert!(
+            !store.fall_back_scene_transition_to_fade(),
+            "a Fade transition is not downgraded again"
+        );
+
+        // Half-way the Fade path reaches smoothstep(0.5) = 0.5.
+        tick(&mut store, 0.5);
+        for (group_id, _) in &fade.to {
+            let alpha = store.state().find_group(group_id).unwrap().alpha;
+            assert!((alpha - 0.5).abs() < 0.01, "{alpha}");
+        }
+
+        tick(&mut store, 0.6);
+        assert!(store.whole_scene_transition().is_none());
+        for (group_id, _) in &fade.from {
+            assert!(store.state().find_group(group_id).is_none());
         }
     }
 

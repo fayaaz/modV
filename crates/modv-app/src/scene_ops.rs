@@ -43,21 +43,25 @@
 //! ## `applyScene` (`scenes.js:2529-2815`)
 //!
 //! Groups and Modules are rebuilt with **fresh ids** so the previous Groups
-//! can be crossfaded out. While performance mode is running the outgoing
-//! Scene-stamped Groups stay in the layer stack for `transitionSeconds` and
-//! fade against the incoming set (the Fade branch of `applySceneNow`); when
-//! performance is stopped the change applies immediately (shader transitions
-//! are WS-4). Groups that belong to no Scene survive either way. Row
-//! positions follow the Scene document (`sceneRow`, named rows resolved
-//! through [`modv_engine::scene_rows::assign_scene_row_indexes`]) and `null`
-//! row holes leave the live row untouched.
+//! can be crossfaded out. The crossfade style comes from
+//! `pickTransitionName`: `None` applies immediately, `Fade` keeps the outgoing
+//! Scene-stamped Groups in the layer stack for `transitionSeconds` and fades
+//! their alphas against the incoming set (the Fade branch of `applySceneNow`),
+//! and a native shader effect keeps them at full alpha but hidden while
+//! [`crate::scene_transition`] runs over the captured outgoing frame. Groups
+//! that belong to no Scene survive every path. Row positions follow the Scene
+//! document (`sceneRow`, named rows resolved through
+//! [`modv_engine::scene_rows::assign_scene_row_indexes`]) and `null` row holes
+//! leave the live row untouched.
 //!
 //! ## Known simplifications (documented, not silent)
 //!
-//! - **Shader/ISF scene transitions are WS-4.** The allowed-transition list
-//!   is only consulted during performance mode, where every change is a Fade
-//!   (`scene-transition-pick.js`). A shader name is mapped to Fade, which is
-//!   the JS `fallbackToFade` behaviour.
+//! - **Only the six native transitions are available.** Custom ISF transition
+//!   modules are filtered out of the allowed list by
+//!   [`modv_engine::scene_transition_pick::pick_transition_name`], so a
+//!   missing name fades instead — the JS `fallbackToFade` behaviour. A shader
+//!   transition whose outgoing frame cannot be captured also falls back to
+//!   Fade (`Store::fall_back_scene_transition_to_fade`).
 //! - **Performance runtime lives in [`crate::performance`].**
 //!   `scenes/startPerformance`, `scenes/stopPerformance`, `scenes/tick`,
 //!   `scenes/nextScene` and the row-level apply are wired there; partial-Scene
@@ -697,20 +701,31 @@ impl Store {
         // (`scenes.js:2679-2703`).
         self.remap_scene_inherit(&group_snapshots, &id_map);
 
-        // A manual change during performance crossfades, exactly like
-        // `applySceneNow`'s Fade branch: the outgoing Groups stay in the
-        // stack for `transitionSeconds` with their own alpha while the
-        // incoming set fades in. While performance mode is stopped the engine
-        // still applies immediately: shader/ISF transitions are WS-4, and the
-        // allowed-transition list only describes those (documented deviation;
-        // `None` is also the JS instant-switch behaviour).
-        let transition_name = if self.performance.enabled {
-            self.pick_scene_transition_name()
+        // A manual change picks its transition style (`applySceneNow`,
+        // `scenes.js:2714`): `None` switches instantly, `Fade` crossfades the
+        // outgoing Groups' alphas, and a native shader effect keeps both
+        // Scenes at full opacity while the compositor runs the effect over the
+        // captured outgoing frame. The outgoing Groups are hidden, not faded,
+        // for the shader path, so only one animation runs.
+        let transition_name = self.pick_scene_transition_name();
+        let effect = crate::scene_transition::TransitionEffect::from_name(&transition_name);
+        // A name that is neither `Fade`, `None` nor a native effect (a custom
+        // ISF transition the engine cannot run) degrades to Fade, the JS
+        // `fallbackToFade` behaviour. The picker's available list normally
+        // prevents this, but an explicit request must never switch instantly
+        // just because its effect is missing.
+        let transition_name = if effect.is_none()
+            && transition_name != FADE_TRANSITION
+            && transition_name != NONE_TRANSITION
+        {
+            FADE_TRANSITION.to_string()
         } else {
-            crate::scene_ops::NONE_TRANSITION.to_string()
+            transition_name
         };
-        let fade = transition_name == FADE_TRANSITION && !old_groups.is_empty();
-        if fade {
+        let has_old_groups = !old_groups.is_empty();
+        let shader = effect.is_some() && has_old_groups;
+        let fade = transition_name == FADE_TRANSITION && has_old_groups;
+        if fade || shader {
             let mut from = Vec::new();
             for mut group in old_groups {
                 // The ghost reuses the outgoing Modules but not the Group
@@ -724,17 +739,19 @@ impl Store {
                 from.push((group.id.clone(), group.alpha));
                 self.state.groups.push(group);
             }
-            for (group_id, _) in &created_alphas {
-                if let Some(group) = self.state.find_group_mut(group_id) {
-                    group.alpha = 0.0;
+            if !shader {
+                for (group_id, _) in &created_alphas {
+                    if let Some(group) = self.state.find_group_mut(group_id) {
+                        group.alpha = 0.0;
+                    }
+                    self.deltas.push(
+                        "groups/UPDATE_GROUP",
+                        json!({ "groupId": group_id, "data": { "alpha": 0.0 } }),
+                    );
                 }
-                self.deltas.push(
-                    "groups/UPDATE_GROUP",
-                    json!({ "groupId": group_id, "data": { "alpha": 0.0 } }),
-                );
             }
             self.emit_group_order();
-            self.begin_whole_scene_transition(from, created_alphas, FADE_TRANSITION.to_string());
+            self.begin_whole_scene_transition(from, created_alphas, transition_name);
         } else {
             for group in old_groups {
                 self.release_group(group);
@@ -3217,6 +3234,15 @@ mod tests {
     #[test]
     fn apply_scene_replaces_previous_groups_and_keeps_gallery_and_non_scene() {
         let mut store = Store::new();
+        // This test asserts the replacement itself, so switch instantly rather
+        // than letting the default Fade keep the old Groups as transition
+        // ghosts for a second.
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({ "config": { "allowedTransitions": ["None"] } }),
+            )
+            .expect("performance config");
         store
             .dispatch(
                 "groups/createGroup",

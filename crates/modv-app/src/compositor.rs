@@ -112,8 +112,18 @@
 //! * **Whole-scene Fade is per-group alpha.** `applySceneNow`'s Fade branch
 //!   keeps the outgoing groups as ordinary (non-ghost) layers and crossfades
 //!   every group's alpha; the compositor's normal `group.alpha` composite is
-//!   therefore the whole-scene fade. Shader/ISF transitions are WS-4 (the
-//!   frame graph keeps the `SceneTransition` hook).
+//!   therefore the whole-scene fade.
+//! * **Whole-scene shader transitions (WS-8).** When the picked transition is
+//!   one of the six native effects ([`crate::scene_transition`]) the switch is
+//!   composited by a shader over two frames instead of animating alphas: the
+//!   outgoing frame is captured from the main texture of the last presented
+//!   frame ([`Compositor::capture_transition_source`]) and the incoming frame
+//!   is this frame's main composite. The outgoing Groups stay in the state at
+//!   full alpha but are **hidden** for the duration (their ids travel in
+//!   [`SceneTransitionInfo::from_groups`]), so they neither pollute `main` nor
+//!   are faded a second time. The pass writes into its scratch target and the
+//!   result is copied back into main, which keeps `present`, `read_preview`
+//!   and `read_main_rgba8` unchanged.
 //! * **The Gallery group is inert.** In JS the Gallery group renders its
 //!   preview modules into an auxiliary canvas (the hovered item's) and the
 //!   loop skips everything when that canvas is absent (`loop.js:332-338`,
@@ -271,6 +281,7 @@ use modv_renderers::two_d::{AudioFrame, Canvas, DrawContext, ModuleContext, TwoD
 use crate::module_preview::{ModulePreviews, PreviewError};
 use crate::module_registry::{ModuleKind, ModuleRegistry, Point10SceneKind};
 use crate::scene_preview::ScenePreviews;
+use crate::scene_transition::{SceneTransitionInfo, SceneTransitionPass};
 
 /// Preview frame width published to the UI (`modv-ipc` `VMP1` ring).
 pub const PREVIEW_WIDTH: u32 = 320;
@@ -359,6 +370,12 @@ pub struct FrameInfo {
     pub audio: AudioFrame,
     /// Row crossfades running this frame (empty when performance is idle).
     pub row_fades: Vec<RowFadeInfo>,
+    /// Whole-scene shader transition running this frame, if any.
+    ///
+    /// `Some` only when the outgoing frame was captured and the picked effect
+    /// is a native shader; `Fade`/`None`/unknown kinds stay `None` and take the
+    /// alpha path (see [`crate::scene_transition`]).
+    pub scene_transition: Option<SceneTransitionInfo>,
 }
 
 impl FrameInfo {
@@ -656,6 +673,15 @@ pub struct Compositor {
     group_targets: HashSet<String>,
     /// Row-fade blend targets keyed by row index (`loop.js:498-537`).
     row_fade_targets: HashMap<usize, OutputTexture>,
+    /// The captured outgoing frame of a whole-scene shader transition.
+    ///
+    /// Copied once from main when the transition starts (main then holds the
+    /// outgoing Scene) and sampled as `startImage` every frame. Dropped on
+    /// resize, reset and when the transition ends.
+    transition_from: Option<OutputTexture>,
+    /// The whole-scene transition pass, created on the first shader
+    /// transition. Owns one pipeline per effect plus its scratch target.
+    scene_transition: Option<SceneTransitionPass>,
     /// Pipeline slot per active module id.
     slots: HashMap<String, usize>,
     /// Modules whose slot creation failed; skipped without retrying each frame.
@@ -785,6 +811,8 @@ impl Compositor {
             module_output: None,
             group_targets: HashSet::new(),
             row_fade_targets: HashMap::new(),
+            transition_from: None,
+            scene_transition: None,
             slots: HashMap::new(),
             failed_modules: HashSet::new(),
             two_d: HashMap::new(),
@@ -875,6 +903,9 @@ impl Compositor {
         if let Some(previews) = &mut self.scene_previews {
             previews.reset();
         }
+        // Transition pipelines are stateless across a restore; drop them with
+        // the scratch target so nothing from the old state survives.
+        self.scene_transition = None;
     }
 
     fn drop_output_textures(&mut self) {
@@ -885,6 +916,13 @@ impl Compositor {
         self.surfaces.remove(&module_output_id());
         for row in std::mem::take(&mut self.row_fade_targets).into_keys() {
             self.surfaces.remove(&row_fade_texture_id(row));
+        }
+        // Both whole-scene transition halves are output-sized: a resized
+        // capture must never be sampled against a differently sized main, so
+        // the window loop falls back to Fade instead (see `draw_frame`).
+        self.transition_from = None;
+        if let Some(pass) = &mut self.scene_transition {
+            pass.drop_scratch();
         }
     }
 
@@ -924,23 +962,39 @@ impl Compositor {
         let main_texture = self.surfaces.remove(&main_id());
         let mut rendered: HashSet<String> = HashSet::new();
         let mut fades = RowFadeState::from_frame(frame);
-        let groups = self.render_groups(state, frame, &mut rendered, &mut fades);
+        let hidden_groups = hidden_scene_groups(frame);
+        let groups = self.render_groups(state, frame, &mut rendered, &mut fades, &hidden_groups);
         if let Some(texture) = main_texture {
             self.surfaces.insert(main_id(), texture);
         }
         groups?;
 
-        self.compose_main(state, &fades)?;
+        self.compose_main(state, &fades, &hidden_groups)?;
+
+        // Whole-scene shader transition: main now holds the incoming Scene, so
+        // mix it with the captured outgoing frame and land the result back in
+        // main (present/preview read main). A failed pass drops the capture so
+        // the window loop falls back to the Fade ghost path next frame.
+        if let Some(transition) = &frame.scene_transition
+            && !self.apply_scene_transition(transition)?
+        {
+            self.transition_from = None;
+        }
         Ok(())
     }
 
     /// Group loop (`worker/loop.js:239-558`).
+    ///
+    /// Groups listed in `hidden_groups` are the outgoing Scene of a running
+    /// shader transition: their pixels are already frozen in the captured
+    /// `from` texture, so they neither draw nor reach main.
     fn render_groups(
         &mut self,
         state: &EngineState,
         frame: &FrameInfo,
         rendered: &mut HashSet<String>,
         fades: &mut RowFadeState,
+        hidden_groups: &HashSet<String>,
     ) -> Result<(), CompositorError> {
         let order = state.group_index_render_order();
 
@@ -954,6 +1008,12 @@ impl Compositor {
             // modules, inheritance and main composite in that case
             // (`loop.js:332-338`, `:401-407`, `:635`).
             if is_gallery_group {
+                continue;
+            }
+
+            // The outgoing Scene of a shader transition is frozen in the
+            // captured frame; skip it so it cannot feed inheritance or main.
+            if hidden_groups.contains(&group.id) {
                 continue;
             }
 
@@ -1826,6 +1886,7 @@ impl Compositor {
         &mut self,
         state: &EngineState,
         fades: &RowFadeState,
+        hidden_groups: &HashSet<String>,
     ) -> Result<(), CompositorError> {
         let order = state.group_index_render_order();
         let mut graph = FrameGraph::new();
@@ -1837,6 +1898,11 @@ impl Compositor {
             // Skip the Gallery group by name, not by position: a layout
             // without the Gallery panel renders every row (`loop.js:628-637`).
             if group.name == GALLERY_GROUP_NAME {
+                continue;
+            }
+            // The outgoing Scene of a shader transition is frozen in the
+            // captured frame; only the incoming Scene reaches main.
+            if hidden_groups.contains(&group.id) {
                 continue;
             }
             // A row-transition ghost only exists for the crossfade; the blend
@@ -2124,6 +2190,127 @@ impl Compositor {
         });
         self.executor.execute(&graph, &mut self.surfaces)?;
         Ok(())
+    }
+
+    /// Capture the current main texture as the outgoing frame of a whole-scene
+    /// shader transition (`SceneTransitionInfo`).
+    ///
+    /// Called by the window loop once, right after `scenes/applyScene` started
+    /// a shader transition and before the first frame of the incoming Scene is
+    /// rendered: at that point main still holds the last presented frame of the
+    /// outgoing Scene. Returns `false` when there is nothing to capture (no
+    /// main texture yet, zero-sized output), which makes the caller fall back
+    /// to Fade for that change.
+    pub fn capture_transition_source(&mut self) -> bool {
+        let (width, height) = self.size;
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let Some(main) = self.main.as_ref() else {
+            return false;
+        };
+        if main.texture.width() != width || main.texture.height() != height {
+            return false;
+        }
+        let main_texture = main.texture.clone();
+
+        let needs_target = self.transition_from.as_ref().is_none_or(|target| {
+            target.texture.width() != width || target.texture.height() != height
+        });
+        if needs_target {
+            self.transition_from =
+                Some(self.create_output_texture("modv-transition-from", width, height));
+        }
+        let Some(from) = self.transition_from.as_ref() else {
+            return false;
+        };
+        self.copy_texture(&main_texture, &from.texture);
+        true
+    }
+
+    /// Whether a captured outgoing frame is available for this output size.
+    pub fn has_transition_capture(&self) -> bool {
+        let (width, height) = self.size;
+        width > 0
+            && height > 0
+            && self.transition_from.as_ref().is_some_and(|target| {
+                target.texture.width() == width && target.texture.height() == height
+            })
+    }
+
+    /// Drop the captured outgoing frame (transition ended, resize, fallback).
+    ///
+    /// Also releases the pass's scratch target: a transition is the only owner
+    /// of that output-sized texture, so an idle engine does not keep it alive.
+    /// Pipelines stay cached for the next transition ([`Compositor::reset`]
+    /// drops them).
+    pub fn clear_transition_capture(&mut self) {
+        self.transition_from = None;
+        if let Some(pass) = &mut self.scene_transition {
+            pass.drop_scratch();
+        }
+    }
+
+    /// Run the active whole-scene shader transition over `main`.
+    ///
+    /// `from` is the captured outgoing frame, `to` is this frame's main
+    /// composite. The pass renders into its own scratch target; the result is
+    /// copied back into main so every downstream reader (present, preview,
+    /// read-back) sees the transition. Returns `false` when either half is
+    /// missing, in which case the caller falls back to Fade.
+    fn apply_scene_transition(
+        &mut self,
+        transition: &SceneTransitionInfo,
+    ) -> Result<bool, CompositorError> {
+        let (width, height) = self.size;
+        let (Some(from), Some(main)) = (self.transition_from.as_ref(), self.main.as_ref()) else {
+            return Ok(false);
+        };
+        if from.texture.width() != width
+            || from.texture.height() != height
+            || main.texture.width() != width
+            || main.texture.height() != height
+        {
+            return Ok(false);
+        }
+        let from_view = from.view.clone();
+        let main_view = main.view.clone();
+        let main_texture = main.texture.clone();
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("modv-scene-transition-frame"),
+            });
+        let mut applied = false;
+        {
+            let pass = self
+                .scene_transition
+                .get_or_insert_with(|| SceneTransitionPass::new(&self.device, &self.queue));
+            pass.resize(width, height);
+            if let Some(destination) = pass.target_view() {
+                applied = pass.encode(
+                    &mut encoder,
+                    transition.effect,
+                    &from_view,
+                    &main_view,
+                    transition.progress,
+                    &destination,
+                );
+            }
+        }
+        if !applied {
+            return Ok(false);
+        }
+        let target = self
+            .scene_transition
+            .as_ref()
+            .and_then(SceneTransitionPass::target_texture);
+        self.queue.submit(Some(encoder.finish()));
+        if let Some(target) = target {
+            self.copy_texture(&target, &main_texture);
+        }
+        Ok(true)
     }
 
     /// Parse a preset blend token into the renderer's enum.
@@ -2674,6 +2861,16 @@ fn row_fade_texture_id(row: usize) -> TextureId {
     TextureId::from(format!("row-fade:{row}"))
 }
 
+/// The outgoing Scene Group ids hidden while a shader transition owns the
+/// frame (`SceneTransitionInfo::from_groups`).
+fn hidden_scene_groups(frame: &FrameInfo) -> HashSet<String> {
+    frame
+        .scene_transition
+        .as_ref()
+        .map(|transition| transition.from_groups.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// The frame-graph texture id of a 2D module's canvas.
 fn two_d_texture_id(module_id: &str) -> TextureId {
     TextureId::from(format!("two-d:{module_id}"))
@@ -2842,6 +3039,8 @@ mod tests {
     use modv_renderers::shader::all_modules;
     use serde_json::json;
 
+    use crate::scene_transition::TransitionEffect;
+
     const SIZE: u32 = 64;
 
     /// Point10 scenes are rendered a bit larger: their `LineStrip` strips and
@@ -2867,6 +3066,7 @@ mod tests {
             date: [2026.0, 10.0, 4.0, 0.0],
             audio: AudioFrame::default(),
             row_fades: Vec::new(),
+            scene_transition: None,
         }
     }
 
@@ -3006,6 +3206,89 @@ mod tests {
         assert_eq!(pixels.len(), (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4) as usize);
         let first = &pixels[0..4];
         assert!(first[0] >= 250 && first[1] >= 250 && first[2] >= 250 && first[3] >= 250);
+    }
+
+    #[test]
+    fn transition_capture_lifecycle_follows_the_output_size() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        assert!(
+            !compositor.capture_transition_source(),
+            "nothing to capture before the first frame"
+        );
+
+        compositor.resize(SIZE, SIZE);
+        compositor
+            .render_frame(&invert_state(1.0), &frame_info())
+            .expect("outgoing frame renders");
+        assert!(compositor.capture_transition_source(), "main captures");
+        assert!(compositor.has_transition_capture());
+
+        compositor.clear_transition_capture();
+        assert!(!compositor.has_transition_capture());
+
+        assert!(compositor.capture_transition_source());
+        compositor.resize(SIZE * 2, SIZE * 2);
+        assert!(
+            !compositor.has_transition_capture(),
+            "a resized output invalidates the captured frame"
+        );
+    }
+
+    #[test]
+    fn shader_transition_mixes_the_captured_frame_with_the_incoming_scene() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        compositor
+            .render_frame(&invert_state(1.0), &frame_info())
+            .expect("outgoing frame renders");
+        assert!(compositor.capture_transition_source());
+
+        let incoming = EngineState::new();
+        let mut frame = frame_info();
+        frame.scene_transition = Some(SceneTransitionInfo {
+            effect: TransitionEffect::Crossfade,
+            progress: 0.0,
+            from_groups: vec!["group-a".to_string()],
+        });
+        compositor
+            .render_frame(&incoming, &frame)
+            .expect("progress 0 renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(
+            &pixels,
+            [255, 255, 255, 255],
+            2,
+            "progress 0 is the outgoing frame",
+        );
+
+        frame
+            .scene_transition
+            .as_mut()
+            .expect("transition")
+            .progress = 0.5;
+        compositor
+            .render_frame(&incoming, &frame)
+            .expect("progress 0.5 renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        // smoothstep(0.5) = 0.5: white mixed half-way with transparent black.
+        assert_pixels_close(&pixels, [128, 128, 128, 128], 3, "half-way crossfade");
+
+        frame
+            .scene_transition
+            .as_mut()
+            .expect("transition")
+            .progress = 1.0;
+        compositor
+            .render_frame(&incoming, &frame)
+            .expect("progress 1 renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [0, 0, 0, 0], 1, "progress 1 is the incoming scene");
     }
 
     #[test]

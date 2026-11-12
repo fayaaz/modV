@@ -17,6 +17,7 @@ mod performance;
 mod report;
 mod scene_ops;
 mod scene_preview;
+mod scene_transition;
 mod store_ops;
 mod supervisor;
 mod window;

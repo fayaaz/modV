@@ -153,6 +153,11 @@ pub struct Store {
     /// whole-scene fade (`scenes.js` module-level `rowRuntime`,
     /// `rowTransitions` and `transition`).
     pub(crate) performance: crate::performance::PerformanceRuntime,
+    /// The shader effect a just-started whole-scene transition needs the
+    /// window loop to capture (`scenes/applyScene` → `Compositor::
+    /// capture_transition_source`). Cleared on capture, completion, fallback,
+    /// reset or a later change.
+    pub(crate) pending_transition_capture: Option<crate::scene_transition::TransitionEffect>,
     /// Tween runtime (WS-12): descriptors from `state.tweens` pre-rendered at
     /// [`Store::fps`] and the current BPM. Input Links read and advance them.
     pub(crate) tweens: modv_engine::tweens::TweenSet,
@@ -265,6 +270,7 @@ impl Store {
             applied_scene_id: None,
             scene_list_revision: 0,
             performance,
+            pending_transition_capture: None,
             tweens: modv_engine::tweens::TweenSet::new(),
             fps: 60.0,
             audio: AudioFrame::default(),
@@ -1959,6 +1965,8 @@ impl Store {
         // Link smoothing/throttle state belongs to the replaced inputs.
         self.link_smoothing.clear();
         self.link_deltas.clear();
+        // A capture request belongs to Groups the restore just replaced.
+        self.pending_transition_capture = None;
         self.reload_tweens();
         Ok(())
     }
