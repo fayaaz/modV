@@ -15,8 +15,13 @@ import {
   sampleCanvas,
   writeDiagLine,
 } from "./render-diag";
+import { createMemoryGate, writeMemorySnapshot } from "./memory-diag";
 
 const meyda = { windowing: applyWindow };
+
+// Heap + store-size telemetry: logs a `[mem-diag]` line to the daily log
+// every 5 seconds so a slow leak shows up as a climbing trend in the log.
+const memDiagGate = createMemoryGate(5000);
 
 let bufferCanvas;
 let bufferContext;
@@ -732,6 +737,10 @@ async function loop(delta, features, fftOutput) {
     for (let i = 0; i < diagGroups.length; i++) {
       writeDiagLine(formatGroupDiag(diagGroups[i]));
     }
+  }
+
+  if (memDiagGate(performance.now())) {
+    writeMemorySnapshot(store.state);
   }
 }
 

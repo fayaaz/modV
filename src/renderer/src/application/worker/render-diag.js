@@ -83,7 +83,7 @@ export function diagShouldLog(now) {
   return true;
 }
 
-export function writeDiagLine(line) {
+export function writeDiagLine(line, tag = "render-diag") {
   try {
     if (typeof self === "undefined" || !self.__userData) {
       return;
@@ -102,7 +102,7 @@ export function writeDiagLine(line) {
     fs.mkdirSync(directory, { recursive: true });
     fs.appendFileSync(
       path.join(directory, `vmodv-${stamp}.log`),
-      `${now.toISOString()} INFO [render-diag] ${line}\n`,
+      `${now.toISOString()} INFO [${tag}] ${line}\n`,
     );
   } catch (error) {
     // Diagnostics must never break rendering.

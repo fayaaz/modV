@@ -12,6 +12,7 @@ import {
   getByteTimeDomainData,
 } from "./setup-media";
 import { AudioBands, isBandFeature } from "./audio-bands";
+import { BandFeatures } from "./band-features";
 import { reduceByteFrequencyData } from "./byte-frequency-data";
 import { createLogger } from "./logger";
 import MediaDeviceManager from "./media-device-manager";
@@ -91,6 +92,7 @@ class ModV {
     this.use = use;
     this.debug = false;
     this.audioBands = new AudioBands();
+    this.bandFeatures = new BandFeatures();
     this.features = reactive({
       energy: 0,
       rms: 0,
@@ -628,16 +630,28 @@ class ModV {
         getByteFrequencyData(),
         constants.AUDIO_BUFFER_SIZE,
       );
+      const floatFrequencyData = getFloatFrequencyData();
+      const sampleRate = this.audioContext
+        ? this.audioContext.sampleRate
+        : 44100;
       const bands = this.audioBands.update({
-        floatFrequencyData: getFloatFrequencyData(),
+        floatFrequencyData,
         byteTimeDomainData: timeDomain,
         byteFrequencyData,
-        sampleRate: this.audioContext ? this.audioContext.sampleRate : 44100,
+        sampleRate,
       });
 
-      features.bass = bands.bass;
-      features.mid = bands.mid;
-      features.treble = bands.treble;
+      // bass/mid/treble for Input Links and u_bass/u_mid/u_treble come from
+      // the per-band running-peak features; the Point10 payload below keeps
+      // its own tuned lane/grid path so plane9/Point10 scenes are unaffected.
+      const bandFeatures = this.bandFeatures.update({
+        floatFrequencyData,
+        sampleRate,
+      });
+
+      features.bass = bandFeatures.bass;
+      features.mid = bandFeatures.mid;
+      features.treble = bandFeatures.treble;
 
       // full P10 band payload (raw bands, damping lanes, 16-cell grid, beat,
       // time-domain wave) for the Point10 scene adapter
