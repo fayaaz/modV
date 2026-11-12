@@ -12,8 +12,8 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1279 tests pass** (modv-app 166, modv-engine 365,
-  modv-ipc 32, modv-media 160, modv-render 21, modv-renderers 535).
+- Rust workspace: **1526 tests pass** (modv-app 215, modv-engine 413,
+  modv-ipc 32, modv-media 160, modv-render 21, modv-renderers 685).
 - Vitest: **947 tests pass** (includes the engine mirror-parity replay, the
   preview-client helpers and the engine audio payload shape).
 - Real-music analyser check (opt-in fixture): 12 s of the noiseblock radio
@@ -102,7 +102,7 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       in the compositor; Ball renders through the packaged preview (CDP)
 - [x] Palette tween colours advance on the frame clock
 
-## M4 — Point10 — partial (21 of 25 scenes)
+## M4 — Point10 — complete (25 of 25 scenes)
 
 - [x] Scene trait/SceneContext, AudioBridge + P10Audio, shared particle
       alpha/sprite + random, postfx chain (UnrealBloom/OutputPass/ShaderPass/
@@ -129,7 +129,7 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [ ] Golden images (optional; behaviour parity is the priority), warm
       cache/instance eviction
 
-## M5 — Scenes / performance — mostly complete
+## M5 — Scenes / performance — complete except shader transitions
 
 - [x] scenes core logic (timing/rows/transition-pick/capture/preview-data/
       columns/cells/link-defaults) — 269 tests
@@ -150,8 +150,9 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       queues (`Reply::Deferred`) and the window loop answers up to 4/frame
       from an isolated LRU-cached module instance (shader/2D/Point10/ISF)
 - [ ] Scene hover previews through `preview/scene` (in flight)
-- [ ] ISF shader scene transitions (Fade is the runtime transition for now;
-      a documented behaviour approximation, not a regression)
+- [ ] ISF shader scene transitions in flight: the six native effects
+      (crossfade/dissolve/pixelate/glitch/wipe/circle) with the outgoing frame
+      captured at transition start; Fade remains the performance-mode path
 - [x] Rename/removal migration for default Scenes: version-keyed rules,
       seeded-only renames (id/payload preserved) and removals, collision and
       idempotency handling, applied before seeding; the production table is
