@@ -8,6 +8,7 @@ mod cli;
 mod compositor;
 mod headless;
 mod ids;
+mod module_registry;
 mod report;
 mod store_ops;
 mod supervisor;

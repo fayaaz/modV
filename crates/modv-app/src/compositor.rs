@@ -1,9 +1,11 @@
-//! GPU compositor — the M2 render loop (WS-2).
+//! GPU compositor — the M2/M3 render loop (WS-2 / WS-5).
 //!
 //! The compositor evaluates [`EngineState`] groups in
-//! `group_index_render_order`, draws each group's shader modules through
-//! [`ShaderRenderer`], and composites the result onto the main texture that is
-//! presented to the window and published as preview frames.
+//! `group_index_render_order`, draws each group's modules (shader modules
+//! through [`ShaderRenderer`], 2D modules through the
+//! [`modv_renderers::two_d`] canvas facade), and composites the result onto the
+//! main texture that is presented to the window and published as preview
+//! frames.
 //!
 //! ## Frame shape (port of `worker/loop.js:239-663`)
 //!
@@ -19,11 +21,19 @@
 //!    source into the group target at alpha 1 / `normal` (`loop.js:338-379`).
 //!    The first group of a frame inherits nothing, never last frame's root
 //!    canvas, so transparent scenes cannot accumulate trails.
-//! 4. Modules: copy the group target into the module input texture, run the
-//!    shader renderer into the module output texture (its `group_view` and
-//!    `target_view` **must** differ — wgpu rejects sampling the attachment),
-//!    then composite the module output back onto the group target with the
-//!    module's `meta.alpha` and `meta.compositeOperation`.
+//! 4. Modules, in `group.modules` order:
+//!    * **Shader** (`meta.type == "shader"`): copy the group target into the
+//!      module input texture, run the shader renderer into the module output
+//!      texture (its `group_view` and `target_view` **must** differ — wgpu
+//!      rejects sampling the attachment), then composite the module output
+//!      back onto the group target with the module's `meta.alpha` and
+//!      `meta.compositeOperation`.
+//!    * **2D** (`meta.type == "2d"`): build/refresh the module's own
+//!      [`Canvas`] at the output size, run `init` once, `resize` when the size
+//!      changes, `update` each frame, `draw` into the canvas, `submit`, then
+//!      composite the canvas texture onto the group target with the module's
+//!      `meta.alpha`/`meta.compositeOperation` (`loop.js:409-470`,
+//!      `renderers/2d/index.js:29-96`).
 //!
 //! Then the main texture is composited from every group in render order,
 //! skipping the Gallery group **by name** (`loop.js:628-637` — the order
@@ -31,28 +41,74 @@
 //! groups that are not `GROUP_ENABLED`, groups with no modules, and groups at
 //! alpha 0.
 //!
-//! ## Deliberate M2 limitations
+//! ## 2D canvas semantics (M3 deviation, documented)
 //!
-//! * **Only `meta.type == "shader"` modules render.** ISF/2D/Point10/three
-//!   modules log once and are skipped (their renderers land in M3/M4).
+//! The JS 2D renderer draws every module of a group into that group's single
+//! `CanvasRenderingContext2D` (`loop.js:383`; `renderers/2d/index.js:75-95`),
+//! so a module that samples "the canvas" (`drawImage(canvas, …)`) reads
+//! whatever the *earlier modules of the same group* drew this frame on top of
+//! the group's own persistent content. The port isolates each module with its
+//! own output-sized canvas, which is required because the facade has no GPU
+//! equivalent of sampling an in-flight render target for arbitrary modules and
+//! because per-module canvases let `Canvas` keep its content between frames
+//! without re-uploading the group target.
+//!
+//! Consequences:
+//!
+//! * Every self-sampling module (`Smear`, `Pixelate`, `GridStretch`, `Buffer`)
+//!   samples **its own** previous output, which is the intended effect and
+//!   matches the JS whenever it is the only self-sampling module in the group
+//!   (it only ever reads what it drew).
+//! * With two self-sampling modules in the same group, the later one does not
+//!   see the earlier one's output inside its own `drawImage(canvas)` — it sees
+//!   the composited group target instead once the compositor blends it. This
+//!   is the one observable difference and is accepted for M3; fixing it would
+//!   require a shared per-group canvas (a group-sized GPU canvas with a
+//!   cross-module command list), which is a follow-up.
+//! * Canvas content persists between frames exactly like the shared group
+//!   canvas; `group.clearing` clears the group target **and** every 2D canvas
+//!   the group owns, so the "clear then redraw" behaviour is preserved.
+//! * `meta.alpha` and `meta.compositeOperation` are applied **once**, when the
+//!   module's finished canvas is composited onto the group target. The JS sets
+//!   `globalAlpha`/`globalCompositeOperation` on the shared group context
+//!   *before* `module.draw` (`loop.js:409-412`), so there they apply to every
+//!   individual canvas operation. The two are identical for opaque output; they
+//!   differ when a module draws overlapping semi-transparent primitives with
+//!   `meta.alpha < 1` or a non-`normal` blend (the JS accumulates per shape, the
+//!   port blends the flat layer). This is the standard layer reading of a
+//!   module and is accepted for M3.
+//! * Each module instance owns an output-sized canvas (plus its MSAA and
+//!   snapshot targets), so a group with N 2D modules costs roughly N+1 output
+//!   textures instead of one. Acceptable for the corpus' handful of 2D layers;
+//!   a shared per-group GPU canvas would remove both this and the sampling
+//!   difference above.
+//! * `pipeline` mode is the same code path. JS pipeline mode draws the first
+//!   module into the group canvas, then every later module into a scratch that
+//!   is composited back (`loop.js:391-402`, `renderers/2d/index.js:48-74`),
+//!   costing an extra full-frame copy per module. The Rust loop already
+//!   samples the accumulated group target and composites each module output
+//!   back, so the visual result is identical (for shader modules) and no
+//!   scratch ping-pong is needed; for 2D modules the per-module canvas replaces
+//!   the group canvas entirely, so `pipeline` also changes nothing.
+//!
+//! ## Deliberate M3 limitations
+//!
+//! * **ISF/Point10/three modules do not render.** They log once and are
+//!   skipped (their renderers land in M4).
+//! * **No `input_texture` for 2D modules.** `Webcam` and `Texture2D` draw
+//!   nothing while `DrawContext::input_texture` is `None` — exactly what the
+//!   JS does when the video/texture source is missing. Media inputs land with
+//!   M6.
 //! * **No transition ghosts or scene transitions.** A row fade keeps the old
-//!   group alive with `transitionGhost: true`; M2 treats such a group as an
+//!   group alive with `transitionGhost: true`; M2/M3 treats such a group as an
 //!   ordinary group. The alpha-cull exception in `loop.js:257-266` is
 //!   implemented as `transition_ghost == Some(true)` so the check has the right
 //!   shape, but there is no row-transition state to consult yet (M5 adds it).
 //! * **The Gallery group is inert.** In JS the Gallery group renders its
 //!   preview modules into an auxiliary canvas (the hovered item's) and the
 //!   loop skips everything when that canvas is absent (`loop.js:332-338`,
-//!   `:401-407`). M2 has no auxiliary targets, so the group renders nothing,
-//!   inherits nothing and never reaches the main canvas.
-//! * **Pipeline mode is the same code path.** JS pipeline mode draws the first
-//!   module into the group canvas, then every later module into a scratch that
-//!   is composited back (`loop.js:391-402`, `renderers/2d/index.js:48-74`),
-//!   which costs an extra full-frame copy per module. The Rust loop already
-//!   samples the accumulated group target directly and composites each module
-//!   output back, so the visual result is identical and no scratch ping-pong is
-//!   needed. `group.pipeline` therefore changes no behaviour in M2; the
-//!   documented difference is the elided copy.
+//!   `:401-407`). The Rust loop has no auxiliary targets, so the group renders
+//!   nothing, inherits nothing and never reaches the main canvas.
 //! * **`hidden` only affects inheritance.** Faithful to JS: the group loop does
 //!   not cull hidden groups, and the main composite does not check `hidden`
 //!   either — it only stops a group from becoming `lastCanvas`
@@ -76,16 +132,19 @@ use serde_json::Value;
 
 use modv_engine::blend::BlendMode as EngineBlendMode;
 use modv_engine::engine_state::{
-    EngineState, GALLERY_GROUP_NAME, GROUP_DISABLED, GROUP_ENABLED, Group,
+    EngineState, GALLERY_GROUP_NAME, GROUP_DISABLED, GROUP_ENABLED, Group, ModuleInstance,
 };
 use modv_ipc::preview::{PreviewFrame, PreviewRing};
 use modv_render::frame_graph::{
     Executor, FrameGraph, GraphError, MAIN_TEXTURE_ID, PassNode, TextureId, TextureSurfaces,
 };
 use modv_render::wgpu;
+use modv_renderers::shader::ShaderModule;
 use modv_renderers::shader::pipeline::{ShaderAudioUniforms, ShaderError, ShaderRenderer};
 use modv_renderers::shader::uniforms::{PropKind, PropSlots, ShaderProp};
-use modv_renderers::shader::{ShaderModule, all_modules};
+use modv_renderers::two_d::{AudioFrame, Canvas, DrawContext, ModuleContext, TwoDModule};
+
+use crate::module_registry::ModuleRegistry;
 
 /// Preview frame width published to the UI (`modv-ipc` `VMP1` ring).
 pub const PREVIEW_WIDTH: u32 = 320;
@@ -97,7 +156,7 @@ pub const PREVIEW_HEIGHT: u32 = 180;
 const ALPHA_CULL: f64 = 0.001;
 
 /// Everything a frame needs besides the state itself.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FrameInfo {
     /// Monotonic seconds since engine start (`iGlobalTime` family).
     pub time_seconds: f32,
@@ -105,8 +164,28 @@ pub struct FrameInfo {
     pub frame_index: u64,
     /// `[year, month (0-based), weekday (0 = Sunday), seconds]` — `iDate`.
     pub date: [f32; 4],
-    /// Beat flag and AGC-normalised bands.
-    pub audio: ShaderAudioUniforms,
+    /// The engine's audio frame (AGC bands today; wave/FFT once M6 lands).
+    ///
+    /// Filled from [`Store::audio`](crate::store_ops::Store::audio), which the
+    /// renderer's audio pump updates through `meyda/SET_BANDS`. Shader modules
+    /// read the bands via [`FrameInfo::shader_audio`], 2D modules receive the
+    /// whole frame in `ModuleContext`/`DrawContext`.
+    pub audio: AudioFrame,
+}
+
+impl FrameInfo {
+    /// The shader uniform view of [`Self::audio`].
+    ///
+    /// `kick` stays `false`: beat detection is part of the audio analysis
+    /// milestone (WS-9 / M6), and `meyda/SET_BANDS` does not carry a beat flag.
+    pub fn shader_audio(&self) -> ShaderAudioUniforms {
+        ShaderAudioUniforms {
+            kick: false,
+            bass: self.audio.bass,
+            mid: self.audio.mid,
+            treble: self.audio.treble,
+        }
+    }
 }
 
 /// Errors from [`Compositor::render_frame`] and the read-back helpers.
@@ -153,6 +232,41 @@ struct OutputTexture {
     view: wgpu::TextureView,
 }
 
+/// One 2D module's live state: the ported instance plus its own canvas.
+///
+/// The JS keeps module state in the module definition's `data` object; the
+/// port keeps it inside the [`TwoDModule`] instance (see
+/// `modv_renderers::two_d::modules`), so this struct is the per-instance state
+/// the store's `data` field deliberately does not mirror.
+struct TwoDInstance {
+    /// The module instance (owns `update`/`draw` state).
+    module: Box<dyn TwoDModule>,
+    /// The output-sized canvas, created on first draw and dropped on resize.
+    canvas: Option<Canvas>,
+    /// Size the module was last initialised/resized for.
+    size: Option<(u32, u32)>,
+    /// `init` runs once, on the first frame the module draws.
+    initialised: bool,
+    /// Frames drawn since activation (`ModuleContext::frame`).
+    frame: u64,
+    /// Set when the owning group cleared; the canvas is cleared as part of the
+    /// module's next draw pass (see [`Compositor::request_two_d_clears`]).
+    clear_requested: bool,
+}
+
+impl TwoDInstance {
+    fn new(module: Box<dyn TwoDModule>) -> Self {
+        Self {
+            module,
+            canvas: None,
+            size: None,
+            initialised: false,
+            frame: 0,
+            clear_requested: false,
+        }
+    }
+}
+
 /// The GPU compositor: shader renderer, frame-graph executor, textures.
 pub struct Compositor {
     device: wgpu::Device,
@@ -160,7 +274,7 @@ pub struct Compositor {
     shader: ShaderRenderer,
     executor: Executor,
     surfaces: TextureSurfaces,
-    registry: Vec<ShaderModule>,
+    registry: ModuleRegistry,
     size: (u32, u32),
     main: Option<OutputTexture>,
     module_input: Option<OutputTexture>,
@@ -171,6 +285,11 @@ pub struct Compositor {
     slots: HashMap<String, usize>,
     /// Modules whose slot creation failed; skipped without retrying each frame.
     failed_modules: HashSet<String>,
+    /// Live 2D module instances keyed by module id.
+    two_d: HashMap<String, TwoDInstance>,
+    /// 2D module ids whose instance could not be created; skipped without
+    /// retrying each frame.
+    failed_two_d: HashSet<String>,
     /// One-shot log keys (unknown blend mode, skipped module type, ...).
     warned: HashSet<String>,
     /// Sampler for module input textures — Repeat/Linear, matching
@@ -248,7 +367,7 @@ impl Compositor {
             shader,
             executor,
             surfaces: TextureSurfaces::new(),
-            registry: all_modules(),
+            registry: ModuleRegistry::builtin(),
             size: (0, 0),
             main: None,
             module_input: None,
@@ -256,6 +375,8 @@ impl Compositor {
             group_targets: HashSet::new(),
             slots: HashMap::new(),
             failed_modules: HashSet::new(),
+            two_d: HashMap::new(),
+            failed_two_d: HashSet::new(),
             warned: HashSet::new(),
             group_sampler,
             present_sampler,
@@ -276,13 +397,20 @@ impl Compositor {
         self.drop_output_textures();
         self.group_targets.clear();
         self.surfaces = TextureSurfaces::new();
+        // 2D canvases are output-sized too. Dropping them (rather than
+        // resizing in place) keeps the next frame on one creation path; the
+        // module's `resize` runs when its canvas is rebuilt at the new size.
+        for instance in self.two_d.values_mut() {
+            instance.canvas = None;
+            instance.size = None;
+        }
     }
 
     /// Drop all GPU-side state (used after `engine/restore`).
     ///
     /// Module pipelines are rebuilt lazily; a restored state can reference
-    /// different modules and different groups, so stale slots and textures must
-    /// not survive the swap.
+    /// different modules and different groups, so stale slots, textures and 2D
+    /// instances must not survive the swap.
     pub fn reset(&mut self) {
         self.drop_output_textures();
         self.group_targets.clear();
@@ -291,6 +419,10 @@ impl Compositor {
             self.shader.remove_slot(slot);
         }
         self.failed_modules.clear();
+        for (_, mut instance) in self.two_d.drain() {
+            instance.module.dispose();
+        }
+        self.failed_two_d.clear();
     }
 
     fn drop_output_textures(&mut self) {
@@ -369,6 +501,11 @@ impl Compositor {
                 if let Some(texture) = self.surfaces.get(&target_id) {
                     self.clear_texture(texture, "group-clear");
                 }
+                // JS groups share one 2D context, so clearing the group wipes
+                // every module's drawing surface (`loop.js:319-321` has no
+                // per-module equivalent). With per-module canvases the
+                // equivalent is clearing each canvas the group owns.
+                self.request_two_d_clears(group);
             }
 
             // `loop.js:338-379`: inherit from `lastCanvas` (-1) or an explicit
@@ -445,16 +582,21 @@ impl Compositor {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("shader");
-        if module_type != "shader" {
-            self.warn_once(
-                format!("module-type:{module_type}"),
-                &format!(
-                    "engine: WARN module type '{module_type}' is not rendered in M2; skipping \
-                     (first: {} / {})",
-                    group.name, module.module_name
-                ),
-            );
-            return Ok(());
+        match module_type {
+            // The 2D path is a canvas draw + composite, not a shader slot.
+            "2d" => return self.render_two_d_module(module, module_id, target, frame),
+            "shader" => {}
+            other => {
+                self.warn_once(
+                    format!("module-type:{other}"),
+                    &format!(
+                        "engine: WARN module type '{other}' is not rendered in M3; skipping \
+                         (first: {} / {})",
+                        group.name, module.module_name
+                    ),
+                );
+                return Ok(());
+            }
         }
 
         let Some(slot) = self.slot_for(&module.module_name, module_id) else {
@@ -463,11 +605,7 @@ impl Compositor {
 
         // Pull the prop payload before any mutable borrow of `self`.
         let params = {
-            let Some(definition) = self
-                .registry
-                .iter()
-                .find(|definition| definition.name == module.module_name)
-            else {
+            let Some(definition) = self.registry.shader_module(&module.module_name) else {
                 return Ok(());
             };
             encode_props(definition, &module.props)
@@ -494,11 +632,11 @@ impl Compositor {
             slot,
             &input_view,
             &self.group_sampler,
-            // M2 has no FFT texture; passing `None` binds the renderer's 1×1
-            // zero dummy and `u_fftResolution` must then be 1.0.
+            // No FFT texture yet (WS-9 / M6); passing `None` binds the
+            // renderer's 1×1 zero dummy and `u_fftResolution` must then be 1.0.
             None,
             None,
-            frame.audio,
+            frame.shader_audio(),
             frame.time_seconds,
             frame.frame_index as i32,
             frame.date,
@@ -516,6 +654,204 @@ impl Compositor {
                 .unwrap_or("normal"),
         );
         self.composite(module_output_id(), target.clone(), alpha, blend)
+    }
+
+    /// Mark every 2D canvas owned by `group`'s modules for clearing.
+    ///
+    /// The JS group clears the shared group context, so every module surface is
+    /// empty at the start of the frame (`loop.js:319-321`). The port keeps one
+    /// canvas per module, so each is flagged here and cleared inside its own
+    /// draw pass ([`Canvas::clear_all`] before the draws, which folds the
+    /// clear into the module's single submit). A module that does not render
+    /// keeps the flag until it does, so a disabled module never composites
+    /// stale content when it is re-enabled.
+    fn request_two_d_clears(&mut self, group: &Group) {
+        for module_id in &group.modules {
+            let Some(instance) = self.two_d.get_mut(module_id) else {
+                continue;
+            };
+            if instance.canvas.is_some() {
+                instance.clear_requested = true;
+            }
+        }
+    }
+
+    /// Create the 2D instance for `module_id` if it does not exist yet.
+    ///
+    /// Returns `false` when `module_name` is not a registered 2D module; the
+    /// caller skips the module. The failure is remembered so a group that
+    /// outlives its registration does not warn every frame.
+    fn create_two_d_instance(&mut self, module_name: &str, module_id: &str) -> bool {
+        if self.failed_two_d.contains(module_id) {
+            return false;
+        }
+        match self.registry.create_two_d(module_name) {
+            Some(module) => {
+                self.two_d
+                    .insert(module_id.to_string(), TwoDInstance::new(module));
+                true
+            }
+            None => {
+                self.warn_once(
+                    format!("unregistered-2d:{module_name}"),
+                    &format!(
+                        "engine: WARN 2D module '{module_name}' is not in the registry; skipping"
+                    ),
+                );
+                self.failed_two_d.insert(module_id.to_string());
+                false
+            }
+        }
+    }
+
+    /// Draw one 2D module into its canvas and composite the result onto the
+    /// group target (`loop.js:409-470`, `renderers/2d/index.js:29-96`).
+    ///
+    /// Deliberately no `input_texture` in M3: `Webcam`/`Texture2D` draw
+    /// nothing until media inputs land (M6), exactly like the JS with an unset
+    /// source. The module instance owns its `data`-equivalent state, so
+    /// `update` mutates the instance rather than the store.
+    fn render_two_d_module(
+        &mut self,
+        module: &ModuleInstance,
+        module_id: &str,
+        target: &TextureId,
+        frame: &FrameInfo,
+    ) -> Result<(), CompositorError> {
+        if !self.two_d.contains_key(module_id)
+            && !self.create_two_d_instance(&module.module_name, module_id)
+        {
+            return Ok(());
+        }
+
+        // `loop.js:410-412`: alpha and composite operation come from the meta.
+        let alpha = module
+            .meta
+            .get("alpha")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let blend_token = module
+            .meta
+            .get("compositeOperation")
+            .and_then(Value::as_str)
+            .unwrap_or("normal")
+            .to_string();
+        let blend = self.render_blend_mode(&blend_token);
+
+        let (width, height) = self.size;
+        // Cheap handle clones (Arc): they keep the instance borrow below
+        // separate from the rest of `self`.
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let texture_id = two_d_texture_id(module_id);
+        let props = &module.props;
+        let audio = &frame.audio;
+        // The JS `delta` argument is the `requestAnimationFrame` timestamp
+        // (`renderers/2d/index.js:24`), i.e. a monotonic millisecond clock —
+        // not a frame delta; `Bar.js:62` and `Concentrics.js:78` integrate it.
+        let delta_ms = frame.time_seconds * 1000.0;
+
+        let Some(instance) = self.two_d.get_mut(module_id) else {
+            return Ok(());
+        };
+
+        // Canvas: created on first draw, rebuilt when the output resizes.
+        if instance.canvas.is_none() {
+            instance.canvas = Some(Canvas::new(&device, &queue, width, height));
+        }
+        let size_changed = instance.size != Some((width, height));
+        if size_changed && instance.initialised {
+            if let Some(canvas) = instance.canvas.as_mut() {
+                canvas.resize(&device, &queue, width, height);
+            }
+        }
+        let Some(canvas) = instance.canvas.as_ref() else {
+            return Ok(());
+        };
+        // Register the canvas so the frame-graph composite can sample it.
+        self.surfaces
+            .insert(texture_id.clone(), canvas.texture().clone());
+
+        // `init` once on creation, `resize` when the output size changed.
+        if !instance.initialised {
+            instance.initialised = true;
+            instance.size = Some((width, height));
+            let mut ctx = ModuleContext {
+                canvas_width: width,
+                canvas_height: height,
+                delta: delta_ms,
+                audio,
+                frame: instance.frame,
+                props,
+                device: &device,
+                queue: &queue,
+            };
+            instance.module.init(&mut ctx);
+        } else if size_changed {
+            instance.size = Some((width, height));
+            let mut ctx = ModuleContext {
+                canvas_width: width,
+                canvas_height: height,
+                delta: delta_ms,
+                audio,
+                frame: instance.frame,
+                props,
+                device: &device,
+                queue: &queue,
+            };
+            instance.module.resize(&mut ctx);
+        }
+
+        // The JS calls `update` every frame before `draw` (`loop.js:424-445`);
+        // the returned data is the instance's own state in the port.
+        instance.frame += 1;
+        let frame_index = instance.frame;
+        let mut ctx = ModuleContext {
+            canvas_width: width,
+            canvas_height: height,
+            delta: delta_ms,
+            audio,
+            frame: frame_index,
+            props,
+            device: &device,
+            queue: &queue,
+        };
+        instance.module.update(&mut ctx);
+
+        let Some(canvas) = instance.canvas.as_mut() else {
+            return Ok(());
+        };
+        // The JS renderer wraps `draw` in `save()`/`restore()`; `begin_frame`
+        // is the facade's equivalent state reset. A pending group clear is
+        // folded into the draw pass (`clear_all` makes the first pass load with
+        // `Clear`), so clearing costs no extra submit.
+        canvas.begin_frame();
+        if instance.clear_requested {
+            instance.clear_requested = false;
+            canvas.clear_all();
+        }
+        {
+            let mut draw = DrawContext {
+                canvas,
+                props,
+                audio,
+                delta: delta_ms,
+                frame: frame_index,
+                device: &device,
+                queue: &queue,
+                // Media inputs arrive in M6; until then `Webcam`/`Texture2D`
+                // draw nothing, like the JS with no video/texture source.
+                input_texture: None,
+                input_size: None,
+                is_gallery: false,
+            };
+            instance.module.draw(&mut draw);
+        }
+        if let Some(canvas) = instance.canvas.as_mut() {
+            canvas.submit();
+        }
+
+        self.composite(texture_id, target.clone(), alpha, blend)
     }
 
     /// Main composite (`loop.js:555-663`).
@@ -641,6 +977,21 @@ impl Compositor {
         }
         self.failed_modules
             .retain(|id| live_modules.contains(id.as_str()));
+
+        let stale_two_d: Vec<String> = self
+            .two_d
+            .keys()
+            .filter(|id| !live_modules.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale_two_d {
+            if let Some(mut instance) = self.two_d.remove(&id) {
+                instance.module.dispose();
+            }
+            self.surfaces.remove(&two_d_texture_id(&id));
+        }
+        self.failed_two_d
+            .retain(|id| live_modules.contains(id.as_str()));
     }
 
     /// Set up (once) and return the shader pipeline slot for a module id.
@@ -652,11 +1003,7 @@ impl Compositor {
             return None;
         }
 
-        let Some(definition) = self
-            .registry
-            .iter()
-            .find(|definition| definition.name == module_name)
-        else {
+        let Some(definition) = self.registry.shader_module(module_name) else {
             self.warn_once(
                 format!("unregistered:{module_name}"),
                 &format!(
@@ -1151,11 +1498,17 @@ fn group_texture_id(group_id: &str) -> TextureId {
     TextureId::from(format!("group:{group_id}"))
 }
 
+/// The frame-graph texture id of a 2D module's canvas.
+fn two_d_texture_id(module_id: &str) -> TextureId {
+    TextureId::from(format!("two-d:{module_id}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use modv_engine::engine_state::ModuleInstance;
     use modv_render::{Engine, EngineConfig};
+    use modv_renderers::shader::all_modules;
     use serde_json::json;
 
     const SIZE: u32 = 64;
@@ -1177,7 +1530,7 @@ mod tests {
             time_seconds: 0.0,
             frame_index: 0,
             date: [2026.0, 10.0, 4.0, 0.0],
-            audio: ShaderAudioUniforms::default(),
+            audio: AudioFrame::default(),
         }
     }
 
@@ -1368,5 +1721,229 @@ mod tests {
         // Missing values fall back to the declared default.
         let slots = encode_props(wobble, &json!({}));
         assert_eq!(slots.floats, vec![0.001_f32, 1.0_f32]);
+    }
+
+    // ————————————————— 2D module path —————————————————
+
+    /// A group holding `module_ids`, all render flags explicit.
+    fn group_with(
+        id: &str,
+        name: &str,
+        module_ids: &[&str],
+        enabled: i64,
+        alpha: f64,
+        clearing: bool,
+        inherit: bool,
+        inherit_from: Value,
+    ) -> Group {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": name,
+            "hidden": false,
+            "modules": module_ids,
+            "enabled": enabled,
+            "alpha": alpha,
+            "inherit": inherit,
+            "inheritFrom": inherit_from,
+            "pipeline": false,
+            "clearing": clearing,
+            "compositeOperation": "normal"
+        }))
+        .expect("group decodes")
+    }
+
+    /// A 2D module record (`meta.type == "2d"`).
+    fn two_d_module(module_id: &str, name: &str, props: Value) -> ModuleInstance {
+        serde_json::from_value(json!({
+            "$id": module_id,
+            "$moduleName": name,
+            "meta": {
+                "name": name,
+                "type": "2d",
+                "enabled": true,
+                "alpha": 1.0,
+                "compositeOperation": "normal"
+            },
+            "props": props,
+            "data": {}
+        }))
+        .expect("2D module decodes")
+    }
+
+    fn lit_pixels(pixels: &[u8]) -> usize {
+        pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0).count()
+    }
+
+    fn read_group_texture(compositor: &Compositor, group_id: &str) -> Vec<u8> {
+        let texture = compositor
+            .surfaces
+            .get(&group_texture_id(group_id))
+            .expect("the group rendered a texture");
+        read_back_texture(&compositor.device, &compositor.queue, texture, SIZE, SIZE)
+            .expect("group texture reads back")
+    }
+
+    #[test]
+    fn two_d_module_renders_through_the_canvas_facade() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+
+        let mut state = EngineState::new();
+        state.groups.push(group_with(
+            "group-a",
+            "Effects",
+            &["module-a"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        state.modules.insert(
+            "module-a".to_string(),
+            two_d_module(
+                "module-a",
+                "Ball",
+                json!({
+                    // A resolved palette value so the balls are opaque white
+                    // (`props.color.value`; the module falls back to the raw
+                    // palette's first entry otherwise).
+                    "amount": 12,
+                    "speed": 2.0,
+                    "wrap": false,
+                    "size": 4,
+                    "intensity": 15,
+                    "soundType": false,
+                    "color": { "value": [255.0, 255.0, 255.0] },
+                }),
+            ),
+        );
+
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("frame renders");
+
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        let lit = lit_pixels(&pixels);
+        assert!(lit > 0, "Ball drew nothing through the 2D canvas path");
+        assert!(
+            compositor.two_d.contains_key("module-a"),
+            "the 2D instance is kept per module id"
+        );
+
+        // `reset` drops the 2D instances and canvases with the rest of the
+        // GPU state.
+        compositor.reset();
+        assert!(compositor.two_d.is_empty());
+    }
+
+    #[test]
+    fn two_d_group_inheritance_carries_the_previous_group_pixels() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+
+        let mut state = EngineState::new();
+        state.groups.push(group_with(
+            "group-a",
+            "Effects",
+            &["module-a"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        // The second group clears, inherits the first and draws nothing of its
+        // own (`Texture 2D` without an input texture is a no-op), so whatever
+        // lands on its target came through inheritance (`loop.js:338-379`).
+        state.groups.push(group_with(
+            "group-b",
+            "Foreground",
+            &["module-b"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        state.modules.insert(
+            "module-a".to_string(),
+            two_d_module(
+                "module-a",
+                "Ball",
+                json!({
+                    "amount": 12,
+                    "speed": 2.0,
+                    "wrap": false,
+                    "size": 4,
+                    "intensity": 15,
+                    "soundType": false,
+                    "color": { "value": [255.0, 255.0, 255.0] },
+                }),
+            ),
+        );
+        state.modules.insert(
+            "module-b".to_string(),
+            two_d_module("module-b", "Texture 2D", json!({})),
+        );
+
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("frame renders");
+
+        let first = read_group_texture(&compositor, "group-a");
+        let second = read_group_texture(&compositor, "group-b");
+        assert!(lit_pixels(&first) > 0, "the first group drew nothing");
+        assert!(
+            lit_pixels(&second) > 0,
+            "the second group inherited nothing from the first"
+        );
+        assert_eq!(
+            lit_pixels(&first),
+            lit_pixels(&second),
+            "inheriting at alpha 1 copies the first group's pixels exactly"
+        );
+    }
+
+    #[test]
+    fn set_bands_reaches_the_store_and_the_shader_audio_uniforms() {
+        let mut store = crate::store_ops::Store::new();
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({
+                    "bass": 0.75,
+                    "mid": 0.5,
+                    "treble": 0.25,
+                    // The 16 band cells have no M3 consumer; they are ignored.
+                    "cells": [0.1, 0.2, 0.3],
+                }),
+            )
+            .expect("meyda/SET_BANDS dispatches");
+
+        assert_eq!(store.audio().bass, 0.75);
+        assert_eq!(store.audio().mid, 0.5);
+        assert_eq!(store.audio().treble, 0.25);
+        // The interim source carries bands only; wave/FFT stay silent.
+        assert!(store.audio().wave.iter().all(|sample| *sample == 0.0));
+        assert_eq!(store.audio().beat, 0.0);
+
+        // The window builds `FrameInfo` from the store; the shader uniforms and
+        // the 2D module contexts both read it.
+        let frame = FrameInfo {
+            audio: store.audio().clone(),
+            ..frame_info()
+        };
+        let uniforms = frame.shader_audio();
+        assert_eq!(uniforms.bass, 0.75);
+        assert_eq!(uniforms.mid, 0.5);
+        assert_eq!(uniforms.treble, 0.25);
+        assert!(!uniforms.kick, "beat detection is WS-9 / M6");
     }
 }

@@ -11,7 +11,9 @@
 //! window now renders whatever the store describes (an empty state presents
 //! the near-black clear). The demo scene remains in `modv-renderers` for M4.
 //! `--audio-fixture` is still parsed for the M0 headless/report path but has no
-//! effect here — M2 has no audio analysis, so modules receive zeroed bands.
+//! effect here — M3 takes the audio frame from the store, where the renderer's
+//! audio pump writes it (`meyda/SET_BANDS`); the engine itself does no analysis
+//! yet (WS-9 / M6).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -242,8 +244,11 @@ impl WindowedApp {
             time_seconds: self.start.elapsed().as_secs_f32(),
             frame_index: self.frames_done,
             date: wall_clock_date(self.start.elapsed().as_secs_f32()),
-            // M2 has no audio analysis yet; modules receive silence.
-            audio: Default::default(),
+            // Interim audio source: the renderer's audio pump commits AGC
+            // bands over the control socket (`meyda/SET_BANDS`), so the store
+            // holds the latest frame. There is no engine-side analysis yet
+            // (WS-9 / M6); wave/FFT/features stay zeroed.
+            audio: self.store.audio().clone(),
         };
 
         // 2. Render the state into the compositor's main texture.

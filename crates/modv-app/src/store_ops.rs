@@ -1,10 +1,11 @@
-//! Store semantics — the mutable engine state (WS-1 slice, M2).
+//! Store semantics — the mutable engine state (WS-1 slice, M2/M3).
 //!
-//! [`Store`] wraps an [`EngineState`], a [`DeltaStream`] and a registry built
-//! from [`all_modules`]. Mutations arrive over the control socket as Vuex
-//! action names (`groups/createGroup`, `modules/updateProp`, ...), are applied
-//! to the typed state, and emit the exact `{ type, payload }` records the
-//! renderer's mirror store already replays (`worker/index.worker.js:136-144`).
+//! [`Store`] wraps an [`EngineState`], a [`DeltaStream`], the current
+//! [`AudioFrame`] and the combined [`ModuleRegistry`]. Mutations arrive over
+//! the control socket as Vuex action names (`groups/createGroup`,
+//! `modules/updateProp`, ...), are applied to the typed state, and emit the
+//! exact `{ type, payload }` records the renderer's mirror store already
+//! replays (`worker/index.worker.js:136-144`).
 //!
 //! ## Ported behaviour and its JS anchors
 //!
@@ -23,14 +24,25 @@
 //! * `modules/makeActiveModule` — `modules.js:226-479`. Known modules get the
 //!   registry `meta` and the registry prop defaults; unknown modules get the
 //!   `$status: [{type: "error", ...}]` entry that makes the render loop skip
-//!   them (`modules.js:253-268`).
+//!   them (`modules.js:253-268`). Both shader (`meta.type: "shader"`) and 2D
+//!   (`meta.type: "2d"`) modules are registered (M3, see
+//!   [`crate::module_registry`]).
 //! * `modules/updateProp` — `modules.js:481-562`, with the coercion pipeline in
-//!   [`modv_engine::props::coerce_prop_value`].
+//!   [`modv_engine::props::coerce_prop_value`] fed by the same registry for
+//!   both module kinds.
 //! * `modules/updateMeta` / `modules/updateActiveModule` /
 //!   `modules/removeActiveModule` — `modules.js:564-587`, `:858-888`, `:715`.
+//! * `meyda/SET_BANDS` — the renderer's audio pump commits the AGC bands
+//!   (`meyda.js:88-96`); the engine stores them in [`Store::audio`] for the
+//!   compositor. No engine-side analysis yet (WS-9 / M6).
 //!
 //! ## Known gaps (documented, not silent)
 //!
+//! * **`data` starts empty.** JS initialises the module's `data` object from
+//!   the definition's `data` export (`modules.js:330-338`), but the ported 2D
+//!   modules keep that state inside the [`TwoDModule`] instance instead
+//!   (`modv-renderers::two_d`), so the store's `data` stays `{}` and nothing
+//!   is lost: the compositor owns the instance and its state.
 //! * **Inputs are not created.** JS creates one input per Group control and
 //!   per module prop/meta field (`groups.js:174-197`, `modules.js:291-318`)
 //!   and stores their ids on the object (`alphaInputId`, `$props[x].id`).
@@ -60,8 +72,9 @@ use modv_engine::engine_state::{
 };
 use modv_engine::preset::{PresetError, create_preset_from_state, load_preset_into_state};
 use modv_engine::props::{PropSchema, coerce_prop_value};
-use modv_renderers::shader::uniforms::{PropKind, ShaderProp};
-use modv_renderers::shader::{ShaderModule, all_modules};
+use modv_renderers::two_d::AudioFrame;
+
+use crate::module_registry::ModuleRegistry;
 
 /// Version stamped into the on-disk snapshot document.
 pub const SNAPSHOT_VERSION: i64 = 1;
@@ -104,114 +117,17 @@ impl From<PresetError> for StoreError {
     }
 }
 
-/// The built-in shader module registry, with the prop metadata the store needs
-/// for `modules/updateProp`.
-///
-/// The registry is built once per [`Store`] and per compositor from
-/// [`all_modules`]; the module sources are owned by each copy (they are plain
-/// `String`s, cheap enough to duplicate at startup and impossible to share
-/// without a dependency change in `modv-renderers`).
-pub struct ModuleRegistry {
-    modules: Vec<ShaderModule>,
-}
-
-impl ModuleRegistry {
-    /// The 37 built-in shader modules, in Gallery registration order.
-    pub fn builtin() -> Self {
-        Self {
-            modules: all_modules(),
-        }
-    }
-
-    /// Look up a module by its registration name (`$moduleName`).
-    pub fn get(&self, name: &str) -> Option<&ShaderModule> {
-        self.modules.iter().find(|module| module.name == name)
-    }
-
-    /// The coercion schema for one of a module's props.
-    ///
-    /// Derived from the registry [`ShaderProp`]:
-    ///
-    /// * `type` is the `dataTypes` key for the prop kind (`float` for every
-    ///   in-tree shader prop).
-    /// * `min`/`max` come from the prop declaration.
-    /// * `strict` stays `false` — none of the JS shader props set `strict`
-    ///   (`renderers/shader/modules/*.js`), and `updateProp` only clamps when
-    ///   `strict && min !== undefined && max !== undefined`
-    ///   (`modules.js:512-518`).
-    pub fn prop_schema(&self, module_name: &str, prop: &str) -> Option<PropSchema> {
-        let module = self.get(module_name)?;
-        let declared = module.props.iter().find(|declared| declared.name == prop)?;
-        Some(schema_for(declared))
-    }
-
-    /// The default prop values for a module, as the `props` object of a new
-    /// active module (`getPropDefault`, `utils/get-prop-default.js`).
-    pub fn default_props(&self, module_name: &str) -> Option<Value> {
-        let module = self.get(module_name)?;
-        let mut props = Map::new();
-        for prop in &module.props {
-            props.insert(prop.name.to_string(), default_prop_value(prop));
-        }
-        Some(Value::Object(props))
-    }
-}
-
-/// The `dataTypes` key for a prop kind.
-fn prop_kind_name(kind: PropKind) -> &'static str {
-    match kind {
-        PropKind::Float => "float",
-        PropKind::Int => "int",
-        PropKind::Bool => "bool",
-        PropKind::Enum => "enum",
-        PropKind::Vec2 => "vec2",
-        PropKind::Vec3 => "vec3",
-        PropKind::Vec4 => "vec4",
-        PropKind::Color => "color",
-    }
-}
-
-/// Build a [`PropSchema`] from a registry prop declaration.
-fn schema_for(prop: &ShaderProp) -> PropSchema {
-    PropSchema {
-        type_: prop_kind_name(prop.kind).to_string(),
-        min: Some(prop.min),
-        max: Some(prop.max),
-        // JS shader props never set `strict`; see `ModuleRegistry::prop_schema`.
-        strict: false,
-        abs: false,
-        default: Some(default_prop_value(prop)),
-    }
-}
-
-/// The JSON default for a prop declaration.
-///
-/// `ShaderProp` carries one `f64` default (every in-tree prop is a scalar
-/// float); vector and colour kinds fan that number out to their lanes so the
-/// shape is still a valid value for the type. `bool`/`int`/`enum` are cast to
-/// their canonical scalar form, mirroring `dataTypes.js`.
-fn default_prop_value(prop: &ShaderProp) -> Value {
-    match prop.kind {
-        PropKind::Float => json!(prop.default),
-        PropKind::Int | PropKind::Enum => json!(prop.default.round() as i64),
-        PropKind::Bool => json!(prop.default != 0.0),
-        PropKind::Vec2 => json!([prop.default, prop.default]),
-        PropKind::Vec3 => json!([prop.default, prop.default, prop.default]),
-        PropKind::Vec4 => json!([prop.default, prop.default, prop.default, prop.default]),
-        PropKind::Color => json!({
-            "r": prop.default,
-            "g": prop.default,
-            "b": prop.default,
-            "a": prop.default,
-        }),
-    }
-}
-
 /// The authoritative engine store.
 pub struct Store {
     state: EngineState,
     deltas: DeltaStream,
     registry: ModuleRegistry,
+    /// The current audio frame handed to modules and shader uniforms.
+    ///
+    /// Filled by `meyda/SET_BANDS` from the renderer's audio pump (see
+    /// [`Store::set_bands`]). The engine performs no analysis yet (WS-9 / M6),
+    /// so wave/FFT/features stay zeroed.
+    audio: AudioFrame,
     warned: HashSet<String>,
 }
 
@@ -228,6 +144,7 @@ impl Store {
             state: EngineState::new(),
             deltas: DeltaStream::new(),
             registry: ModuleRegistry::builtin(),
+            audio: AudioFrame::default(),
             warned: HashSet::new(),
         }
     }
@@ -235,6 +152,12 @@ impl Store {
     /// The current state (read-only; the compositor renders from this).
     pub fn state(&self) -> &EngineState {
         &self.state
+    }
+
+    /// The current audio frame (read-only; the compositor clones it into
+    /// [`crate::compositor::FrameInfo`]).
+    pub fn audio(&self) -> &AudioFrame {
+        &self.audio
     }
 
     /// Remove and return the pending `{ type, payload }` records, in issue
@@ -277,6 +200,7 @@ impl Store {
             "modules/updateMeta" => self.update_meta(params),
             "modules/updateActiveModule" => self.update_active_module(params),
             "modules/removeActiveModule" => self.remove_active_module(params),
+            "meyda/SET_BANDS" => self.set_bands(params),
             other => {
                 if self.warned.insert(format!("action:{other}")) {
                     eprintln!("engine: WARN dispatch {other} not implemented yet (M2+)");
@@ -507,6 +431,12 @@ impl Store {
     // ————————————————— Modules —————————————————
 
     /// `modules/makeActiveModule` (`modules.js:226-479`).
+    ///
+    /// Both registry kinds are accepted; `meta.type` comes from the registry
+    /// (`"shader"` / `"2d"`). `data` starts empty: the ported 2D modules keep
+    /// their mutable state inside the module instance the compositor owns, so
+    /// unlike JS there is no module `data` export to copy
+    /// (`modules.js:330-338`).
     fn make_active_module(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
         let action = "modules/makeActiveModule";
         let module_name = required_str(params, action, "moduleName")?.to_string();
@@ -521,14 +451,14 @@ impl Store {
             .unwrap_or(false);
         let id = crate::ids::uuid_v4();
 
-        let (meta, props, status) = match self.registry.get(&module_name) {
-            Some(definition) => {
+        let (meta, props, status) = match self.registry.meta_fields(&module_name) {
+            Some(registry_meta) => {
                 let props = self
                     .registry
                     .default_props(&module_name)
                     .unwrap_or_else(|| json!({}));
                 (
-                    known_module_meta(definition, &module_meta, is_gallery),
+                    known_module_meta(registry_meta, &module_meta, is_gallery),
                     props,
                     Vec::new(),
                 )
@@ -761,6 +691,41 @@ impl Store {
         Ok(Value::Null)
     }
 
+    // ————————————————— Audio —————————————————
+
+    /// `meyda/SET_BANDS` (`meyda.js:88-96`): the renderer's audio pump commits
+    /// `{ bass, mid, treble, cells }` over the control socket.
+    ///
+    /// Only the three AGC bands are taken. `cells` (the 16 log-spaced band
+    /// cells `audio-bands.js` publishes) has no slot in
+    /// [`modv_renderers::two_d::AudioFrame`] and no M3 module reads it; the
+    /// cells stay a renderer-side visualisation (WS-9). Wave, FFT and the
+    /// Meyda feature bag remain zeroed — real analysis lands with M6.
+    ///
+    /// No delta is emitted: the renderer's mirror computed these values
+    /// itself, so echoing every audio frame back over the socket would be
+    /// pure traffic. Unknown keys are ignored so a richer band payload is
+    /// forward-compatible.
+    fn set_bands(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        // The renderer sends the bands object as the payload; accept a
+        // `{ bands: {...} }` wrapper too.
+        let bands = params
+            .get("bands")
+            .and_then(Value::as_object)
+            .unwrap_or(params);
+
+        if let Some(bass) = finite_f32(bands.get("bass")) {
+            self.audio.bass = bass;
+        }
+        if let Some(mid) = finite_f32(bands.get("mid")) {
+            self.audio.mid = mid;
+        }
+        if let Some(treble) = finite_f32(bands.get("treble")) {
+            self.audio.treble = treble;
+        }
+        Ok(Value::Null)
+    }
+
     // ————————————————— Snapshot / restore —————————————————
 
     /// The six-key preset document plus `version` and the render order.
@@ -888,28 +853,11 @@ const CREATE_GROUP_KEYS: &[&str] = &[
 /// `modules.js:247-359`: registry meta, then the JS defaults for
 /// name/alpha/enabled/compositeOperation, then the caller's `moduleMeta`.
 fn known_module_meta(
-    definition: &ShaderModule,
+    registry_meta: Map<String, Value>,
     module_meta: &Map<String, Value>,
     is_gallery: bool,
 ) -> Value {
-    let mut meta = Map::new();
-    meta.insert("name".to_string(), json!(definition.name));
-    meta.insert("author".to_string(), json!(definition.meta_author));
-    meta.insert("version".to_string(), json!(definition.meta_version));
-    meta.insert("type".to_string(), json!("shader"));
-    if let Some(category) = definition.category {
-        meta.insert("category".to_string(), json!(category));
-    }
-    if !definition.audio_features.is_empty() {
-        meta.insert(
-            "audioFeatures".to_string(),
-            json!(definition.audio_features),
-        );
-    }
-    meta.insert(
-        "previewWithOutput".to_string(),
-        json!(definition.preview_with_output),
-    );
+    let mut meta = registry_meta;
 
     // JS defaults applied after the registry meta (`modules.js:344-346`).
     meta.insert("alpha".to_string(), json!(1));
@@ -975,6 +923,14 @@ fn number_value(value: &Value, fallback: f64) -> f64 {
 
 fn number_field(params: &Map<String, Value>, key: &str) -> Option<f64> {
     params.get(key).and_then(Value::as_f64)
+}
+
+/// A finite `f32` from a JSON value (`None` for absent/NaN/±∞).
+fn finite_f32(value: Option<&Value>) -> Option<f32> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|number| number.is_finite())
+        .map(|number| number as f32)
 }
 
 fn int_value(value: &Value, fallback: i64) -> i64 {
@@ -1519,6 +1475,121 @@ mod tests {
 
         let id = module["$id"].as_str().expect("id");
         assert!(store.state().modules.contains_key(id));
+    }
+
+    #[test]
+    fn make_active_module_two_d_uses_registry_meta_and_props() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Ball"}))
+            .expect("makeActiveModule dispatches");
+
+        assert_eq!(module["$moduleName"], json!("Ball"));
+        assert_eq!(module["meta"]["name"], json!("Ball"));
+        assert_eq!(module["meta"]["type"], json!("2d"));
+        assert_eq!(module["meta"]["author"], json!("2xAA"));
+        assert_eq!(module["meta"]["version"], json!("1.0.1"));
+        assert_eq!(module["meta"]["audioFeatures"], json!(["zcr", "rms"]));
+        // Ball declares no category and does not set `previewWithOutput`.
+        assert!(module["meta"].get("category").is_none());
+        assert!(module["meta"].get("previewWithOutput").is_none());
+        // The JS defaults and gallery flag still apply.
+        assert_eq!(module["meta"]["alpha"], json!(1));
+        assert_eq!(module["meta"]["enabled"], json!(false));
+        assert_eq!(module["meta"]["compositeOperation"], json!("normal"));
+        assert_eq!(module["meta"]["isGallery"], json!(false));
+
+        // Prop defaults come from the 2D descriptors.
+        assert_eq!(module["props"]["amount"], json!(10));
+        assert_eq!(module["props"]["speed"], json!(2.0));
+        assert_eq!(module["props"]["wrap"], json!(false));
+        assert_eq!(module["props"]["size"], json!(2));
+        assert!(module["props"]["color"]["data"].is_array());
+
+        // `data` is empty: the module instance owns that state (documented).
+        assert_eq!(module["data"], json!({}));
+        assert_eq!(module["$props"], json!({}));
+        assert!(module["$status"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn make_active_module_two_d_keeps_preview_with_output() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Pixelate"}),
+            )
+            .expect("makeActiveModule dispatches");
+        assert_eq!(module["meta"]["type"], json!("2d"));
+        assert_eq!(module["meta"]["category"], json!("effects"));
+        assert_eq!(module["meta"]["previewWithOutput"], json!(true));
+
+        // Caller meta still wins over the registry.
+        let custom = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Pixelate", "moduleMeta": {"alpha": 0.25}}),
+            )
+            .expect("makeActiveModule dispatches");
+        assert_eq!(custom["meta"]["alpha"], json!(0.25));
+    }
+
+    #[test]
+    fn update_prop_coerces_two_d_strict_props() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Polygon"}))
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+
+        // Polygon.js:29-37 sets `strict: true`, `min: 1`, `max: 20` on an int
+        // prop: clamp then round (`modules.js:512-526`).
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "strokeWeight", "data": {"value": 99}}),
+            )
+            .expect("updateProp dispatches");
+        // The coercion pipeline stores numbers as `f64` values (`Number::Float`),
+        // so compare with float literals.
+        assert_eq!(
+            store.state().modules[&id].props["strokeWeight"],
+            json!(20.0)
+        );
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "strokeWeight", "data": {"value": -2.5}}),
+            )
+            .expect("updateProp dispatches");
+        assert_eq!(store.state().modules[&id].props["strokeWeight"], json!(1.0));
+
+        // The delta carries the 2D prop's data type.
+        let deltas = store.drain_deltas();
+        let last = deltas.last().expect("a delta was emitted");
+        assert_eq!(last.r#type, "modules/UPDATE_ACTIVE_MODULE_PROP");
+        assert_eq!(last.payload["data"]["type"], json!("int"));
+    }
+
+    #[test]
+    fn set_bands_updates_the_stored_audio_frame() {
+        let mut store = Store::new();
+        assert_eq!(store.audio().bass, 0.0);
+
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({"bass": 0.5, "mid": 0.25, "treble": 0.125, "cells": [0.1]}),
+            )
+            .expect("meyda/SET_BANDS dispatches");
+
+        assert_eq!(store.audio().bass, 0.5);
+        assert_eq!(store.audio().mid, 0.25);
+        assert_eq!(store.audio().treble, 0.125);
+        // The renderer computed the bands, so no delta is echoed back.
+        assert!(store.drain_deltas().is_empty());
     }
 
     #[test]
