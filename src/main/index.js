@@ -13,6 +13,8 @@ import { openFile } from "./open-file";
 import { getExistingMediaManager } from "./media-manager";
 import { markQuitting, registerShutdownHandlers, runCleanup } from "./shutdown";
 import { registerSystemAudioIpc, stopActive } from "./system-audio";
+import { EngineSupervisor } from "./engine-supervisor";
+import { registerEngineIpc } from "./engine-ipc";
 import { createWindow, windows } from "./windows";
 import { flushWindowState } from "./window-state";
 
@@ -33,6 +35,12 @@ logger.info("VmodV starting", {
 
 // Relaunching during shutdown used to stack complete process trees, each
 // writing to the same userData directory. Only the first instance may run.
+// The Rust engine is opt-in during the migration (docs/rust-hybrid.md) —
+// set MODV_ENGINE=1 to run with the engine instead of the legacy worker.
+// The supervisor exists on the primary instance only; the restart budget and
+// snapshot restore are handled inside it (docs/rust-hybrid.md, WS-14).
+const engineSupervisor = process.env.MODV_ENGINE === "1" ? new EngineSupervisor() : null;
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
@@ -57,6 +65,7 @@ if (!hasSingleInstanceLock) {
     getWindows: () => windows,
     stopMediaWatcher: () => getExistingMediaManager()?.stop(),
     stopSystemAudio: stopActive,
+    stopEngine: () => engineSupervisor?.shutdown(),
   });
 }
 
@@ -194,6 +203,13 @@ app.on("ready", async () => {
   }
 
   registerSystemAudioIpc();
+  registerEngineIpc(() => engineSupervisor);
+
+  // The engine restores its snapshot itself from --state; crash-and-restart
+  // therefore needs no state bytes from us.
+  if (engineSupervisor) {
+    void engineSupervisor.start();
+  }
 
   protocol.handle(APP_SCHEME, (request) => {
     const newPath =

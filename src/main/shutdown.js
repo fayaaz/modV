@@ -9,6 +9,7 @@ let dependencies = {
   getWindows: () => ({}),
   stopMediaWatcher: () => {},
   stopSystemAudio: () => {},
+  stopEngine: () => {},
 };
 
 function getApp() {
@@ -124,6 +125,19 @@ async function doCleanup() {
     }
   } catch (e) {
     // A broken audio capture must not stop the quit.
+  }
+
+  try {
+    // The engine gets engine/shutdown (≤ 1 s), then SIGTERM/SIGKILL (see
+    // engine-supervisor.js). It flushes its snapshot before exiting so the
+    // next launch can restore it.
+    const result = dependencies.stopEngine();
+
+    if (result && typeof result.then === "function") {
+      tasks.push(result.catch(() => {}));
+    }
+  } catch (e) {
+    // A broken engine must not stop the quit.
   }
 
   if (tasks.length) {
