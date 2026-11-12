@@ -59,20 +59,32 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## M2 — Shader / ISF
 
-- [ ] modv-engine: state model (groups, modules, inputs, links, props coercion,
-      blend modes, render order, SWAP), delta stream + deep-equal mirror test
-- [ ] modv-render: FrameGraph (Group/Composite/RowFade/SceneTransition/Present),
-      LRU texture pool, blend.wgsl for non-separable modes
-- [ ] modv-renderers/shader: uniform contract, wrapper shim, 37 modules → WGSL
-- [ ] modv-renderers/isf: parser, macro expander, ES1→3 upgrade, prop
+- [x] modv-engine: state model (groups, modules, inputs, links, props coercion,
+      blend modes, render order, SWAP), delta stream; preset round-trip
+      (deep-equal on the six-key format, scene/playlist detection); 96 tests
+- [x] modv-render: FrameGraph (Group/Composite/RowFade/SceneTransition/Present
+      node shapes), LRU texture pool, blend WGSL for all 28 modes; headless
+      lavapipe pixel tests (21)
+- [x] modv-renderers/shader: uniform contract, wrapper shim, 37 modules → WGSL,
+      naga-validated (24 tests)
+- [x] modv-renderers/isf: parser, macro expander, ES1→3 upgrade, prop
       synthesis, multi-pass runtime, naga translator, overrides, corpus report
-- [ ] Preset round-trip deep-equal test (fixtures)
+      — 344/351 fragments translate without an override (98.0%)
+- [x] engine integration: EngineState → render graph → present → preview ring;
+      real store mutations + delta stream; verified end-to-end in the packaged
+      app via CDP (engine-created group + Point10 Invert → 100% white preview)
+- [ ] 2D modules render through the engine compositor (facade exists, wiring)
+- [ ] three/Cube renderer
+- [ ] mirror parity: Rust delta stream replayed into the JS mirror store
+      yields a deep-equal preset
 
 ## M3 — 2D modules
 
-- [ ] wgpu 2D facade (path builder, fill/stroke, clip, transforms,
-      drawImage, text via cosmic-text) + unit tests for the 22 ops
-- [ ] 15 hand-written 2D modules ported, golden images
+- [x] wgpu 2D facade (path builder, fill/stroke, clip, transforms,
+      drawImage, text via cosmic-text) + tests for the 22 ops
+- [x] 15 hand-written 2D modules ported, smoke renders on lavapipe
+- [ ] 2D modules wired into the engine compositor (per-module canvases,
+      clearing semantics, module registry in modv-app)
 - [ ] three Cube port (native WGSL)
 
 ## M4 — Point10
