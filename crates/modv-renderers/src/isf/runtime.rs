@@ -99,6 +99,36 @@ fn vs_main(@builtin(vertex_index) index: u32) -> IsfVertexOut {
 }
 "#;
 
+/// The vertex shader for texture-free ISF generators.
+///
+/// Legacy ISF runs on WebGL, where `isf_FragNormCoord` is bottom-left
+/// (`(gl_Position.x + 1) / 2`, `(gl_Position.y + 1) / 2`). A shader with no
+/// texture inputs cannot be affected by sampling orientation, so it gets the
+/// legacy coordinate system: procedural posters (`rave.exe`) and other
+/// coordinate-built generators would otherwise render upside down. Shaders
+/// that sample textures keep the top-left varying above, which is what makes
+/// `IMG_NORM_PIXEL`/`texture2D` sampling match the wgpu input textures.
+pub const BOTTOM_LEFT_VERTEX_WGSL: &str = r#"
+struct IsfVertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) isf_FragNormCoord: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> IsfVertexOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    let position = positions[index];
+    var out: IsfVertexOut;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    out.isf_FragNormCoord = vec2<f32>((position.x + 1.0) * 0.5, (position.y + 1.0) * 0.5);
+    return out;
+}
+"#;
+
 /// The paint-to-screen blit (`ISFRenderer.paintToScreen`).
 const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var source_texture: texture_2d<f32>;
@@ -836,11 +866,27 @@ impl IsfRuntime {
                 immediate_size: 0,
             });
 
+        // A shader with no texture bindings is a pure generator: use the
+        // legacy bottom-left coordinate system. Anything that samples a
+        // texture keeps the wgpu-native top-left one, so input sampling stays
+        // upright.
+        let bottom_left = slots.is_empty();
         let vertex = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("modV ISF vertex"),
-                source: wgpu::ShaderSource::Wgsl(DEFAULT_VERTEX_WGSL.into()),
+                label: Some(if bottom_left {
+                    "modV ISF vertex (bottom-left)"
+                } else {
+                    "modV ISF vertex"
+                }),
+                source: wgpu::ShaderSource::Wgsl(
+                    if bottom_left {
+                        BOTTOM_LEFT_VERTEX_WGSL
+                    } else {
+                        DEFAULT_VERTEX_WGSL
+                    }
+                    .into(),
+                ),
             });
         let fragment = self
             .device
@@ -922,6 +968,7 @@ impl IsfRuntime {
                 format,
                 layout.size,
                 slots.len(),
+                bottom_left,
                 &pipeline_layout,
                 &vertex,
                 &fragment,
@@ -954,11 +1001,15 @@ impl IsfRuntime {
         format: wgpu::TextureFormat,
         uniform_size: usize,
         texture_slots: usize,
+        bottom_left: bool,
         pipeline_layout: &wgpu::PipelineLayout,
         vertex: &wgpu::ShaderModule,
         fragment: &wgpu::ShaderModule,
     ) -> wgpu::RenderPipeline {
-        let cache_key = format!("{name}|{format:?}|{uniform_size}|{texture_slots}");
+        let cache_key = format!(
+            "{name}|{format:?}|{uniform_size}|{texture_slots}|{}",
+            if bottom_left { "bl" } else { "tl" }
+        );
         if let Some(pipeline) = self.pipelines.get(&cache_key) {
             return pipeline.clone();
         }
@@ -1494,6 +1545,18 @@ mod tests {
 
     fn doc(source: &str) -> IsfDocument {
         parse_isf(source, None).expect("test shader parses")
+    }
+
+    #[test]
+    fn texture_free_generators_use_the_legacy_bottom_left_coordinates() {
+        // Legacy ISF (WebGL) gives generators a bottom-left origin. A
+        // texture-free shader cannot be affected by input sampling, so it can
+        // use the same convention; otherwise procedural posters such as
+        // `rave.exe` render upside down. Shaders with textures keep the
+        // top-left varying so sampling matches the wgpu input textures.
+        assert!(DEFAULT_VERTEX_WGSL.contains("(1.0 - position.y)"));
+        assert!(BOTTOM_LEFT_VERTEX_WGSL.contains("(position.y + 1.0)"));
+        assert!(!BOTTOM_LEFT_VERTEX_WGSL.contains("(1.0 - position.y)"));
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
