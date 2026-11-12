@@ -103,7 +103,13 @@ pub fn clamp_preview_dimension(value: u32) -> u32 {
     value.clamp(1, MAX_PREVIEW_DIMENSION)
 }
 
-/// Why a `preview/module` request could not be answered.
+/// Why a preview request could not be answered.
+///
+/// Both preview kinds share this type: `preview/module` produces
+/// [`PreviewError::ModuleNotFound`]/[`PreviewError::Render`], and
+/// `preview/scene` adds [`PreviewError::SceneNotFound`]/
+/// [`PreviewError::SceneRowEmpty`]. The renderer treats every code as "no
+/// preview yet", keeps the last frame and retries on a short backoff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewError {
     /// The module name is not registered with the engine (the renderer backs
@@ -111,6 +117,17 @@ pub enum PreviewError {
     ModuleNotFound(String),
     /// The module is registered but its isolated frame could not be rendered.
     Render(String),
+    /// No Scene with that id is in the store (it may have been removed or
+    /// renamed since the UI last synced).
+    SceneNotFound(String),
+    /// The Scene exists but the requested row is out of range, holes, or has
+    /// no Module the engine can render.
+    SceneRowEmpty {
+        /// The Scene the request referenced.
+        scene_id: String,
+        /// The requested grid row.
+        row: usize,
+    },
 }
 
 impl PreviewError {
@@ -119,6 +136,8 @@ impl PreviewError {
         match self {
             Self::ModuleNotFound(_) => "module_not_found",
             Self::Render(_) => "preview_failed",
+            Self::SceneNotFound(_) => "scene_not_found",
+            Self::SceneRowEmpty { .. } => "scene_row_empty",
         }
     }
 
@@ -129,6 +148,10 @@ impl PreviewError {
                 format!("module \"{name}\" is not registered with the engine")
             }
             Self::Render(detail) => detail.clone(),
+            Self::SceneNotFound(id) => format!("no Scene with id \"{id}\" is in the engine store"),
+            Self::SceneRowEmpty { scene_id, row } => {
+                format!("Scene \"{scene_id}\" has no renderable Group at row {row}")
+            }
         }
     }
 }
@@ -138,6 +161,13 @@ impl std::fmt::Display for PreviewError {
         match self {
             Self::ModuleNotFound(name) => write!(f, "module \"{name}\" is not registered"),
             Self::Render(detail) => write!(f, "{detail}"),
+            Self::SceneNotFound(id) => write!(f, "no Scene with id \"{id}\""),
+            Self::SceneRowEmpty { scene_id, row } => {
+                write!(
+                    f,
+                    "Scene \"{scene_id}\" has no renderable Group at row {row}"
+                )
+            }
         }
     }
 }

@@ -305,6 +305,17 @@ class ModV {
         store.commit("modules/ADD_ACTIVE_MODULE", { module });
       }
 
+      // Engine mode has no worker to register module definitions, so the
+      // engine ships the registry (meta + prop descriptors) with the sync.
+      // The Gallery reads `state.modules.registered`.
+      if (snapshot.registered && typeof snapshot.registered === "object") {
+        for (const module of Object.values(snapshot.registered)) {
+          if (module && module.meta && module.meta.name) {
+            store.commit("modules/ADD_REGISTERED_MODULE", { module });
+          }
+        }
+      }
+
       const inputState = snapshot.inputs || {};
       for (const id of Object.keys(store.state.inputs.inputs || {})) {
         store.commit("inputs/REMOVE_INPUT", { inputId: id });
@@ -1164,6 +1175,27 @@ class ModV {
     }
 
     return this.engineClient.requestModulePreview(moduleName, width, height);
+  }
+
+  /**
+   * Scene hover preview for `sceneId` at `rowIndex`, engine mode only.
+   *
+   * `Scenes.vue` calls this while a cell is hovered and paints the returned
+   * `{ width, height, data }` into the cell's canvas with `putImageData`.
+   * Legacy mode renders the preview in the worker, so this resolves to null
+   * and the component keeps its byte-identical worker path.
+   */
+  requestScenePreview(sceneId, rowIndex, width, height) {
+    if (!this.engineMode) {
+      return Promise.resolve(null);
+    }
+
+    return this.engineClient.requestScenePreview(
+      sceneId,
+      rowIndex,
+      width,
+      height,
+    );
   }
 
   async generatePreset() {

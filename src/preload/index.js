@@ -48,6 +48,17 @@ const engineApi = {
       height,
     });
   },
+  // Scene hover previews: the engine renders the Scene cell's saved
+  // Group/Module snapshots off-graph and answers with { width, height, pixels }
+  // (base64 RGBA8), decoded in application/engine-client.js.
+  requestScenePreview({ sceneId, rowIndex, width, height } = {}) {
+    return ipcRenderer.invoke("engine/preview-scene", {
+      sceneId,
+      rowIndex,
+      width,
+      height,
+    });
+  },
   getState() {
     return ipcRenderer.invoke("engine/get-state");
   },

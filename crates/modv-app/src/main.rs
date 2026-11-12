@@ -15,6 +15,7 @@ mod module_registry;
 mod performance;
 mod report;
 mod scene_ops;
+mod scene_preview;
 mod store_ops;
 mod supervisor;
 mod window;

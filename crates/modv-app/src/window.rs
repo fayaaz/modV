@@ -34,13 +34,16 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 use crate::cli::Cli;
 use crate::compositor::{Compositor, FrameInfo, RowFadeInfo};
 use crate::report::{AdapterSummary, report_json};
+use crate::scene_preview;
 use crate::store_ops::Store;
-use crate::supervisor::EngineSupervisor;
+use crate::supervisor::{EngineSupervisor, PreviewKind};
 
-/// Most Gallery thumbnail requests answered in one frame.
+/// Most preview requests answered in one frame.
 ///
 /// Each answer can block on a GPU read-back (≤ 1 MiB at 512²), so a burst of
-/// hover requests rolls over to later frames instead of stalling present.
+/// hover requests rolls over to later frames instead of stalling present. The
+/// cap is shared by Gallery thumbnails (`preview/module`) and Scene hover
+/// cells (`preview/scene`).
 const MAX_PREVIEWS_PER_FRAME: usize = 4;
 
 /// Run the windowed event loop. Returns an error string on fatal failures
@@ -393,11 +396,12 @@ impl WindowedApp {
             surface.reconfigure(&engine.device);
         }
 
-        // 2b. Answer queued Gallery thumbnail requests (`preview/module`).
-        // Bounded per frame so a burst of hover requests cannot stall present;
-        // the rest stay queued for the next frame. Answered after the present
-        // so the read-back cost lands between frames.
-        self.answer_module_previews();
+        // 2b. Answer queued preview requests (`preview/module` Gallery
+        // thumbnails and `preview/scene` Scene hover cells). Bounded per frame
+        // so a burst of hover requests cannot stall present; the rest stay
+        // queued for the next frame. Answered after the present so the
+        // read-back cost lands between frames.
+        self.answer_previews();
 
         // 3. Publish a preview frame at the supervisor's cadence (≤ 30 fps).
         if let Some(supervisor) = &mut self.supervisor {
@@ -449,14 +453,16 @@ impl WindowedApp {
         }
     }
 
-    /// Answer up to [`MAX_PREVIEWS_PER_FRAME`] queued `preview/module`
-    /// requests, leaving the rest for the next frame.
+    /// Answer up to [`MAX_PREVIEWS_PER_FRAME`] queued preview requests,
+    /// leaving the rest for the next frame.
     ///
     /// The supervisor only queues requests (it has no compositor), and the
-    /// reply can block on a GPU read-back, so the work is capped here. Before
-    /// the window/compositor exist the queue simply waits; when the run stops,
-    /// [`Self::fail_pending_previews`] answers whatever is left.
-    fn answer_module_previews(&mut self) {
+    /// reply can block on a GPU read-back, so the work is capped here; the cap
+    /// is shared between Gallery thumbnails (`preview/module`) and Scene hover
+    /// cells (`preview/scene`). Before the window/compositor exist the queue
+    /// simply waits; when the run stops, [`Self::fail_pending_previews`]
+    /// answers whatever is left.
+    fn answer_previews(&mut self) {
         let (Some(supervisor), Some(compositor)) = (&mut self.supervisor, &mut self.compositor)
         else {
             return;
@@ -476,12 +482,25 @@ impl WindowedApp {
 
         let registry = self.store.registry_arc();
         for request in requests {
-            let result = compositor.render_module_preview(
-                registry.as_ref(),
-                &request.module_name,
-                request.width,
-                request.height,
-            );
+            let result = match &request.kind {
+                PreviewKind::Module { module_name } => compositor.render_module_preview(
+                    registry.as_ref(),
+                    module_name,
+                    request.width,
+                    request.height,
+                ),
+                PreviewKind::Scene {
+                    scene_id,
+                    row_index,
+                } => scene_preview::render_scene_preview(
+                    compositor,
+                    &self.store,
+                    scene_id,
+                    *row_index,
+                    request.width,
+                    request.height,
+                ),
+            };
             supervisor.complete_preview(request, result);
         }
     }

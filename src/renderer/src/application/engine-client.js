@@ -20,6 +20,22 @@ const FORMAT_BGRA8 = 2;
 const BYTES_PER_PIXEL = 4;
 
 /**
+ * Scene hover previews poll at the legacy worker's cadence
+ * (`scene-preview.js` `PREVIEW_FPS = 30`).
+ */
+const SCENE_PREVIEW_FPS = 30;
+
+/**
+ * Back-off after a failed or empty Scene preview.
+ *
+ * The Scene may not exist in the engine yet (a just-saved Scene can reach the
+ * engine a moment after the mirror shows it), so a fast retry would only
+ * repeat the same error. 500 ms keeps a hover responsive without flooding the
+ * control socket.
+ */
+const SCENE_PREVIEW_RETRY_MS = 500;
+
+/**
  * Pure throttle used by both preview surfaces: is a pull due at `nowMs`?
  *
  * `lastMs` is the timestamp of the last pull; `null`/`undefined` means "nothing
@@ -171,6 +187,116 @@ function modulePreviewFromResponse(response) {
   return toFrameData(source, { width: w, height: h, format: response.format });
 }
 
+/**
+ * `preview/scene` reply → frame data for a Scene grid cell.
+ *
+ * The engine returns `{ width, height, pixels }` with base64 RGBA8 (raw bytes
+ * are accepted too). The frame is tightly packed, but a `stride` is honoured
+ * when present (the same bounded-read shape as the output preview), so a
+ * future padded transport keeps working. Anything that does not cover the
+ * declared geometry is treated as "no preview yet".
+ */
+function scenePreviewFromResponse(response) {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+
+  const w = Number(response.width);
+  const h = Number(response.height);
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) {
+    return null;
+  }
+
+  const source =
+    typeof response.pixels === "string"
+      ? decodeBase64Pixels(response.pixels)
+      : response.pixels;
+  if (!source) {
+    return null;
+  }
+
+  const rowBytes = w * BYTES_PER_PIXEL;
+  const stride =
+    Number.isInteger(response.stride) && response.stride >= rowBytes
+      ? response.stride
+      : rowBytes;
+  // The last row only needs `rowBytes`; a tightly packed frame must be exactly
+  // one frame, so a truncated or oversized buffer is refused.
+  if (source.length < stride * (h - 1) + rowBytes) {
+    return null;
+  }
+  if (stride === rowBytes && source.length !== rowBytes * h) {
+    return null;
+  }
+
+  return toFrameData(source, {
+    width: w,
+    height: h,
+    stride,
+    format: response.format,
+  });
+}
+
+/**
+ * Legacy Scene-preview runtime key (`scene-preview.js`: `` `${sceneId}:${row}` ``).
+ *
+ * @returns {string | null} null for a missing id or a non-integer row.
+ */
+function scenePreviewKey(sceneId, rowIndex) {
+  if (rowIndex === null || rowIndex === undefined) {
+    return null;
+  }
+
+  const row = Number(rowIndex);
+  if (typeof sceneId !== "string" || sceneId.length === 0) {
+    return null;
+  }
+  if (!Number.isInteger(row) || row < 0) {
+    return null;
+  }
+  return `${sceneId}:${row}`;
+}
+
+/**
+ * Whether hovering a Scene cell must transfer its canvas to the worker.
+ *
+ * Transfer is a one-way operation on the DOM canvas. In engine mode the
+ * renderer keeps the canvas and paints the engine's frames with
+ * `putImageData`, so transferring it would make the cell undrawable; the
+ * legacy worker path still transfers exactly once per canvas.
+ */
+function shouldTransferScenePreviewCanvas({ engineMode, alreadyTransferred }) {
+  return !engineMode && !alreadyTransferred;
+}
+
+/**
+ * Next Scene-preview poll delay in ms.
+ *
+ * - `null` while a request is in flight or while the document is hidden (the
+ *   caller skips the pull and re-checks on its own cadence);
+ * - [`SCENE_PREVIEW_RETRY_MS`] after a failed/empty response;
+ * - otherwise the remaining time until the ~30 fps cadence (`0` = now).
+ */
+function scenePreviewPollDelay(
+  nowMs,
+  lastMs,
+  { inFlight = false, hidden = false, failures = 0 } = {},
+) {
+  if (inFlight || hidden) {
+    return null;
+  }
+  if (Number.isFinite(failures) && failures > 0) {
+    return SCENE_PREVIEW_RETRY_MS;
+  }
+  if (lastMs === null || lastMs === undefined) {
+    return 0;
+  }
+  if (!Number.isFinite(nowMs) || !Number.isFinite(lastMs)) {
+    return 0;
+  }
+  return Math.max(0, lastMs + 1000 / SCENE_PREVIEW_FPS - nowMs);
+}
+
 export default class EngineClient {
   constructor() {
     if (!window.engine) {
@@ -309,6 +435,47 @@ export default class EngineClient {
       });
   }
 
+  /**
+   * Scene cell preview for `sceneId` at `rowIndex`, rendered by the engine at
+   * `width` × `height`. Resolves to `{ width, height, data }` or null.
+   *
+   * The engine side is `preview/scene`, which renders the Scene's saved
+   * Group/Module snapshots in an isolated compositor. Errors (unknown Scene,
+   * empty row, engine busy) resolve to null so the cell keeps its last frame
+   * and the caller retries on its backoff cadence. Only the first failure per
+   * cell is logged — a hover polls at ~30 fps.
+   */
+  requestScenePreview(sceneId, rowIndex, width, height) {
+    const key = scenePreviewKey(sceneId, rowIndex);
+    if (key === null) {
+      return Promise.resolve(null);
+    }
+
+    let pending;
+    try {
+      pending = this.engine.requestScenePreview({
+        sceneId,
+        rowIndex: Number(rowIndex),
+        width,
+        height,
+      });
+    } catch (error) {
+      this._previewFailed(`scene:${key}`, error);
+      return Promise.resolve(null);
+    }
+
+    return Promise.resolve(pending)
+      .then((response) => {
+        const frame = scenePreviewFromResponse(response);
+        if (frame) this._previewWarned.delete(`scene:${key}`);
+        return frame;
+      })
+      .catch((error) => {
+        this._previewFailed(`scene:${key}`, error);
+        return null;
+      });
+  }
+
   /** Log the first failure of each preview surface; tiles poll, so once is enough. */
   _previewFailed(key, error) {
     if (this._previewWarned.has(key)) {
@@ -340,7 +507,11 @@ export {
   decodeBase64Pixels,
   modulePreviewFromResponse,
   outputPreviewFromResponse,
+  scenePreviewFromResponse,
+  scenePreviewKey,
+  scenePreviewPollDelay,
   shouldRefresh,
+  shouldTransferScenePreviewCanvas,
   toFrameData,
   FORMAT_BGRA8,
   FORMAT_RGBA8,

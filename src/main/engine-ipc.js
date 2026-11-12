@@ -23,6 +23,14 @@ const logger = createLogger("engine-ipc");
 const MODULE_PREVIEW_MAX_SIZE = 512;
 
 /**
+ * Upper bound for a Scene cell preview.
+ *
+ * `Scenes.vue` caps a cell at 480 × 270 (`scenePreviewSize`), so no request
+ * needs a larger frame; the cap bounds the engine's preview targets/read-back.
+ */
+const SCENE_PREVIEW_MAX_SIZE = 480;
+
+/**
  * Clamp a requested module-preview edge: tiles ask for their pixel size scaled
  * by the display's device-pixel ratio, so keep it a positive integer and stop a
  * bogus value from asking the engine for a huge off-screen render.
@@ -31,6 +39,16 @@ function previewDimension(value) {
   const size = Math.round(Number(value));
   if (!Number.isFinite(size) || size <= 0) return MODULE_PREVIEW_MAX_SIZE;
   return Math.min(size, MODULE_PREVIEW_MAX_SIZE);
+}
+
+/**
+ * Clamp a requested Scene-preview edge (same reasoning as
+ * {@link previewDimension}, with the Scene cell's 480 px cap).
+ */
+function scenePreviewDimension(value) {
+  const size = Math.round(Number(value));
+  if (!Number.isFinite(size) || size <= 0) return SCENE_PREVIEW_MAX_SIZE;
+  return Math.min(size, SCENE_PREVIEW_MAX_SIZE);
 }
 
 function mainWebContents() {
@@ -144,6 +162,36 @@ export function registerEngineIpc(getSupervisor) {
     );
   });
 
+  // Scene hover previews. The engine renders the Scene cell's saved
+  // Group/Module snapshots in an isolated compositor and answers with the same
+  // `{ width, height, pixels }` shape as `preview/module` (base64 RGBA8).
+  // Unknown Scenes/empty rows reject the invoke; the renderer keeps the cell's
+  // last frame and retries on its backoff cadence.
+  ipcMain.handle("engine/preview-scene", async (_event, message) => {
+    const sup = getSupervisor();
+    if (!sup?.isRunning()) return null;
+
+    const { sceneId, rowIndex, width, height } = message || {};
+    if (typeof sceneId !== "string" || sceneId.length === 0) {
+      return null;
+    }
+    const row = Number(rowIndex);
+    if (!Number.isInteger(row) || row < 0) {
+      return null;
+    }
+
+    return sup.client.request(
+      "preview/scene",
+      {
+        sceneId,
+        rowIndex: row,
+        width: scenePreviewDimension(width),
+        height: scenePreviewDimension(height),
+      },
+      5000,
+    );
+  });
+
   // -- engine → renderer ---------------------------------------------------
 
   const sup = getSupervisor();
@@ -184,6 +232,7 @@ export const ENGINE_IPC_CHANNELS = {
     "engine/snapshot",
     "engine/preview",
     "engine/preview-module",
+    "engine/preview-scene",
     "engine/get-state",
   ],
 };

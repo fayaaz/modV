@@ -216,6 +216,19 @@
 //! The finished layer is composited onto a transparent target (alpha 1,
 //! `normal` — a fresh module's defaults) and read back tightly packed.
 //!
+//! ## Scene hover previews (WS-8 / WS-14)
+//!
+//! [`Compositor::render_scene_preview`] answers `preview/scene`: it renders one
+//! Scene grid cell from the Scene's **saved** Group/Module snapshots through a
+//! private [`Compositor`] of its own, at the requested size. The isolated
+//! Group/Module state, the LRU and the revision-based invalidation live in
+//! [`crate::scene_preview`]; using a private compositor gives the preview the
+//! live loop's exact per-module alpha/blend and renderer-kind behaviour
+//! without sharing a texture, pipeline slot or module instance with the main
+//! composition. The cell Group clears every request and composites over a
+//! transparent main texture, so the UI can blit the frame with
+//! `putImageData`.
+//!
 //! ## Present boundary
 //!
 //! All internal textures are `Rgba8Unorm`; canvas blend math is done on the
@@ -257,6 +270,7 @@ use modv_renderers::two_d::{AudioFrame, Canvas, DrawContext, ModuleContext, TwoD
 
 use crate::module_preview::{ModulePreviews, PreviewError};
 use crate::module_registry::{ModuleKind, ModuleRegistry, Point10SceneKind};
+use crate::scene_preview::ScenePreviews;
 
 /// Preview frame width published to the UI (`modv-ipc` `VMP1` ring).
 pub const PREVIEW_WIDTH: u32 = 320;
@@ -666,6 +680,10 @@ pub struct Compositor {
     /// Isolated gallery-thumbnail renderer (`preview/module`), created on the
     /// first request so headless/bench runs never allocate it.
     previews: Option<ModulePreviews>,
+    /// Isolated Scene hover-preview renderer (`preview/scene`), created on the
+    /// first request. It owns a private compositor, so it never shares a
+    /// texture, pipeline slot or module instance with the live composition.
+    scene_previews: Option<ScenePreviews>,
     /// The most recent frame's audio clock, reused by preview renders so a
     /// Gallery tile animates on the same clock (and with the same audio) as
     /// the live composition.
@@ -777,6 +795,7 @@ impl Compositor {
             failed_isf: HashSet::new(),
             warned: HashSet::new(),
             previews: None,
+            scene_previews: None,
             preview_frame: FrameInfo::default(),
             group_sampler,
             present_sampler,
@@ -849,6 +868,11 @@ impl Compositor {
         // Preview instances hold pipelines (shader, ISF, Point10) and per-module
         // state tied to the restored state's module registry; release them.
         if let Some(previews) = &mut self.previews {
+            previews.reset();
+        }
+        // Scene hover previews own a private compositor and isolated states;
+        // drop both so a restored Scene list cannot reuse stale instances.
+        if let Some(previews) = &mut self.scene_previews {
             previews.reset();
         }
     }
@@ -2328,6 +2352,56 @@ impl Compositor {
             .previews
             .get_or_insert_with(|| ModulePreviews::new(&device, &queue));
         previews.render(registry, module_name, width, height, &frame)
+    }
+
+    /// Render one Scene hover preview from an **isolated** copy of the Scene
+    /// cell.
+    ///
+    /// This is the engine side of the renderer's
+    /// `window.engine.requestScenePreview({ sceneId, rowIndex, width, height })`
+    /// (WS-8 / WS-14): `scene` is the Scene document the caller resolved from
+    /// the store, `row_names` the current grid row mapping, and `revision` the
+    /// store's Scene-list revision (bumped by any Scene mutation). The live
+    /// Groups and Modules are never touched.
+    ///
+    /// The cell's single Group renders through a private [`Compositor`] at the
+    /// requested size (clamped to 480 per edge), so every module kind and the
+    /// per-module alpha/blend follow the live loop exactly. The frame is
+    /// transparent outside the cell's Modules and is returned as **tightly
+    /// packed** `width × height` RGBA8.
+    ///
+    /// See [`crate::scene_preview`] for the isolation, cache and cost notes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_scene_preview(
+        &mut self,
+        scene: &Value,
+        row_names: &[String],
+        scene_id: &str,
+        row_index: usize,
+        width: u32,
+        height: u32,
+        revision: u64,
+    ) -> Result<Vec<u8>, PreviewError> {
+        let frame = self.preview_frame.clone();
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let registry = Arc::clone(&self.registry);
+        let previews = self
+            .scene_previews
+            .get_or_insert_with(|| ScenePreviews::new(&device, &queue, registry));
+        previews.render(
+            scene, row_names, scene_id, row_index, width, height, revision, &frame,
+        )
+    }
+
+    /// The Scene hover-preview cache (tests/diagnostics).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn scene_previews(&mut self) -> &mut ScenePreviews {
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let registry = Arc::clone(&self.registry);
+        self.scene_previews
+            .get_or_insert_with(|| ScenePreviews::new(&device, &queue, registry))
     }
 }
 

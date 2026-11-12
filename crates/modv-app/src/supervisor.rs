@@ -43,23 +43,44 @@ use modv_ipc::preview::{PreviewFrame, PreviewRing};
 use modv_ipc::socket::SocketServer;
 
 use crate::compositor::{PREVIEW_HEIGHT, PREVIEW_WIDTH};
-use crate::module_preview::{
-    MAX_PREVIEW_DIMENSION, PreviewError, base64_encode, clamp_preview_dimension,
-};
+use crate::module_preview::{MAX_PREVIEW_DIMENSION, PreviewError, base64_encode};
+use crate::scene_preview::MAX_SCENE_PREVIEW_DIMENSION;
 use crate::store_ops::{Store, frames_presented_in};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(33); // ≤ 30 fps
 const SNAPSHOT_SAVE_EVERY_FRAMES: u64 = 120;
 
-/// Most `preview/module` requests allowed to wait for the window loop.
+/// Most preview requests (`preview/module` + `preview/scene`) allowed to wait
+/// for the window loop.
 ///
-/// Gallery tiles poll at ~10 fps each; a handful of tiles never reaches this.
-/// A request that would overflow the queue is answered with `engine_busy`
-/// immediately instead of growing memory (spec: bounded queues only).
+/// Gallery tiles poll at ~10 fps each and a Scene hover at ~30 fps; a handful
+/// of surfaces never reaches this. A request that would overflow the queue is
+/// answered with `engine_busy` immediately instead of growing memory (spec:
+/// bounded queues only).
 pub const MAX_PENDING_PREVIEWS: usize = 32;
 
-/// A queued `preview/module` request.
+/// Which preview a queued request renders.
+///
+/// Both kinds share one bounded queue and the same per-frame cap, so a hover of
+/// a Gallery tile and a Scene cell competes fairly for the window loop's time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreviewKind {
+    /// A Gallery thumbnail for a registered module (`preview/module`).
+    Module {
+        /// Registry name of the module to render.
+        module_name: String,
+    },
+    /// A Scene grid-cell preview (`preview/scene`).
+    Scene {
+        /// Id of the Scene in the store.
+        scene_id: String,
+        /// Grid row (the cell) to render.
+        row_index: usize,
+    },
+}
+
+/// A queued preview request.
 ///
 /// The supervisor cannot render (it owns no GPU device), so
 /// [`EngineSupervisor::handle_request`] validates the payload and parks it
@@ -71,12 +92,12 @@ pub struct PreviewRequest {
     pub id: u64,
     /// Client that sent it, for [`SocketServer::send_response`].
     pub client: usize,
-    /// Registry name of the module to render.
-    pub module_name: String,
     /// Requested (already clamped) width.
     pub width: u32,
     /// Requested (already clamped) height.
     pub height: u32,
+    /// What to render.
+    pub kind: PreviewKind,
 }
 
 /// How [`EngineSupervisor::handle_request`] answered a request.
@@ -108,7 +129,8 @@ pub struct EngineSupervisor {
     /// Set by `engine/restore`; the window loop drops the compositor's GPU
     /// state (stale group textures and module slots) when it sees this.
     reset_requested: bool,
-    /// `preview/module` requests waiting for the window loop's compositor.
+    /// `preview/module` and `preview/scene` requests waiting for the window
+    /// loop's compositor.
     pending_previews: VecDeque<PreviewRequest>,
     unknown_dispatches_warned: HashSet<String>,
 }
@@ -254,14 +276,16 @@ impl EngineSupervisor {
 
     /// Dispatch one request.
     ///
-    /// `preview/module` cannot be answered here — the supervisor has no
-    /// compositor — so it is validated and queued ([`Reply::Deferred`]); every
-    /// other method answers immediately ([`Reply::Now`]).
+    /// `preview/module` and `preview/scene` cannot be answered here — the
+    /// supervisor has no compositor — so they are validated and queued
+    /// ([`Reply::Deferred`]); every other method answers immediately
+    /// ([`Reply::Now`]).
     fn handle_request(&mut self, request: Request, store: &mut Store, client: usize) -> Reply {
-        if request.method == "preview/module" {
-            return self.queue_module_preview(request, client);
+        match request.method.as_str() {
+            "preview/module" => self.queue_module_preview(request, client),
+            "preview/scene" => self.queue_scene_preview(request, client),
+            _ => Reply::Now(self.handle_request_now(request, store)),
         }
-        Reply::Now(self.handle_request_now(request, store))
     }
 
     /// Validate and queue a `preview/module` request for the window loop.
@@ -291,8 +315,8 @@ impl EngineSupervisor {
             }
         };
         let (Some(width), Some(height)) = (
-            preview_dimension(request.params.get("width")),
-            preview_dimension(request.params.get("height")),
+            preview_dimension(request.params.get("width"), MAX_PREVIEW_DIMENSION),
+            preview_dimension(request.params.get("height"), MAX_PREVIEW_DIMENSION),
         ) else {
             return Reply::Now(Response::err(
                 request.id,
@@ -312,9 +336,80 @@ impl EngineSupervisor {
         self.pending_previews.push_back(PreviewRequest {
             id: request.id,
             client,
-            module_name,
             width,
             height,
+            kind: PreviewKind::Module { module_name },
+        });
+        Reply::Deferred
+    }
+
+    /// Validate and queue a `preview/scene` request for the window loop.
+    ///
+    /// The payload is `{ sceneId, rowIndex, width, height }`; sizes are
+    /// clamped to `1..=480` (the UI caps a cell at 480 × 270) and `rowIndex`
+    /// must be a non-negative integer. An unknown Scene or an empty row is
+    /// *not* rejected here: the store lookup/render reports `scene_not_found`
+    /// or `scene_row_empty`, which is the same error shape the renderer sees
+    /// for every other preview failure.
+    fn queue_scene_preview(&mut self, request: Request, client: usize) -> Reply {
+        if self.shutdown_requested {
+            return Reply::Now(Response::err(
+                request.id,
+                "engine_shutting_down",
+                "the engine is shutting down",
+            ));
+        }
+
+        let scene_id = match request.params.get("sceneId").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                return Reply::Now(Response::err(
+                    request.id,
+                    "invalid_params",
+                    "preview/scene needs a non-empty string \"sceneId\"",
+                ));
+            }
+        };
+        let Some(row_index) = request
+            .params
+            .get("rowIndex")
+            .and_then(Value::as_u64)
+            .and_then(|row| usize::try_from(row).ok())
+        else {
+            return Reply::Now(Response::err(
+                request.id,
+                "invalid_params",
+                "preview/scene needs a non-negative integer \"rowIndex\"",
+            ));
+        };
+        let (Some(width), Some(height)) = (
+            preview_dimension(request.params.get("width"), MAX_SCENE_PREVIEW_DIMENSION),
+            preview_dimension(request.params.get("height"), MAX_SCENE_PREVIEW_DIMENSION),
+        ) else {
+            return Reply::Now(Response::err(
+                request.id,
+                "invalid_params",
+                "preview/scene needs numeric \"width\" and \"height\"",
+            ));
+        };
+
+        if self.pending_previews.len() >= MAX_PENDING_PREVIEWS {
+            return Reply::Now(Response::err(
+                request.id,
+                "engine_busy",
+                "too many preview requests are queued",
+            ));
+        }
+
+        self.pending_previews.push_back(PreviewRequest {
+            id: request.id,
+            client,
+            width,
+            height,
+            kind: PreviewKind::Scene {
+                scene_id,
+                row_index,
+            },
         });
         Reply::Deferred
     }
@@ -334,11 +429,13 @@ impl EngineSupervisor {
         }
     }
 
-    /// Send the answer for a request the window loop rendered.
+    /// Send the answer for a preview request the window loop rendered.
     ///
     /// Success is `{ width, height, pixels }` with `pixels` the base64 of
-    /// `width × height × 4` tightly packed RGBA8 bytes; a failure is the
-    /// renderer-facing error code (`module_not_found` / `preview_failed`).
+    /// `width × height × 4` tightly packed RGBA8 bytes — the same shape for
+    /// `preview/module` and `preview/scene`. A failure is the renderer-facing
+    /// error code (`module_not_found`, `scene_not_found`, `scene_row_empty`,
+    /// `preview_failed`).
     pub fn complete_preview(
         &mut self,
         request: PreviewRequest,
@@ -371,7 +468,7 @@ impl EngineSupervisor {
         };
 
         if let Err(error) = self.server.send_response(request.client, &response) {
-            eprintln!("engine: WARN could not send module preview response: {error}");
+            eprintln!("engine: WARN could not send preview response: {error}");
         }
     }
 
@@ -380,7 +477,7 @@ impl EngineSupervisor {
         for request in std::mem::take(&mut self.pending_previews) {
             let response = Response::err(request.id, code, message);
             if let Err(error) = self.server.send_response(request.client, &response) {
-                eprintln!("engine: WARN could not send module preview error: {error}");
+                eprintln!("engine: WARN could not send preview error: {error}");
             }
         }
     }
@@ -569,17 +666,16 @@ impl EngineSupervisor {
 }
 
 /// Read one requested preview edge: finite and positive, rounded, clamped to
-/// `1..=MAX_PREVIEW_DIMENSION`.
+/// `1..=max`.
 ///
 /// `None` for a missing or non-numeric value (a malformed request), so the
 /// caller can answer `invalid_params` rather than render an arbitrary size.
-fn preview_dimension(value: Option<&Value>) -> Option<u32> {
+fn preview_dimension(value: Option<&Value>, max: u32) -> Option<u32> {
     let number = value?.as_f64()?;
     if !number.is_finite() {
         return None;
     }
-    let rounded = number.round().clamp(0.0, f64::from(MAX_PREVIEW_DIMENSION)) as u32;
-    Some(clamp_preview_dimension(rounded))
+    Some(number.round().clamp(1.0, f64::from(max)) as u32)
 }
 
 /// `framesPresented` from the on-disk snapshot's `_engine` sidecar.
@@ -914,18 +1010,19 @@ mod tests {
 
     /// Send one request and poll until the supervisor queued it (the socket
     /// is non-blocking, so the frame may need a couple of polls).
-    fn queue_preview(
+    fn queue_request(
         supervisor: &mut EngineSupervisor,
         store: &mut Store,
         stream: &mut UnixStream,
         id: u64,
+        method: &str,
         params: Value,
     ) -> PreviewRequest {
         stream
             .write_all(
                 &Request {
                     id,
-                    method: "preview/module".into(),
+                    method: method.into(),
                     params,
                 }
                 .into_frame(),
@@ -941,6 +1038,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out waiting for the preview to be queued");
+    }
+
+    /// [`queue_request`] for a `preview/module` request.
+    fn queue_preview(
+        supervisor: &mut EngineSupervisor,
+        store: &mut Store,
+        stream: &mut UnixStream,
+        id: u64,
+        params: Value,
+    ) -> PreviewRequest {
+        queue_request(supervisor, store, stream, id, "preview/module", params)
     }
 
     /// Read `expected` KIND_RESPONSE frames without polling the supervisor:
@@ -996,7 +1104,12 @@ mod tests {
         );
 
         assert_eq!(request.id, 31);
-        assert_eq!(request.module_name, "Point10 Invert");
+        assert_eq!(
+            request.kind,
+            PreviewKind::Module {
+                module_name: "Point10 Invert".to_string()
+            }
+        );
         assert_eq!((request.width, request.height), (4, 2));
 
         let pixels: Vec<u8> = (0..(4 * 2 * 4)).map(|value| value as u8).collect();
@@ -1081,6 +1194,123 @@ mod tests {
     }
 
     #[test]
+    fn scene_preview_request_is_deferred_and_answered_with_base64_pixels() {
+        let (socket_path, state_path) = temp_paths("preview-scene");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let mut stream = connect(&socket_path);
+
+        let request = queue_request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            81,
+            "preview/scene",
+            json!({ "sceneId": "scene-1", "rowIndex": 2, "width": 4, "height": 2 }),
+        );
+
+        assert_eq!(request.id, 81);
+        assert_eq!((request.width, request.height), (4, 2));
+        assert_eq!(
+            request.kind,
+            PreviewKind::Scene {
+                scene_id: "scene-1".to_string(),
+                row_index: 2,
+            }
+        );
+
+        let pixels: Vec<u8> = (0..(4 * 2 * 4)).map(|value| value as u8).collect();
+        supervisor.complete_preview(request, Ok(pixels.clone()));
+
+        let responses = read_buffered_responses(&mut stream, 1);
+        let response = &responses[0];
+        assert_eq!(response.id, 81);
+        assert!(response.ok);
+        let result = response.result.as_ref().expect("result present");
+        assert_eq!(result["width"], json!(4));
+        assert_eq!(result["height"], json!(2));
+        assert_eq!(result["pixels"], json!(base64_encode(&pixels)));
+    }
+
+    #[test]
+    fn scene_preview_clamps_sizes_and_validates_params() {
+        let (socket_path, state_path) = temp_paths("preview-scene-params");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let mut stream = connect(&socket_path);
+
+        // Missing scene id and a negative row are rejected immediately rather
+        // than queued for a lookup that cannot succeed.
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            82,
+            "preview/scene",
+            json!({ "rowIndex": 0, "width": 8, "height": 8 }),
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "invalid_params");
+
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            83,
+            "preview/scene",
+            json!({ "sceneId": "scene-1", "rowIndex": -1, "width": 8, "height": 8 }),
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "invalid_params");
+
+        // Sizes clamp to the Scene cap (480), not the module thumbnail cap.
+        let request = queue_request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            84,
+            "preview/scene",
+            json!({ "sceneId": "scene-1", "rowIndex": 0, "width": 1000, "height": 0 }),
+        );
+        assert_eq!((request.width, request.height), (480, 1));
+
+        supervisor.complete_preview(
+            request,
+            Err(PreviewError::SceneRowEmpty {
+                scene_id: "scene-1".to_string(),
+                row: 0,
+            }),
+        );
+        let responses = read_buffered_responses(&mut stream, 1);
+        assert_eq!(
+            responses[0].error.as_ref().expect("error present").code,
+            "scene_row_empty"
+        );
+
+        // An unknown Scene surfaces as `scene_not_found` (the UI retries on
+        // its 500 ms backoff rather than treating it as a fatal error).
+        let request = queue_request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            85,
+            "preview/scene",
+            json!({ "sceneId": "missing-scene", "rowIndex": 0, "width": 8, "height": 8 }),
+        );
+        supervisor.complete_preview(
+            request,
+            Err(PreviewError::SceneNotFound("missing-scene".to_string())),
+        );
+        let responses = read_buffered_responses(&mut stream, 1);
+        assert_eq!(
+            responses[0].error.as_ref().expect("error present").code,
+            "scene_not_found"
+        );
+    }
+
+    #[test]
     fn preview_queue_is_bounded() {
         let (socket_path, state_path) = temp_paths("preview-bound");
         let mut store = Store::new();
@@ -1090,9 +1320,11 @@ mod tests {
             supervisor.pending_previews.push_back(PreviewRequest {
                 id: id as u64,
                 client: 0,
-                module_name: "Ball".to_string(),
                 width: 16,
                 height: 16,
+                kind: PreviewKind::Module {
+                    module_name: "Ball".to_string(),
+                },
             });
         }
 

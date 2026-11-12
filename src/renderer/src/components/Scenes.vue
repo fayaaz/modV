@@ -482,6 +482,11 @@ import {
 } from "../application/worker/scene-rows";
 import { SceneHeaderContextMenu } from "../menus/context/sceneHeaderContextMenu.js";
 import { SceneCellContextMenu } from "../menus/context/sceneCellContextMenu.js";
+import {
+  scenePreviewKey,
+  scenePreviewPollDelay,
+  shouldTransferScenePreviewCanvas,
+} from "../application/engine-client.js";
 import { Container, Draggable } from "vue3-smooth-dnd";
 import Dialog from "./Dialog.vue";
 import Group from "./Group.vue";
@@ -536,6 +541,10 @@ export default {
 
     scenePreviewState() {
       return this.$modV.store.state.scenePreview;
+    },
+
+    engineMode() {
+      return this.$modV?.engineMode === true;
     },
 
     gridTemplateColumns() {
@@ -716,6 +725,9 @@ export default {
 
   created() {
     this.transferredPreviewCanvases = new WeakSet();
+    // Engine mode keeps its Scene-preview runtime outside Vue's reactivity:
+    // it holds a canvas, a timer and an occasional in-flight promise.
+    this.engineScenePreview = null;
   },
 
   mounted() {
@@ -725,6 +737,13 @@ export default {
   beforeUnmount() {
     clearTimeout(this.sceneSaveTimer);
     clearTimeout(this.sceneClickTimer);
+
+    if (this.engineMode) {
+      // The engine owns the preview; stop polling and leave the last frame.
+      this.stopEngineScenePreview();
+      return;
+    }
+
     this.$modV.store.dispatch("scenePreview/dispose");
   },
 
@@ -902,6 +921,40 @@ export default {
       const key = `${scene.id}:${rowIndex}`;
       const state = this.scenePreviewState;
 
+      if (this.engineMode) {
+        const current = this.engineScenePreview;
+
+        if (
+          this.previewKey === key &&
+          current &&
+          !current.disposed &&
+          current.request.sceneId === scene.id &&
+          current.request.rowIndex === rowIndex
+        ) {
+          return;
+        }
+
+        const cell = event.currentTarget;
+        const canvas = cell.querySelector(".scenes__gridPreviewCanvas");
+
+        if (!canvas) {
+          return;
+        }
+
+        const size = this.scenePreviewSize(cell);
+
+        delete this.previewFrames[key];
+        this.previewKey = key;
+        this.startEngineScenePreview({
+          canvas,
+          sceneId: scene.id,
+          rowIndex,
+          width: size.width,
+          height: size.height,
+        });
+        return;
+      }
+
       if (
         this.previewKey === key &&
         state.active &&
@@ -928,7 +981,12 @@ export default {
       };
       let transfer;
 
-      if (!this.transferredPreviewCanvases.has(canvas)) {
+      if (
+        shouldTransferScenePreviewCanvas({
+          engineMode: this.engineMode,
+          alreadyTransferred: this.transferredPreviewCanvases.has(canvas),
+        })
+      ) {
         const offscreen = canvas.transferControlToOffscreen();
         this.transferredPreviewCanvases.add(canvas);
         payload.canvas = offscreen;
@@ -948,6 +1006,14 @@ export default {
       }
 
       this.previewKey = null;
+
+      if (this.engineMode) {
+        // Freeze: stop polling and keep the last frame in the cell canvas
+        // until another cell is hovered or the component unmounts, matching
+        // the legacy `scenePreview/freeze` runtime.
+        this.stopEngineScenePreview();
+        return;
+      }
 
       const state = this.scenePreviewState;
       const stateKey =
@@ -976,6 +1042,15 @@ export default {
         }
       }
 
+      if (this.engineMode) {
+        if (this.previewKey !== null && !valid.has(this.previewKey)) {
+          this.stopEngineScenePreview();
+          this.previewKey = null;
+        }
+
+        return;
+      }
+
       const state = this.scenePreviewState;
 
       if (state.sceneId !== null) {
@@ -989,6 +1064,137 @@ export default {
       this.$modV.store.dispatch("scenePreview/prune", {
         keys: Array.from(valid),
       });
+    },
+
+    /**
+     * Engine mode: poll the engine for this Scene cell's preview.
+     *
+     * `requestScenePreview` resolves to `{ width, height, data }` (or null
+     * while the engine cannot render the Scene yet). The frame is painted into
+     * the cell's own 2D canvas with `putImageData`; the canvas is never
+     * transferred to a worker in engine mode.
+     */
+    startEngineScenePreview({ canvas, sceneId, rowIndex, width, height }) {
+      this.stopEngineScenePreview();
+
+      const state = {
+        canvas,
+        ctx: null,
+        request: { sceneId, rowIndex, width, height },
+        timer: null,
+        inFlight: false,
+        disposed: false,
+        failures: 0,
+        // null → nothing pulled yet, so the first frame is due immediately.
+        lastMs: null,
+      };
+
+      this.engineScenePreview = state;
+      this.scheduleEngineScenePreview();
+    },
+
+    stopEngineScenePreview() {
+      const state = this.engineScenePreview;
+
+      if (!state) {
+        return;
+      }
+
+      state.disposed = true;
+
+      if (state.timer !== null) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+
+      this.engineScenePreview = null;
+    },
+
+    /** Queue the next pull at the ~30 fps cadence, or after a failure. */
+    scheduleEngineScenePreview() {
+      const state = this.engineScenePreview;
+
+      if (!state || state.disposed || state.inFlight || state.timer !== null) {
+        return;
+      }
+
+      const delay = scenePreviewPollDelay(performance.now(), state.lastMs, {
+        hidden: document.hidden,
+        failures: state.failures,
+      });
+      // Hidden → the helper asks us to wait; re-check on the same slow cadence
+      // instead of pulling frames for an invisible window.
+      const wait = delay === null ? 500 : delay;
+
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        void this.pullEngineScenePreview();
+      }, wait);
+    },
+
+    async pullEngineScenePreview() {
+      const state = this.engineScenePreview;
+
+      if (!state || state.disposed || state.inFlight) {
+        return;
+      }
+
+      if (document.hidden) {
+        this.scheduleEngineScenePreview();
+        return;
+      }
+
+      const { sceneId, rowIndex, width, height } = state.request;
+      state.lastMs = performance.now();
+      state.inFlight = true;
+
+      try {
+        const frame = await this.$modV.requestScenePreview(
+          sceneId,
+          rowIndex,
+          width,
+          height,
+        );
+
+        if (!frame || this.engineScenePreview !== state || state.disposed) {
+          // A null frame means the engine did not have the Scene/row yet;
+          // keep the last frame and back off instead of spinning.
+          if (this.engineScenePreview === state) {
+            state.failures += 1;
+          }
+          return;
+        }
+
+        state.failures = 0;
+        this.drawEngineScenePreviewFrame(state, frame);
+
+        const key = scenePreviewKey(sceneId, rowIndex);
+
+        if (key !== null) {
+          this.previewFrames[key] = true;
+        }
+      } finally {
+        state.inFlight = false;
+        this.scheduleEngineScenePreview();
+      }
+    },
+
+    /** Paint one engine frame into the cell canvas (1:1 backing store). */
+    drawEngineScenePreviewFrame(state, { width, height, data }) {
+      const canvas = state.canvas;
+
+      if (!canvas || data.length !== width * height * 4) {
+        return;
+      }
+
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const ctx = state.ctx || canvas.getContext("2d");
+      state.ctx = ctx;
+      ctx.putImageData(new ImageData(data, width, height), 0, 0);
     },
 
     isRowActive(scene, row) {
