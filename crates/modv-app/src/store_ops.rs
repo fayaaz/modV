@@ -694,12 +694,33 @@ impl Store {
             return Ok(Value::Null);
         };
 
+        // The Group checkboxes emit `1`/`0` (`inputs/Checkbox.vue`); the
+        // legacy store accepted that, the typed Group needs real booleans.
+        // Coerce the known flag keys (and echo the coerced value so the mirror
+        // matches the engine) before the schema round-trip.
+        let bool_keys = [
+            "clearing",
+            "pipeline",
+            "inherit",
+            "hidden",
+            "transitionGhost",
+        ];
+        let mut coerced: Map<String, Value> = data.clone();
+        for key in bool_keys {
+            if let Some(item) = coerced.get(key)
+                && !item.is_boolean()
+            {
+                let truthy = modv_engine::engine_state::js_truthy(item);
+                coerced.insert(key.to_string(), Value::Bool(truthy));
+            }
+        }
+
         let mut value = serde_json::to_value(&self.state.groups[index])
             .map_err(|error| invalid(action, format!("group did not serialise: {error}")))?;
         let Some(object) = value.as_object_mut() else {
             return Err(invalid(action, "group did not serialise to an object"));
         };
-        for (key, item) in data {
+        for (key, item) in &coerced {
             object.insert(key.clone(), item.clone());
         }
         let group: Group = serde_json::from_value(value)
@@ -707,7 +728,7 @@ impl Store {
         self.state.groups[index] = group;
 
         self.deltas
-            .push(action, json!({ "groupId": group_id, "data": data }));
+            .push(action, json!({ "groupId": group_id, "data": coerced }));
         Ok(Value::Null)
     }
 
@@ -1079,10 +1100,17 @@ impl Store {
         // WS-12: `modules/updateMeta` calls `applyExpression` with the meta
         // field's input id (`modules.js:577-579`).
         let input_id = self.module_meta_input_id(&id, &meta_key);
-        let data = match input_id {
+        let mut data = match input_id {
             Some(input_id) => self.apply_expression(&input_id, data),
             None => data,
         };
+        // The Inspector's Checkbox emits `1`/`0` unless `emitBoolean` is set
+        // (`inputs/Checkbox.vue`). The JS render loop used truthiness, but the
+        // engine compositor/Input Links require a JSON `true`; coerce here so
+        // ticking Enable actually draws the Module.
+        if meta_key == "enabled" && !data.is_boolean() {
+            data = json!(modv_engine::engine_state::js_truthy(&data));
+        }
 
         let Some(module) = self.state.modules.get_mut(&id) else {
             self.warn_once(
@@ -3736,6 +3764,68 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].r#type, "groups/UPDATE_GROUP");
         assert_eq!(deltas[0].payload["groupId"], json!(id));
+    }
+
+    #[test]
+    fn update_group_coerces_numeric_checkbox_flags() {
+        // `Group.vue`'s Checkbox emits `1`/`0`, not booleans; the typed Group
+        // and the compositor need real flags (ticking Clearing/Pipeline
+        // otherwise failed to decode and snapped back).
+        let (mut store, id) = store_with_group("Effects");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "groups/UPDATE_GROUP",
+                json!({ "groupId": id, "data": { "clearing": 1, "pipeline": 1 } }),
+            )
+            .expect("numeric flags dispatch");
+
+        let group = store.state().find_group(&id).expect("group");
+        assert_eq!(group.clearing, true);
+        assert_eq!(group.pipeline, true);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas[0].r#type, "groups/UPDATE_GROUP");
+        assert_eq!(deltas[0].payload["data"]["clearing"], json!(true));
+        assert_eq!(deltas[0].payload["data"]["pipeline"], json!(true));
+
+        store
+            .dispatch(
+                "groups/UPDATE_GROUP",
+                json!({ "groupId": id, "data": { "clearing": 0, "pipeline": 0 } }),
+            )
+            .expect("numeric flags dispatch");
+        let group = store.state().find_group(&id).expect("group");
+        assert!(!group.clearing);
+        assert!(!group.pipeline);
+    }
+
+    #[test]
+    fn update_meta_coerces_checkbox_enabled_to_a_boolean() {
+        let mut store = Store::new();
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Bands"}))
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({ "id": id, "metaKey": "enabled", "data": 1 }),
+            )
+            .expect("numeric enabled dispatches");
+        assert_eq!(store.state().modules[&id].meta["enabled"], json!(true));
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas[0].payload["data"], json!(true));
+
+        store
+            .dispatch(
+                "modules/UPDATE_ACTIVE_MODULE_META",
+                json!({ "id": id, "metaKey": "enabled", "data": 0 }),
+            )
+            .expect("numeric enabled dispatches");
+        assert_eq!(store.state().modules[&id].meta["enabled"], json!(false));
     }
 
     #[test]
