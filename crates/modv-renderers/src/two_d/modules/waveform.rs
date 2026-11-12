@@ -88,7 +88,7 @@ impl TwoDModule for Waveform {
 
     fn draw(&mut self, ctx: &mut DrawContext) {
         // `Waveform.js:65-101`.
-        let colour = prop_tween_rgb(ctx.props, "color", [1.0, 1.0, 1.0, 1.0]);
+        let colour = prop_tween_rgb(ctx.props, "color", [1.0, 1.0, 1.0, 1.0], ctx.delta);
         let max_width = prop_f64(ctx.props, "maxWidth", 1.0) as f32;
         let max_height = prop_f64(ctx.props, "maxHeight", 100.0) as f32;
         let stroke_weight = prop_i64(ctx.props, "strokeWeight", 1) as f32;

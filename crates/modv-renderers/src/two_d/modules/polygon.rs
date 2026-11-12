@@ -85,7 +85,7 @@ impl TwoDModule for Polygon {
         let fill = prop_bool(ctx.props, "fill", false);
         let stroke_weight = prop_f64(ctx.props, "strokeWeight", 1.0) as f32;
         let rotate_toggle = prop_bool(ctx.props, "rotateToggle", false);
-        let colour = prop_tween_rgb(ctx.props, "color", [1.0, 1.0, 1.0, 1.0]);
+        let colour = prop_tween_rgb(ctx.props, "color", [1.0, 1.0, 1.0, 1.0], ctx.delta);
 
         let rotate = if rotate_toggle { self.rotation } else { 0.0 };
 

@@ -472,7 +472,7 @@ fn rgba_from_object(value: &Value, rgb_scale: f32) -> Option<[f32; 4]> {
 /// The engine resolves the tween and stores `[r, g, b]` (0..255) under
 /// `value`. A raw control object (`{ data: [[r, g, b], …] }`) falls back to
 /// the first palette entry so the module renders standalone.
-pub fn prop_tween_rgb(props: &Value, name: &str, default: [f32; 4]) -> [f32; 4] {
+pub fn prop_tween_rgb(props: &Value, name: &str, default: [f32; 4], time_ms: f32) -> [f32; 4] {
     let Some(control) = props.get(name) else {
         return default;
     };
@@ -481,12 +481,37 @@ pub fn prop_tween_rgb(props: &Value, name: &str, default: [f32; 4]) -> [f32; 4] 
             return rgba;
         }
     }
-    if let Some(entries) = control.get("data").and_then(Value::as_array) {
-        if let Some(first) = entries.first().and_then(rgb_triplet) {
-            return first;
-        }
+    // Tween props whose value has not been pushed by the (JS) tween engine yet:
+    // advance through the palette ring on the frame clock. The JS tween is a
+    // time-driven anime.js animation over `duration`; interpolating the ring
+    // linearly reproduces its visible colour progression.
+    let Some(entries) = control.get("data").and_then(Value::as_array) else {
+        return default;
+    };
+    let palette: Vec<[f32; 4]> = entries.iter().filter_map(rgb_triplet).collect();
+    if palette.is_empty() {
+        return default;
     }
-    default
+    if palette.len() == 1 {
+        return palette[0];
+    }
+    let duration = control
+        .get("duration")
+        .and_then(Value::as_f64)
+        .unwrap_or(1000.0)
+        .max(1.0) as f32;
+    let progress = ((time_ms % duration) / duration).clamp(0.0, 1.0);
+    let scaled = progress * palette.len() as f32;
+    let index = (scaled.floor() as usize) % palette.len();
+    let next = (index + 1) % palette.len();
+    let t = scaled.fract();
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    [
+        lerp(palette[index][0], palette[next][0]),
+        lerp(palette[index][1], palette[next][1]),
+        lerp(palette[index][2], palette[next][2]),
+        lerp(palette[index][3], palette[next][3]),
+    ]
 }
 
 fn rgb_triplet(value: &Value) -> Option<[f32; 4]> {
@@ -676,12 +701,12 @@ mod tests {
     fn tween_prop_reads_value_then_first_palette_entry() {
         let resolved = json!({ "color": { "value": [255.0, 0.0, 0.0] } });
         assert_eq!(
-            prop_tween_rgb(&resolved, "color", [0.0; 4]),
+            prop_tween_rgb(&resolved, "color", [0.0; 4], 0.0),
             [1.0, 0.0, 0.0, 1.0]
         );
         let raw = json!({ "color": { "data": [[0, 0, 255], [255, 255, 255]], "duration": 10 } });
         assert_eq!(
-            prop_tween_rgb(&raw, "color", [1.0; 4]),
+            prop_tween_rgb(&raw, "color", [1.0; 4], 0.0),
             [0.0, 0.0, 1.0, 1.0]
         );
     }

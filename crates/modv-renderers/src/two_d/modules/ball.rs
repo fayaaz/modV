@@ -177,7 +177,7 @@ impl TwoDModule for Ball {
         } else {
             ctx.audio.features.rms * 10.0 * intensity
         };
-        let colour = prop_tween_rgb(ctx.props, "color", [1.0, 1.0, 1.0, 1.0]);
+        let colour = prop_tween_rgb(ctx.props, "color", [1.0, 1.0, 1.0, 1.0], ctx.delta);
         let amount = prop_i64(ctx.props, "amount", 10).clamp(0, 300) as usize;
 
         for index in 0..amount.min(self.balls.len()) {
