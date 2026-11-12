@@ -360,6 +360,7 @@ impl Store {
         match action {
             "groups/createGroup" => self.create_group(params),
             "groups/removeGroup" => self.remove_group_action(params),
+            "groups/updateGroupName" => self.update_group_name(params),
             "groups/UPDATE_GROUP" => self.update_group(params),
             "groups/UPDATE_GROUP_BY_KEY" => self.update_group_by_key(params),
             "groups/REMOVE_GROUP" => self.remove_group_mutation(params),
@@ -687,6 +688,29 @@ impl Store {
 
         self.deltas
             .push(action, json!({ "groupId": group_id, "data": data }));
+        Ok(Value::Null)
+    }
+
+    /// `groups/updateGroupName` (`groups.js:272-285`).
+    fn update_group_name(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let action = "groups/updateGroupName";
+        let group_id = required_str(params, action, "groupId")?.to_string();
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return Err(invalid(action, "missing \"name\" string"));
+        };
+        let Some(group) = self.state.find_group_mut(&group_id) else {
+            self.warn_once(
+                format!("missing-group:{group_id}"),
+                &format!("engine: WARN {action}: no such group {group_id}"),
+            );
+            return Ok(Value::Null);
+        };
+        group.name = name.to_string();
+
+        self.deltas.push(
+            "groups/UPDATE_GROUP",
+            json!({ "groupId": group_id, "data": { "name": name } }),
+        );
         Ok(Value::Null)
     }
 
@@ -3513,6 +3537,27 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].r#type, "groups/UPDATE_GROUP");
         assert_eq!(deltas[0].payload["groupId"], json!(id));
+    }
+
+    #[test]
+    fn update_group_name_renames_and_emits_the_update_delta() {
+        let (mut store, id) = store_with_group("Effects");
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "groups/updateGroupName",
+                json!({ "groupId": id, "name": "Background" }),
+            )
+            .expect("updateGroupName dispatches");
+
+        assert_eq!(
+            store.state().find_group(&id).expect("group").name,
+            "Background"
+        );
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas[0].r#type, "groups/UPDATE_GROUP");
+        assert_eq!(deltas[0].payload["data"]["name"], json!("Background"));
     }
 
     #[test]
