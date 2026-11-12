@@ -317,8 +317,7 @@ impl TempoDetector {
             };
             let clamped_fraction = clamp(fraction, 0.0, 1.0);
 
-            *envelope_slot =
-                previous.value + (next.value - previous.value) * clamped_fraction;
+            *envelope_slot = previous.value + (next.value - previous.value) * clamped_fraction;
         }
 
         // tempo-detector.js:182-192
