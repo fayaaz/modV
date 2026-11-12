@@ -41,8 +41,12 @@ use modv_ipc::frame::{KIND_EVENT, KIND_REQUEST};
 use modv_ipc::message::{Event, Incoming, Request, Response, from_frame};
 use modv_ipc::preview::{PreviewFrame, PreviewRing};
 use modv_ipc::socket::SocketServer;
+use modv_media::video::{
+    DEFAULT_FPS, DEFAULT_HEIGHT, DEFAULT_WIDTH, TestPattern, VideoSourceConfig,
+};
 
 use crate::compositor::{PREVIEW_HEIGHT, PREVIEW_WIDTH};
+use crate::media::{MediaError, MediaHub, cameras_json};
 use crate::module_preview::{MAX_PREVIEW_DIMENSION, PreviewError, base64_encode};
 use crate::scene_preview::MAX_SCENE_PREVIEW_DIMENSION;
 use crate::store_ops::{Store, frames_presented_in};
@@ -133,6 +137,10 @@ pub struct EngineSupervisor {
     /// loop's compositor.
     pending_previews: VecDeque<PreviewRequest>,
     unknown_dispatches_warned: HashSet<String>,
+    /// Engine-owned video capture (WS-10). The window loop drains frames from
+    /// it into GPU textures ([`crate::compositor::Compositor::sync_media`]);
+    /// the request handlers here own the start/stop/status lifecycle.
+    media: MediaHub,
 }
 
 impl EngineSupervisor {
@@ -163,7 +171,18 @@ impl EngineSupervisor {
             reset_requested: false,
             pending_previews: VecDeque::new(),
             unknown_dispatches_warned: HashSet::new(),
+            media: MediaHub::new(),
         })
+    }
+
+    /// The engine-owned video capture (WS-10).
+    ///
+    /// The window loop drains frames from it into GPU textures each frame; the
+    /// supervisor keeps it across Scene applies so a source outlives the Webcam
+    /// module that draws it (the UI owns the capture lifetime, like the
+    /// renderer's `mediaStream` did).
+    pub fn media_mut(&mut self) -> &mut MediaHub {
+        &mut self.media
     }
 
     /// Whether `engine/shutdown` has been received.
@@ -259,6 +278,11 @@ impl EngineSupervisor {
         }
 
         self.maybe_heartbeat();
+        // WS-10: once a second, check every media source and restart the ones
+        // that errored, ended or disappeared. A restart reuses the source's
+        // config, keeps its 1-based index and backs off exponentially; the
+        // failure is logged once per episode.
+        self.media.poll_health();
     }
 
     /// Broadcast every queued `{ type, payload }` record as `state/delta`.
@@ -484,11 +508,137 @@ impl EngineSupervisor {
 
     fn handle_request_now(&mut self, request: Request, store: &mut Store) -> Response {
         match request.method.as_str() {
+            // ————————————————— video capture (WS-10) —————————————————
+            //
+            // These run synchronously in `poll`: a pipeline start waits up to
+            // `START_TIMEOUT_MS` for the device, which stalls one frame. The
+            // alternative (deferring to the window loop) would put the GPU
+            // thread behind a camera handshake and still need the same wait.
+            "media/list-cameras" => {
+                let cameras = self.media.list_cameras();
+
+                Response::ok(request.id, json!({ "cameras": cameras_json(&cameras) }))
+            }
+
+            "media/start-camera" => {
+                let Some(source_id) = media_source_id(&request.params) else {
+                    return media_invalid_params(request.id, "media/start-camera", "sourceId");
+                };
+                let Some(camera_id) =
+                    media_string(&request.params, "cameraId").filter(|id| !id.trim().is_empty())
+                else {
+                    return media_invalid_params(request.id, "media/start-camera", "cameraId");
+                };
+
+                let config = VideoSourceConfig::camera(camera_id).with_mode(
+                    media_dimension(&request.params, "width", DEFAULT_WIDTH),
+                    media_dimension(&request.params, "height", DEFAULT_HEIGHT),
+                    media_dimension(&request.params, "fps", DEFAULT_FPS),
+                );
+
+                media_start_reply(&mut self.media, request.id, &source_id, config, true)
+            }
+
+            "media/start-file" => {
+                let Some(source_id) = media_source_id(&request.params) else {
+                    return media_invalid_params(request.id, "media/start-file", "sourceId");
+                };
+                let Some(path) =
+                    media_string(&request.params, "path").filter(|path| !path.is_empty())
+                else {
+                    return media_invalid_params(request.id, "media/start-file", "path");
+                };
+                let looping = request
+                    .params
+                    .get("loop")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                // `path` comes from the media directory (absolute); the crate
+                // percent-encodes it into the `file://` URI `uridecodebin`
+                // wants.
+                let config = VideoSourceConfig::file(path).with_mode(
+                    media_dimension(&request.params, "width", DEFAULT_WIDTH),
+                    media_dimension(&request.params, "height", DEFAULT_HEIGHT),
+                    media_dimension(&request.params, "fps", DEFAULT_FPS),
+                );
+
+                media_start_reply(&mut self.media, request.id, &source_id, config, looping)
+            }
+
+            "media/start-screen" => {
+                let Some(source_id) = media_source_id(&request.params) else {
+                    return media_invalid_params(request.id, "media/start-screen", "sourceId");
+                };
+                let Some(node_id) = request
+                    .params
+                    .get("nodeId")
+                    .and_then(Value::as_u64)
+                    .filter(|node| *node > 0)
+                    .and_then(|node| u32::try_from(node).ok())
+                else {
+                    return media_invalid_params(request.id, "media/start-screen", "nodeId");
+                };
+                // Screen sources keep the PipeWire node's native size and
+                // rate, so no width/height/fps are applied.
+                let config = VideoSourceConfig::screen(node_id);
+
+                media_start_reply(&mut self.media, request.id, &source_id, config, true)
+            }
+
+            // Diagnostic/test-only: a `videotestsrc` pattern with no device.
+            // Used by the engine's own tests and for debugging a pipeline
+            // without a camera; the UI never sends it.
+            "media/start-test-pattern" => {
+                let Some(source_id) = media_source_id(&request.params) else {
+                    return media_invalid_params(
+                        request.id,
+                        "media/start-test-pattern",
+                        "sourceId",
+                    );
+                };
+                let pattern = TestPattern::from_name(
+                    media_string(&request.params, "pattern")
+                        .as_deref()
+                        .unwrap_or("smpte"),
+                );
+                let config = VideoSourceConfig::test_pattern(pattern).with_mode(
+                    media_dimension(&request.params, "width", DEFAULT_WIDTH),
+                    media_dimension(&request.params, "height", DEFAULT_HEIGHT),
+                    media_dimension(&request.params, "fps", DEFAULT_FPS),
+                );
+
+                media_start_reply(&mut self.media, request.id, &source_id, config, true)
+            }
+
+            "media/stop-source" => {
+                let Some(source_id) = media_source_id(&request.params) else {
+                    return media_invalid_params(request.id, "media/stop-source", "sourceId");
+                };
+
+                self.media.stop(&source_id);
+
+                Response::ok(request.id, json!({ "sourceId": source_id }))
+            }
+
+            "media/status" => {
+                let sources: Vec<Value> = self
+                    .media
+                    .statuses()
+                    .iter()
+                    .map(|status| status.to_json())
+                    .collect();
+
+                Response::ok(request.id, json!({ "sources": sources }))
+            }
+
             "engine/shutdown" => {
                 eprintln!("engine: INFO shutdown requested; flushing state");
                 if let Err(error) = self.save_snapshot(store) {
                     eprintln!("engine: WARN shutdown snapshot failed: {error}");
                 }
+                // Release every camera/screen/file pipeline before the process
+                // exits (a busy V4L2 device would otherwise stay locked).
+                self.media.stop_all();
                 self.shutdown_requested = true;
                 // Nothing will render another frame: answer the queued
                 // thumbnails instead of leaving their callers to time out.
@@ -669,6 +819,63 @@ impl EngineSupervisor {
             eprintln!("engine: WARN preview broadcast failed: {error}");
         }
     }
+}
+
+/// A non-empty `sourceId` from a `media/*` request.
+fn media_source_id(params: &Value) -> Option<String> {
+    media_string(params, "sourceId").filter(|id| !id.trim().is_empty())
+}
+
+/// A non-empty string parameter, if present.
+fn media_string(params: &Value, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// A positive frame dimension/rate parameter, falling back to the engine
+/// default for a missing, non-numeric or zero value.
+///
+/// Values are clamped by [`VideoSourceConfig::normalised`], so an absurd
+/// `width` cannot make the pipeline negotiate a huge texture.
+fn media_dimension(params: &Value, key: &str, default: u32) -> u32 {
+    params
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|number| number.is_finite() && *number > 0.0)
+        .map(|number| number.round().min(f64::from(u32::MAX)) as u32)
+        .unwrap_or(default)
+}
+
+fn media_invalid_params(id: u64, method: &str, field: &str) -> Response {
+    Response::err(
+        id,
+        "invalid_params",
+        format!("{method} needs a non-empty \"{field}\""),
+    )
+}
+
+/// Start a media source and shape the `media/start-*` reply.
+///
+/// Success is `{ sourceId, index }` with the 1-based start-order index the
+/// Webcam module's `camera` prop uses. Failures keep the engine running: the
+/// source is simply not registered and the renderer sees a media error code.
+fn media_start_reply(
+    media: &mut MediaHub,
+    request_id: u64,
+    source_id: &str,
+    config: VideoSourceConfig,
+    looping: bool,
+) -> Response {
+    match media.start_with_looping(source_id, config, looping) {
+        Ok(index) => Response::ok(request_id, json!({ "sourceId": source_id, "index": index })),
+        Err(error) => {
+            eprintln!("engine: WARN media source {source_id:?} failed to start: {error}");
+            media_error_reply(request_id, &error)
+        }
+    }
+}
+
+fn media_error_reply(request_id: u64, error: &MediaError) -> Response {
+    Response::err(request_id, error.code(), error.message())
 }
 
 /// Read one requested preview edge: finite and positive, rounded, clamped to
@@ -1458,5 +1665,257 @@ mod tests {
         );
         assert_eq!(responses[1].id, 62);
         assert!(responses[1].ok);
+    }
+
+    // ————————————————— media (WS-10) —————————————————
+
+    /// A supervisor + client pair, plus a store, for a media round trip.
+    fn media_fixture(label: &str) -> (EngineSupervisor, Store, UnixStream) {
+        let (socket_path, state_path) = temp_paths(label);
+        let supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let store = Store::new();
+        let stream = connect(&socket_path);
+
+        (supervisor, store, stream)
+    }
+
+    /// Start a test pattern, or `None` when the host cannot run one (no
+    /// GStreamer / no `videotestsrc`), so the media specs skip in CI.
+    fn start_test_pattern(
+        supervisor: &mut EngineSupervisor,
+        store: &mut Store,
+        stream: &mut UnixStream,
+        source_id: &str,
+        pattern: &str,
+    ) -> Option<Response> {
+        let (response, _) = request(
+            supervisor,
+            store,
+            stream,
+            100,
+            "media/start-test-pattern",
+            json!({
+                "sourceId": source_id,
+                "pattern": pattern,
+                "width": 64,
+                "height": 48,
+                "fps": 30
+            }),
+        );
+
+        match response.error.as_ref().map(|error| error.code.as_str()) {
+            Some("media_unavailable") | Some("media_plugin_missing") => {
+                eprintln!(
+                    "skipping media control test: {}",
+                    response.error.expect("error").message
+                );
+                None
+            }
+            _ => Some(response),
+        }
+    }
+
+    #[test]
+    fn media_list_cameras_returns_a_cameras_array() {
+        let (mut supervisor, mut store, mut stream) = media_fixture("media-cameras");
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            90,
+            "media/list-cameras",
+            Value::Null,
+        );
+
+        assert!(response.ok, "{:?}", response.error);
+        let result = response.result.expect("result present");
+        let cameras = result["cameras"].as_array().expect("a cameras array");
+        for camera in cameras {
+            assert!(camera["id"].is_string());
+            assert!(camera["name"].is_string());
+            assert!(camera["path"].is_string() || camera["path"].is_null());
+            assert!(camera["caps"].is_array());
+        }
+    }
+
+    #[test]
+    fn media_start_status_and_stop_round_trip() {
+        let (mut supervisor, mut store, mut stream) = media_fixture("media-roundtrip");
+        let Some(started) = start_test_pattern(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            "source-a",
+            "checkers-1",
+        ) else {
+            return;
+        };
+        assert!(started.ok, "{:?}", started.error);
+        let result = started.result.expect("start result");
+        assert_eq!(result["sourceId"], json!("source-a"));
+        assert_eq!(result["index"], json!(1));
+
+        let (status, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            101,
+            "media/status",
+            Value::Null,
+        );
+        assert!(status.ok, "{:?}", status.error);
+        let sources = status.result.expect("status result")["sources"]
+            .as_array()
+            .cloned()
+            .expect("a sources array");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["sourceId"], json!("source-a"));
+        assert_eq!(sources[0]["kind"], json!("test-pattern"));
+        assert_eq!(sources[0]["index"], json!(1));
+        assert!(sources[0]["state"].is_string());
+        assert!(sources[0]["frames"].is_u64());
+
+        let (stopped, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            102,
+            "media/stop-source",
+            json!({ "sourceId": "source-a" }),
+        );
+        assert!(stopped.ok, "{:?}", stopped.error);
+        assert_eq!(stopped.result.unwrap()["sourceId"], json!("source-a"));
+
+        let (status, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            103,
+            "media/status",
+            Value::Null,
+        );
+        assert_eq!(
+            status.result.unwrap()["sources"]
+                .as_array()
+                .expect("a sources array")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn media_start_requires_a_source_id() {
+        let (mut supervisor, mut store, mut stream) = media_fixture("media-params");
+
+        for (id, method, params) in [
+            (
+                110,
+                "media/start-camera",
+                json!({ "cameraId": "/dev/video0" }),
+            ),
+            (111, "media/start-file", json!({ "path": "/tmp/a.mp4" })),
+            (112, "media/start-screen", json!({ "nodeId": 4 })),
+            // A PipeWire node id of 0 is the invalid "nil" node.
+            (
+                113,
+                "media/start-screen",
+                json!({ "sourceId": "s", "nodeId": 0 }),
+            ),
+            (114, "media/stop-source", json!({ "sourceId": "" })),
+        ] {
+            let (response, _) =
+                request(&mut supervisor, &mut store, &mut stream, id, method, params);
+            assert!(!response.ok, "{method} accepted a missing sourceId");
+            assert_eq!(
+                response.error.expect("error present").code,
+                "invalid_params",
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_start_failures_report_a_media_error_and_keep_the_engine_alive() {
+        let (mut supervisor, mut store, mut stream) = media_fixture("media-failure");
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            120,
+            "media/start-camera",
+            json!({
+                "sourceId": "source-a",
+                "cameraId": "/dev/modv-engine-no-such-camera",
+                "width": 64,
+                "height": 48,
+                "fps": 30
+            }),
+        );
+
+        assert!(!response.ok, "a missing camera must not start");
+        let error = response.error.expect("error present");
+        assert!(
+            matches!(
+                error.code.as_str(),
+                "media_start_failed" | "media_plugin_missing" | "media_unavailable"
+            ),
+            "unexpected error code {}: {}",
+            error.code,
+            error.message
+        );
+        assert!(!error.message.is_empty());
+
+        // The engine (and the control channel) still answers.
+        let (status, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            121,
+            "media/status",
+            Value::Null,
+        );
+        assert!(status.ok, "{:?}", status.error);
+        assert_eq!(
+            status.result.unwrap()["sources"]
+                .as_array()
+                .expect("a sources array")
+                .len(),
+            0,
+            "a failed start registers nothing"
+        );
+    }
+
+    #[test]
+    fn media_start_file_converts_the_path_and_reports_its_index() {
+        let (mut supervisor, mut store, mut stream) = media_fixture("media-file");
+        // A missing file still exercises the path → URI conversion and the
+        // start error shape (the renderer sends a media-dir path).
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            130,
+            "media/start-file",
+            json!({
+                "sourceId": "video-a",
+                "path": "/tmp/modv-engine-missing.mp4",
+                "width": 320,
+                "height": 240,
+                "fps": 30,
+                "loop": false
+            }),
+        );
+
+        let error = response.error.expect("a missing file fails to start");
+        assert!(
+            matches!(
+                error.code.as_str(),
+                "media_start_failed" | "media_plugin_missing" | "media_unavailable"
+            ),
+            "unexpected error code {}: {}",
+            error.code,
+            error.message
+        );
     }
 }

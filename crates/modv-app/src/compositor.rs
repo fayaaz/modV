@@ -97,10 +97,16 @@
 //!
 //! * **three modules do not render.** They log once and are skipped (their
 //!   renderer is out of scope for the hybrid engine).
-//! * **No `input_texture` for 2D modules.** `Webcam` and `Texture2D` draw
-//!   nothing while `DrawContext::input_texture` is `None` — exactly what the
-//!   JS does when the video/texture source is missing. Media inputs land with
-//!   M6.
+//! * **Media inputs (WS-10) only reach `Webcam`.** The engine owns the video
+//!   capture (cameras, video files, PipeWire screen nodes) and uploads each
+//!   source's newest frame into a per-source texture
+//!   ([`Compositor::sync_media`]); the `Webcam` module samples the source its
+//!   1-based `camera` prop selects (the start order, like
+//!   `selectWebcamSource`). Every other 2D module keeps
+//!   `input_texture: None`: `Texture2D` resolves its own `texture` prop (an
+//!   image asset the engine has no registry for yet) and the rest draw from
+//!   their props alone. With no running source the Webcam module draws
+//!   nothing, exactly like the JS with an unset `video`.
 //! * **Row crossfades (M5c).** A row fade keeps the old group alive with
 //!   `transitionGhost: true`. The compositor renders both halves even when
 //!   their alpha would be culled (the transition-group exception,
@@ -262,10 +268,12 @@ use modv_engine::engine_state::{
     EngineState, GALLERY_GROUP_NAME, GROUP_DISABLED, GROUP_ENABLED, Group, ModuleInstance,
 };
 use modv_ipc::preview::{PreviewFrame, PreviewRing};
+use modv_media::video::VideoFrame;
 use modv_render::frame_graph::{
     Executor, FrameGraph, GraphError, MAIN_TEXTURE_ID, PassNode, TextureId, TextureSurfaces,
 };
 use modv_render::wgpu;
+use modv_render::{TexturePool, TexturePoolKey, UsageClass};
 use modv_renderers::isf::{
     CompiledIsf, IsfDocument, IsfFrameUniforms, IsfRuntime, IsfValue, IsfValues,
 };
@@ -278,6 +286,7 @@ use modv_renderers::shader::pipeline::{ShaderAudioUniforms, ShaderError, ShaderR
 use modv_renderers::shader::uniforms::{PropKind, PropSlots, ShaderProp};
 use modv_renderers::two_d::{AudioFrame, Canvas, DrawContext, ModuleContext, TwoDModule};
 
+use crate::media::{MediaHub, padded_rows};
 use crate::module_preview::{ModulePreviews, PreviewError};
 use crate::module_registry::{ModuleKind, ModuleRegistry, Point10SceneKind};
 use crate::scene_preview::ScenePreviews;
@@ -656,6 +665,112 @@ impl IsfAudioTextures {
     }
 }
 
+/// One video source's uploaded frame texture (WS-10).
+///
+/// The engine owns one of these per running media source, keyed by the source
+/// id the control plane gave it. A new frame is uploaded with
+/// `Queue::write_texture` into an `Rgba8Unorm` `UsageClass::InputFrame` texture;
+/// the texture is rebuilt only when the frame size changes (a camera that
+/// negotiates a new mode, a screen node resizing, a different file).
+///
+/// The pool is **per source**: [`TexturePoolKey`] only carries
+/// `(width, height, format, class)`, so two sources at the same size would
+/// otherwise be handed the same texture and overwrite each other.
+struct MediaTexture {
+    /// Size-keyed pool for this source (one live size, one spare).
+    pool: TexturePool,
+    /// The uploaded texture and its sampled view.
+    texture: Option<wgpu::Texture>,
+    view: Option<wgpu::TextureView>,
+    /// Size of [`Self::texture`].
+    size: (u32, u32),
+    /// Row-padding scratch for widths whose `width * 4` is not 256-aligned.
+    /// Reused across frames so the padded path allocates nothing in steady
+    /// state.
+    scratch: Vec<u8>,
+}
+
+impl MediaTexture {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
+            pool: TexturePool::new(device),
+            texture: None,
+            view: None,
+            size: (0, 0),
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Upload one tightly packed RGBA8 frame, allocating/resizing on demand.
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &VideoFrame,
+    ) -> Result<(), String> {
+        if frame.width == 0 || frame.height == 0 {
+            return Err("the frame has no size".to_string());
+        }
+        if !frame.is_tightly_packed() {
+            return Err(format!(
+                "the frame buffer is {} bytes; {}x{} RGBA8 needs {}",
+                frame.rgba.len(),
+                frame.width,
+                frame.height,
+                frame.pixel_count() * 4
+            ));
+        }
+
+        let size = (frame.width, frame.height);
+        if self.view.is_none() || self.size != size {
+            let key = TexturePoolKey {
+                width: size.0,
+                height: size.1,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage_class: UsageClass::InputFrame,
+            };
+            let pooled = self.pool.acquire(device, queue, key);
+            // Keep the live size plus one spare (a camera renegotiating back
+            // and forth reuses both instead of allocating each time).
+            self.pool.evict_lru(2);
+            self.texture = Some(pooled.texture().clone());
+            self.view = Some(
+                pooled
+                    .texture()
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+            );
+            self.size = size;
+        }
+
+        let Some(texture) = &self.texture else {
+            return Err("the texture pool returned no texture".to_string());
+        };
+        let (data, bytes_per_row) = padded_rows(frame, &mut self.scratch);
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(size.1),
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        Ok(())
+    }
+}
+
 /// The GPU compositor: shader renderer, frame-graph executor, textures.
 pub struct Compositor {
     device: wgpu::Device,
@@ -701,6 +816,11 @@ pub struct Compositor {
     /// ISF module ids whose compile failed; skipped without retrying each
     /// frame.
     failed_isf: HashSet<String>,
+    /// Uploaded video frames keyed by media source id (WS-10).
+    media_textures: HashMap<String, MediaTexture>,
+    /// Media source ids in start order — the list the Webcam module's 1-based
+    /// `camera` prop indexes (`media-inputs.js:150-158`).
+    media_order: Vec<String>,
     /// One-shot log keys (unknown blend mode, skipped module type, ...).
     warned: HashSet<String>,
     /// Isolated gallery-thumbnail renderer (`preview/module`), created on the
@@ -857,6 +977,8 @@ impl Compositor {
             failed_point10: HashSet::new(),
             isf: HashMap::new(),
             failed_isf: HashSet::new(),
+            media_textures: HashMap::new(),
+            media_order: Vec::new(),
             warned: HashSet::new(),
             previews: None,
             scene_previews: None,
@@ -907,7 +1029,9 @@ impl Compositor {
     ///
     /// Module pipelines are rebuilt lazily; a restored state can reference
     /// different modules and different groups, so stale slots, textures and 2D
-    /// instances must not survive the swap.
+    /// instances must not survive the swap. Media textures are **kept**: the
+    /// sources are user-level and keyed by source id, so a restored Scene list
+    /// draws the same live capture.
     pub fn reset(&mut self) {
         self.drop_output_textures();
         self.group_targets.clear();
@@ -942,6 +1066,78 @@ impl Compositor {
         // Transition pipelines are stateless across a restore; drop them with
         // the scratch target so nothing from the old state survives.
         self.scene_transition = None;
+    }
+
+    /// Upload any new video frames into their per-source textures (WS-10).
+    ///
+    /// Called once per frame before [`Self::render_frame`], right after the
+    /// control socket has been polled (a `media/start-*` request may have
+    /// registered a new source). Per source:
+    ///
+    /// * the newest frame is drained into the source's reusable
+    ///   [`VideoFrame`] (`latest_into`, allocation-free once warm) and only
+    ///   uploaded when it is new — a 30 fps camera on a 144 Hz output uploads
+    ///   one frame in five instead of repeating the same bytes;
+    /// * the texture is created/resized through the per-source
+    ///   [`TexturePool`] at the frame's size (`Rgba8Unorm`,
+    ///   [`UsageClass::InputFrame`]) and written with `Queue::write_texture`;
+    /// * a source that stopped loses its texture (the Webcam module then draws
+    ///   nothing, exactly like the JS with no `videos` entry).
+    ///
+    /// The start order is mirrored in [`Self::media_order`] so the Webcam
+    /// module can resolve its `camera` prop without borrowing the hub from the
+    /// render path.
+    pub fn sync_media(&mut self, media: &mut MediaHub) {
+        if self.media_order.as_slice() != media.ids() {
+            self.media_order.clear();
+            self.media_order.extend_from_slice(media.ids());
+        }
+        {
+            let order = &self.media_order;
+            self.media_textures
+                .retain(|source_id, _| order.iter().any(|id| id == source_id));
+        }
+
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+
+        for index in 0..self.media_order.len() {
+            let Some((source_id, frame, is_new)) = media.frame_at(index) else {
+                continue;
+            };
+            if !is_new {
+                continue;
+            }
+
+            let source_id = source_id.to_string();
+            let texture = self
+                .media_textures
+                .entry(source_id.clone())
+                .or_insert_with(|| MediaTexture::new(&device));
+            if let Err(error) = texture.upload(&device, &queue, frame) {
+                self.warn_once(
+                    format!("media-upload:{source_id}"),
+                    &format!("engine: WARN could not upload a frame for {source_id:?}: {error}"),
+                );
+            }
+        }
+    }
+
+    /// The texture the Webcam module should draw this frame.
+    ///
+    /// `camera` indexes the start order ([`MediaHub::select_source_id`]); an
+    /// index with no source falls back to the first, and no running source
+    /// yields `None` (the module then draws nothing, like `Webcam.js:40-47`).
+    fn media_input<'a>(
+        media_order: &'a [String],
+        media_textures: &'a HashMap<String, MediaTexture>,
+        props: &Value,
+    ) -> Option<(&'a wgpu::TextureView, (u32, u32))> {
+        let index = MediaHub::camera_index(props);
+        let source_id = MediaHub::select_source_id(media_order, index)?;
+        let texture = media_textures.get(source_id)?;
+
+        Some((texture.view.as_ref()?, texture.size))
     }
 
     fn drop_output_textures(&mut self) {
@@ -1344,10 +1540,16 @@ impl Compositor {
     /// Draw one 2D module into its canvas and composite the result onto the
     /// group target (`loop.js:409-470`, `renderers/2d/index.js:29-96`).
     ///
-    /// Deliberately no `input_texture` in M3: `Webcam`/`Texture2D` draw
-    /// nothing until media inputs land (M6), exactly like the JS with an unset
-    /// source. The module instance owns its `data`-equivalent state, so
-    /// `update` mutates the instance rather than the store.
+    /// The module instance owns its `data`-equivalent state, so `update`
+    /// mutates the instance rather than the store.
+    ///
+    /// Media inputs (WS-10): only `Webcam` samples the engine's video capture —
+    /// it resolves its 1-based `camera` prop against the running sources
+    /// ([`Self::media_input`]). Every other 2D module keeps
+    /// `input_texture: None`: `Texture2D` draws the texture its own `texture`
+    /// prop resolves (an image asset, not a live source), and the remaining
+    /// modules draw from their props alone. A module without a source draws
+    /// nothing, which is what the JS did with an unset `video`.
     fn render_two_d_module(
         &mut self,
         module: &ModuleInstance,
@@ -1468,6 +1670,13 @@ impl Compositor {
             canvas.clear_all();
         }
         {
+            // WS-10: a Webcam layer samples the captured source its `camera`
+            // prop selects. The borrows are field-level (source order and
+            // textures), so the module instance's canvas stays independently
+            // mutable.
+            let webcam_source = (module.module_name == "Webcam")
+                .then(|| Self::media_input(&self.media_order, &self.media_textures, props))
+                .flatten();
             let mut draw = DrawContext {
                 canvas,
                 props,
@@ -1476,10 +1685,8 @@ impl Compositor {
                 frame: frame_index,
                 device: &device,
                 queue: &queue,
-                // Media inputs arrive in M6; until then `Webcam`/`Texture2D`
-                // draw nothing, like the JS with no video/texture source.
-                input_texture: None,
-                input_size: None,
+                input_texture: webcam_source.map(|(view, _)| view),
+                input_size: webcam_source.map(|(_, size)| size),
                 is_gallery: false,
             };
             instance.module.draw(&mut draw);
@@ -4435,5 +4642,375 @@ mod tests {
         assert!(payload.wave.iter().all(|value| *value == 0.0));
         assert!(payload.freq_mag.iter().all(|value| *value == 0.0));
         assert_eq!(payload.sample_rate, 44_100.0);
+    }
+
+    // ————————————————— media inputs (WS-10) —————————————————
+
+    /// A `Webcam` module over the shipped test patterns.
+    fn webcam_state(camera: i64, scale: f64) -> EngineState {
+        let mut state = EngineState::new();
+        state.groups.push(group_with(
+            "group-a",
+            "Effects",
+            &["module-a"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        state.modules.insert(
+            "module-a".to_string(),
+            two_d_module(
+                "module-a",
+                "Webcam",
+                json!({
+                    "scale": scale,
+                    "position": [0.5, 0.5],
+                    "imageSmoothing": false,
+                    "camera": camera,
+                }),
+            ),
+        );
+        state
+    }
+
+    /// Start a test-pattern source, or `None` when the host cannot run one.
+    fn start_test_source(
+        media: &mut crate::media::MediaHub,
+        source_id: &str,
+        pattern: modv_media::video::TestPattern,
+        width: u32,
+        height: u32,
+    ) -> Option<usize> {
+        let config = modv_media::video::VideoSourceConfig::test_pattern(pattern)
+            .with_mode(width, height, 30);
+        match media.start(source_id, config) {
+            Ok(index) => Some(index),
+            Err(error) => {
+                eprintln!("skipping media compositor test: {error}");
+                None
+            }
+        }
+    }
+
+    /// Pump `sync_media` until the source has an uploaded texture.
+    fn sync_until_uploaded(
+        compositor: &mut Compositor,
+        media: &mut crate::media::MediaHub,
+        source_id: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            compositor.sync_media(media);
+            if compositor
+                .media_textures
+                .get(source_id)
+                .is_some_and(|texture| texture.view.is_some())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("no frame uploaded for {source_id:?}");
+    }
+
+    fn media_texture_size(compositor: &Compositor, source_id: &str) -> Option<(u32, u32)> {
+        compositor
+            .media_textures
+            .get(source_id)
+            .filter(|texture| texture.view.is_some())
+            .map(|texture| texture.size)
+    }
+
+    #[test]
+    fn webcam_module_draws_the_running_media_source() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut media = crate::media::MediaHub::new();
+        if !media.is_available() {
+            eprintln!("skipping media compositor test: no GStreamer");
+            return;
+        }
+        if start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::White,
+            SIZE,
+            SIZE,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+        assert_eq!(media_texture_size(&compositor, "cam-a"), Some((SIZE, SIZE)));
+
+        compositor
+            .render_frame(&webcam_state(1, 1.0), &frame_info())
+            .expect("frame renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+
+        // The white test pattern fills the module (scale 1 at 1:1 source and
+        // canvas sizes), so every pixel is opaque white.
+        assert_eq!(lit_pixels(&pixels), (SIZE * SIZE) as usize);
+        assert_pixels_close(&pixels, [255, 255, 255, 255], 2, "white test pattern");
+    }
+
+    #[test]
+    fn webcam_camera_prop_picks_the_indexed_source() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut media = crate::media::MediaHub::new();
+        if !media.is_available() {
+            return;
+        }
+        if start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::Black,
+            SIZE,
+            SIZE,
+        )
+        .is_none()
+        {
+            return;
+        }
+        start_test_source(
+            &mut media,
+            "cam-b",
+            modv_media::video::TestPattern::White,
+            SIZE,
+            SIZE,
+        )
+        .expect("second test source");
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+        sync_until_uploaded(&mut compositor, &mut media, "cam-b");
+
+        // `camera: 1` is the first started source (black) …
+        compositor
+            .render_frame(&webcam_state(1, 1.0), &frame_info())
+            .expect("camera 1 renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [0, 0, 0, 255], 2, "camera 1 (black pattern)");
+
+        // … `camera: 2` the second (white) …
+        compositor
+            .render_frame(&webcam_state(2, 1.0), &frame_info())
+            .expect("camera 2 renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [255, 255, 255, 255], 2, "camera 2 (white pattern)");
+
+        // … and an out-of-range index falls back to the first source, exactly
+        // like `selectWebcamSource`.
+        compositor
+            .render_frame(&webcam_state(9, 1.0), &frame_info())
+            .expect("camera 9 renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_pixels_close(&pixels, [0, 0, 0, 255], 2, "out-of-range camera");
+    }
+
+    #[test]
+    fn stopping_a_media_source_disposes_its_texture() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut media = crate::media::MediaHub::new();
+        if !media.is_available() {
+            return;
+        }
+        if start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::White,
+            SIZE,
+            SIZE,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+        assert_eq!(media_texture_size(&compositor, "cam-a"), Some((SIZE, SIZE)));
+
+        assert!(media.stop("cam-a"));
+        compositor.sync_media(&mut media);
+
+        assert!(
+            compositor.media_textures.is_empty(),
+            "a stopped source's uploaded texture is released"
+        );
+        compositor
+            .render_frame(&webcam_state(1, 1.0), &frame_info())
+            .expect("frame renders without a source");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_eq!(
+            lit_pixels(&pixels),
+            0,
+            "Webcam draws nothing without a source"
+        );
+    }
+
+    #[test]
+    fn restarting_a_source_at_a_new_size_recreates_the_texture() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut media = crate::media::MediaHub::new();
+        if !media.is_available() {
+            return;
+        }
+        let small = SIZE / 2;
+        if start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::White,
+            small,
+            small,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+        assert_eq!(
+            media_texture_size(&compositor, "cam-a"),
+            Some((small, small))
+        );
+
+        media.stop("cam-a");
+        compositor.sync_media(&mut media);
+        assert!(compositor.media_textures.is_empty());
+
+        start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::Black,
+            SIZE,
+            SIZE,
+        )
+        .expect("the source restarts at the output size");
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+        assert_eq!(
+            media_texture_size(&compositor, "cam-a"),
+            Some((SIZE, SIZE)),
+            "the restarted source's texture is rebuilt at its new size"
+        );
+    }
+
+    #[test]
+    fn an_unaligned_frame_width_uploads_without_dropping_pixels() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut media = crate::media::MediaHub::new();
+        if !media.is_available() {
+            return;
+        }
+        // 322 * 4 = 1288 bytes per row: not a 256-byte multiple, so the upload
+        // takes the padded path.
+        let (width, height) = (322, 242);
+        if start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::White,
+            width,
+            height,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(width, height);
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+        assert_eq!(
+            media_texture_size(&compositor, "cam-a"),
+            Some((width, height))
+        );
+
+        compositor
+            .render_frame(&webcam_state(1, 1.0), &frame_info())
+            .expect("frame renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_eq!(
+            lit_pixels(&pixels),
+            (width * height) as usize,
+            "the unaligned upload covers every pixel"
+        );
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            assert_eq!(
+                &pixel[0..4],
+                &[255, 255, 255, 255],
+                "unaligned upload pixel {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn texture_2d_does_not_use_the_camera_sources() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut media = crate::media::MediaHub::new();
+        if !media.is_available() {
+            return;
+        }
+        if start_test_source(
+            &mut media,
+            "cam-a",
+            modv_media::video::TestPattern::White,
+            SIZE,
+            SIZE,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+        sync_until_uploaded(&mut compositor, &mut media, "cam-a");
+
+        let mut state = EngineState::new();
+        state.groups.push(group_with(
+            "group-a",
+            "Effects",
+            &["module-a"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        state.modules.insert(
+            "module-a".to_string(),
+            two_d_module("module-a", "Texture 2D", json!({ "scale": 1.0 })),
+        );
+
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("frame renders");
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert_eq!(
+            lit_pixels(&pixels),
+            0,
+            "Texture 2D resolves its `texture` prop, not a camera source"
+        );
     }
 }

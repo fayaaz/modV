@@ -26,6 +26,15 @@
 //! running or a crossfade is active, so idle frames stay cheap. Input Links
 //! are evaluated between the state update and the render, so audio-reactive
 //! props are current in the same frame they were computed.
+//!
+//! Video capture (WS-10) is owned by the supervisor's [`crate::media::MediaHub`]
+//! and uploaded into per-source textures by
+//! [`Compositor::sync_media`](crate::compositor::Compositor::sync_media) right
+//! after the control socket is polled — before the state is rendered, so the
+//! `Webcam` module draws this frame's camera/file/screen capture. Sources are
+//! user-level: they are started and stopped by `media/start-*` /
+//! `media/stop-source`, survive Scene applies and `engine/restore`, and are all
+//! released when the run exits.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -68,6 +77,9 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
     app.store.flush_link_deltas();
     // Release the engine-owned capture (WS-9) on every exit path.
     app.stop_engine_audio();
+    // Release the engine-owned video sources (WS-10) on every exit path, even
+    // when the renderer never sent `media/stop-source`.
+    app.stop_media();
     // Flush the snapshot on any exit path (window close, bench deadline,
     // engine/shutdown) so a supervisor restart restores the last state.
     if let Some(mut supervisor) = app.supervisor.take() {
@@ -124,6 +136,11 @@ struct WindowedApp {
 impl WindowedApp {
     fn new(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Self {
         let start = Instant::now();
+        // WS-10: initialise GStreamer (and log its version) before the loop, so
+        // a host without the capture stack reports it at startup rather than on
+        // the first camera. A failure is not fatal: media/start-* answers
+        // `media_unavailable` and rendering is unaffected.
+        let _ = crate::media::init();
         let mut store =
             Store::with_state_path_and_isf(cli.state.as_deref(), cli.isf_dir.as_deref());
         if let Some(path) = &cli.state {
@@ -244,6 +261,13 @@ impl WindowedApp {
             self.failed = true;
         }
         self
+    }
+
+    /// Stop every engine-owned video source (WS-10), releasing the devices.
+    fn stop_media(&mut self) {
+        if let Some(supervisor) = &mut self.supervisor {
+            supervisor.media_mut().stop_all();
+        }
     }
 
     /// Pump the engine-owned feed (WS-9) and publish the frame into the store.
@@ -387,7 +411,16 @@ impl WindowedApp {
             }
         }
 
-        // 1a. A whole-scene shader transition composites the outgoing Scene
+        // 1a. Upload any new video frames into their per-source textures
+        // (WS-10), so the Webcam module draws this frame's capture. The
+        // sources are user-level: they survive Scene applies and a restore, so
+        // this runs whether or not the current Scene shows a Webcam layer.
+        // Field-level borrows keep the `engine` handle above usable.
+        if let (Some(supervisor), Some(compositor)) = (&mut self.supervisor, &mut self.compositor) {
+            compositor.sync_media(supervisor.media_mut());
+        }
+
+        // 1b. A whole-scene shader transition composites the outgoing Scene
         // itself, so it needs that frame captured. The main texture of the last
         // presented frame *is* the outgoing Scene: copy it once here, before
         // this frame renders the incoming Scene over it. When the capture is
@@ -405,7 +438,7 @@ impl WindowedApp {
             }
         }
 
-        // 1b. Advance the Scene/performance state machine before rendering
+        // 1c. Advance the Scene/performance state machine before rendering
         // (`loop.js:94-111`). Cheap when idle: `scenes_tick_due` is false
         // unless performance mode runs or a crossfade is active.
         if self.store.scenes_tick_due() {
@@ -421,7 +454,7 @@ impl WindowedApp {
             }
         }
 
-        // 1c. Evaluate Input Links against the frame the engine's feed (or the
+        // 1d. Evaluate Input Links against the frame the engine's feed (or the
         // renderer's pump) produced, then render with the updated props
         // (`worker/loop.js` runs the link loop before the renderers). `now` is
         // the monotonic frame clock; it drives the 10 Hz mirror-delta throttle.
@@ -431,7 +464,7 @@ impl WindowedApp {
             supervisor.broadcast_deltas(&mut self.store);
         }
 
-        // 1d. Resolve the whole-scene transition for this frame. A shader
+        // 1e. Resolve the whole-scene transition for this frame. A shader
         // effect needs its captured outgoing frame; when the capture vanished
         // (a resize between frames invalidated it) downgrade to Fade without
         // dropping the change. Fade/None/unknown kinds stay on the alpha path,

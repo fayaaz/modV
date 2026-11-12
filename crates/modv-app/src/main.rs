@@ -12,6 +12,7 @@ mod fixtures;
 mod headless;
 mod ids;
 mod input_links;
+mod media;
 mod module_preview;
 mod module_registry;
 mod performance;
