@@ -641,6 +641,164 @@ fn dvd_room_keeps_a_translucent_background() {
     );
 }
 
+// ————— batch 5b —————
+
+/// The tunnel fills the frame with hoops, so 96 px shows several rings and the
+/// SSAO creases without turning into a solid block.
+const GEOMETRIC_TUNNEL_SIZE: u32 = 96;
+
+#[test]
+fn geometric_tunnel_renders() {
+    let mut scene = crate::point10::scenes::geometric_tunnel::GeometricTunnel::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, GEOMETRIC_TUNNEL_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "GeometricTunnel produced an empty frame at {GEOMETRIC_TUNNEL_SIZE}x{GEOMETRIC_TUNNEL_SIZE}"
+    );
+}
+
+/// `screenClearAlpha = 0` and the final pass writes `alpha = clamp(max(rgb))`.
+/// With ACES exposure 1 the tone-mapped hoops never reach 1.0, so the layer is
+/// never fully opaque — the JS behaves the same. What must hold is that the
+/// background stays near-transparent (the fog floor is the only lift) while the
+/// lit hoops carry a clearly higher alpha.
+#[test]
+fn geometric_tunnel_keeps_a_translucent_layer() {
+    let mut scene = crate::point10::scenes::geometric_tunnel::GeometricTunnel::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, GEOMETRIC_TUNNEL_SIZE) else {
+        return;
+    };
+    let min = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .min()
+        .unwrap_or(0);
+    let max = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .max()
+        .unwrap_or(0);
+    let total = pixels.len() / 4;
+    assert!(
+        min <= 48,
+        "the tunnel's empty background must stay translucent ({total} px, min alpha {min})"
+    );
+    assert!(
+        max > 64,
+        "the lit hoops must carry a stronger alpha than the background (max {max})"
+    );
+}
+
+#[test]
+fn rolling_fire_renders() {
+    let mut scene = crate::point10::scenes::rolling_fire::RollingFire::new();
+    // The fire is a haze of sub-pixel puffs at the smoke-test size; max the
+    // puff scalars so the additive volume is visible.
+    scene.apply_props(|key| match key {
+        "smokeDensity" => Some(100.0),
+        "fireIntensity" => Some(100.0),
+        _ => None,
+    });
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "RollingFire produced an empty frame at {PARTICLE_SIZE}x{PARTICLE_SIZE}"
+    );
+}
+
+/// `_transparentOverlay` and the `alpha = max(rgb)` output: the layer keeps
+/// translucent pixels around the fire, while the lava sphere reaches opaque.
+#[test]
+fn rolling_fire_keeps_a_translucent_layer() {
+    let mut scene = crate::point10::scenes::rolling_fire::RollingFire::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+        return;
+    };
+    let (_, opaque, total) = alpha_counts(&pixels);
+    let min = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .min()
+        .unwrap_or(0);
+    assert!(
+        min < 255,
+        "the fire overlay must leave translucent pixels ({total} px, all alpha 255)"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque lava pixels, but none reached alpha 255"
+    );
+}
+
+#[test]
+fn smoke_room_renders() {
+    let mut scene = crate::point10::scenes::smoke_room::SmokeRoom::new();
+    scene.apply_props(|key| match key {
+        "smokeDensity" => Some(100.0),
+        "fireIntensity" => Some(100.0),
+        _ => None,
+    });
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "SmokeRoom produced an empty frame at {PARTICLE_SIZE}x{PARTICLE_SIZE}"
+    );
+}
+
+/// SmokeRoom's `alpha = max(rgb)` composite leaves a faint haze across the
+/// room instead of an alpha-0 background (the same rule DVD Room's test
+/// documents); the lava sphere still reaches opaque.
+#[test]
+fn smoke_room_keeps_a_translucent_background() {
+    let mut scene = crate::point10::scenes::smoke_room::SmokeRoom::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+        return;
+    };
+    let (_, opaque, total) = alpha_counts(&pixels);
+    let min = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .min()
+        .unwrap_or(0);
+    assert!(
+        min <= 48,
+        "the smoke haze must stay near-transparent ({total} px, min alpha {min})"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque emitter pixels, but none reached alpha 255"
+    );
+}
+
+#[test]
+fn latent_backrooms_renders() {
+    let mut scene = crate::point10::scenes::latent_backrooms::LatentBackrooms::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "LatentBackrooms produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // `scene.background = 0x050505` and the CRT pass forces alpha 1, so the
+    // module is opaque everywhere (its layer alpha is 1, not transparent).
+    assert!(
+        pixels.chunks_exact(4).all(|pixel| pixel[3] == 255),
+        "LatentBackrooms must stay opaque (CRT pass alpha = 1)"
+    );
+}
+
 #[test]
 fn every_scene_survives_dispose_and_reinit() {
     let Some((device, queue)) = gpu() else {

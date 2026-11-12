@@ -39,23 +39,35 @@
 //! output shader unless the destination format is itself `*Srgb`, in which
 //! case the hardware does it (avoiding a double encode).
 //!
-//! # Missing passes
+//! # Scene-specific passes
 //!
-//! `AfterimagePass` (LatentBackrooms) and `SSAOPass` (GeometricTunnel) are
-//! scene-specific and land with those scenes (batches 4-5).
+//! Batch 5b added the two remaining three addon passes as reusable pieces:
+//!
+//! * [`afterimage::AfterimagePass`] — three's `AfterimagePass`, a damped
+//!   ping-pong feedback trail (`LatentBackrooms`). [`Composer::enable_afterimage`]
+//!   inserts it between the scene target and the bloom, which is where the JS
+//!   composer puts it.
+//! * [`ssao::SsaoPass`] — a depth-only screen-space ambient-occlusion pass
+//!   standing in for three's deferred `SSAOPass` (`GeometricTunnel`). It is
+//!   standalone rather than a composer stage because the tunnel mixes the AO
+//!   into its own beauty target before blooming (see the module docs).
 
 #![forbid(unsafe_code)]
 
+pub mod afterimage;
 pub mod composer;
 pub mod output_pass;
 pub mod render_pass;
 pub mod shader_pass;
+pub mod ssao;
 pub mod unreal_bloom_pass;
 
+pub use afterimage::{AfterimagePass, AfterimageUniforms};
 pub use composer::Composer;
 pub use output_pass::{OutputPass, ToneMapping};
 pub use render_pass::RenderPass;
 pub use shader_pass::{ShaderPass, ShaderPassUniforms};
+pub use ssao::{SsaoParams, SsaoPass, SsaoUniforms};
 pub use unreal_bloom_pass::UnrealBloomPass;
 
 #[cfg(test)]

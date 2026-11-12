@@ -19,8 +19,9 @@
 //!                          LightTunnel, Wormhole, ItIsComingForYou, WaterRipple,
 //!                          GlassLens, Mycelium, AroundPlus, UltraHdr, MirrorCube,
 //!                          ColorCube, Boxy, SoundCube, HollowCube,
-//!                          AttractorParticles, DvdRoom (+ the cube_mesh and
-//!                          particle_quad helpers)
+//!                          AttractorParticles, DvdRoom, GeometricTunnel,
+//!                          RollingFire, SmokeRoom, LatentBackrooms (+ the
+//!                          cube_mesh, particle_quad and fire_common helpers)
 //! ```
 //!
 //! # Batch order
@@ -38,7 +39,7 @@
 //! | 3 | WaterRipple, GlassLens, Mycelium, AroundPlus | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
 //! | 4 | **UltraHDR**, MirrorCube, ColorCube, Boxy, SoundCube | `P9Glsl` lighting (`shared/p9_shading`), `BoxGeometry`, `preserveBloomAlpha` |
 //! | 5a | HollowCube, AttractorParticles, DvdRoom | first of the WebGPU/TSL group; the TSL compute passes become fragment/CPU substitutes |
-//! | 5b | GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | SSAO / Afterimage passes still to land |
+//! | 5b | GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | adds the SSAO/Afterimage passes and the last two TSL volume substitutes |
 //!
 //! ChromaticLine was ported ahead of this batch (`chromatic_line.rs`, a
 //! fixture-driven port with its own `SyntheticSine`); it now shares its
@@ -576,9 +577,9 @@ impl UnitQuad {
 /// batch-3 scenes `WaterRipple, GlassLens, Mycelium, AroundPlus` (inventory
 /// order 10, 11, 17, 18), the batch-4 scenes `UltraHDR, MirrorCube,
 /// ColorCube, Boxy, SoundCube` (inventory order 12, 14, 15, 16, 19) and the
-/// batch-5a scenes `HollowCube, AttractorParticles, DvdRoom`. The remaining 4
-/// scenes (`GeometricTunnel`, `RollingFire`, `SmokeRoom`, `LatentBackrooms`)
-/// are added batch by batch.
+/// batch-5a scenes `HollowCube, AttractorParticles, DvdRoom`, and the batch-5b
+/// scenes `GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms` — the
+/// complete 25-scene set.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
         Box::new(chromatic::line::ChromaticLine::new()),
@@ -602,6 +603,10 @@ pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
         Box::new(scenes::hollow_cube::HollowCube::new()),
         Box::new(scenes::attractor_particles::AttractorParticles::new()),
         Box::new(scenes::dvd_room::DvdRoom::new()),
+        Box::new(scenes::geometric_tunnel::GeometricTunnel::new()),
+        Box::new(scenes::rolling_fire::RollingFire::new()),
+        Box::new(scenes::smoke_room::SmokeRoom::new()),
+        Box::new(scenes::latent_backrooms::LatentBackrooms::new()),
     ]
 }
 
@@ -612,7 +617,7 @@ mod tests {
     #[test]
     fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 21);
+        assert_eq!(scenes.len(), 25);
 
         assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
         assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
@@ -639,6 +644,11 @@ mod tests {
         assert_eq!(scenes[18].name(), "Point10 Hollow Cube");
         assert_eq!(scenes[19].name(), "Point10 Attractor Particles");
         assert_eq!(scenes[20].name(), "Point10 DVD Room");
+        // Batch 5b — the last four of the 25 vendored scenes.
+        assert_eq!(scenes[21].name(), "Point10 Geometric Tunnel");
+        assert_eq!(scenes[22].name(), "Point10 Rolling Fire");
+        assert_eq!(scenes[23].name(), "Point10 Smoke Room");
+        assert_eq!(scenes[24].name(), "Point10 Latent Backrooms");
     }
 
     #[test]

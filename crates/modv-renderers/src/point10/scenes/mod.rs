@@ -22,6 +22,10 @@
 //! | [`color_cube`] | Color Cube | `scenes/ColorCube.js` |
 //! | [`boxy`] | Boxy | `scenes/Boxy.js` |
 //! | [`sound_cube`] | Sound Cube | `scenes/SoundCube.js` |
+//! | [`geometric_tunnel`] | Geometric Tunnel | `scenes/GeometricTunnel.js` |
+//! | [`rolling_fire`] | Rolling Fire | `scenes/RollingFire.js` |
+//! | [`smoke_room`] | Smoke Room | `scenes/SmokeRoom.js` |
+//! | [`latent_backrooms`] | Latent Backrooms | `scenes/LatentBackrooms.js` |
 //!
 //! ChromaticLine lives with its shared simulation in
 //! [`crate::point10::chromatic`] ([`crate::point10::chromatic::line`]) and is
@@ -39,14 +43,19 @@ pub mod chromatic_wave;
 pub mod color_cube;
 pub mod cube_mesh;
 pub mod dvd_room;
+pub mod fire_common;
+pub mod geometric_tunnel;
 pub mod glass_lens;
 pub mod hollow_cube;
 pub mod it_is_coming_for_you;
+pub mod latent_backrooms;
 pub mod light_tunnel;
 pub mod mirror_cube;
 pub mod mycelium;
 pub mod particle_field;
 pub mod particle_quad;
+pub mod rolling_fire;
+pub mod smoke_room;
 pub mod sound_cube;
 pub mod spiral_particles;
 pub mod square_tunnel;

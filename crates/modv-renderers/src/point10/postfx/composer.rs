@@ -46,6 +46,7 @@
 
 #![forbid(unsafe_code)]
 
+use super::afterimage::AfterimagePass;
 use super::output_pass::{OutputPass, ToneMapping};
 use super::render_pass::RenderPass;
 use super::unreal_bloom_pass::UnrealBloomPass;
@@ -246,6 +247,9 @@ pub struct Composer {
     _hdr_texture: wgpu::Texture,
     hdr_view: wgpu::TextureView,
     blit: RenderPass,
+    /// Optional `AfterimagePass` stage, applied to the scene target before the
+    /// base copy/bloom (where `LatentBackrooms.js:1605-1606` puts it).
+    afterimage: Option<AfterimagePass>,
     bloom: Option<UnrealBloomPass>,
     combine: CombinePass,
     output: OutputPass,
@@ -294,6 +298,7 @@ impl Composer {
             _hdr_texture: hdr_texture,
             hdr_view,
             blit,
+            afterimage: None,
             bloom: None,
             combine: CombinePass::new(device),
             output,
@@ -344,6 +349,37 @@ impl Composer {
     pub fn disable_bloom(&mut self) {
         self.bloom = None;
         self.rebind();
+    }
+
+    /// Insert three's `AfterimagePass` between the scene target and the bloom
+    /// (`LatentBackrooms.js:1604-1608`).
+    ///
+    /// The feedback trail is applied to the scene colour *before* the bloom
+    /// samples it, exactly like the JS composer order, so a bright frame's
+    /// trail blooms too.
+    pub fn enable_afterimage(&mut self, damp: f32) {
+        let mut pass =
+            AfterimagePass::new(&self.device, &self.queue, self.width, self.height, damp);
+        pass.reset();
+        self.afterimage = Some(pass);
+        self.rebind();
+    }
+
+    /// Remove the afterimage stage.
+    pub fn disable_afterimage(&mut self) {
+        self.afterimage = None;
+        self.rebind();
+    }
+
+    /// Mutable access to the afterimage stage (setting `damp`, clearing the
+    /// trail).
+    pub fn afterimage_mut(&mut self) -> Option<&mut AfterimagePass> {
+        self.afterimage.as_mut()
+    }
+
+    /// Read-only access to the afterimage stage.
+    pub fn afterimage(&self) -> Option<&AfterimagePass> {
+        self.afterimage.as_ref()
     }
 
     /// Mutable access to the bloom pass (setting strength/radius/threshold).
@@ -408,12 +444,26 @@ impl Composer {
         if let Some(bloom) = self.bloom.as_mut() {
             bloom.resize(width, height);
         }
+        if let Some(afterimage) = self.afterimage.as_mut() {
+            afterimage.resize(width, height);
+        }
         self.rebind();
     }
 
     /// Render the chain: the caller has already drawn the scene into
     /// [`Composer::scene_view`].
     pub fn render(&mut self, encoder: &mut wgpu::CommandEncoder, destination: &wgpu::TextureView) {
+        // The afterimage runs first (three's composer order): its output is the
+        // frame the base copy and the bloom sample.
+        let afterimage_view = if let Some(afterimage) = self.afterimage.as_mut() {
+            afterimage.encode(encoder, &self.scene_view);
+            Some(afterimage.output_view().clone())
+        } else {
+            None
+        };
+        let source = afterimage_view.as_ref().unwrap_or(&self.scene_view);
+        self.blit.set_source(&self.device, source);
+
         if let Some(bloom) = self.bloom.as_mut() {
             // Scene -> base copy (three's RenderPass), then the bloom chain
             // (its bind groups are refreshed by `rebind`), then
