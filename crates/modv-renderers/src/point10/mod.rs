@@ -18,7 +18,8 @@
 //!   scenes/                ParticleField, SpiralParticles, Waveform, SquareTunnel,
 //!                          LightTunnel, Wormhole, ItIsComingForYou, WaterRipple,
 //!                          GlassLens, Mycelium, AroundPlus, UltraHdr, MirrorCube,
-//!                          ColorCube, Boxy, SoundCube (+ the cube_mesh and
+//!                          ColorCube, Boxy, SoundCube, HollowCube,
+//!                          AttractorParticles, DvdRoom (+ the cube_mesh and
 //!                          particle_quad helpers)
 //! ```
 //!
@@ -36,7 +37,8 @@
 //! | 2 | **SquareTunnel**, LightTunnel, Wormhole, ItIsComingForYou | needs `plane9/P9Glsl` + `shared/textures` + `shared/random` |
 //! | 3 | WaterRipple, GlassLens, Mycelium, AroundPlus | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
 //! | 4 | **UltraHDR**, MirrorCube, ColorCube, Boxy, SoundCube | `P9Glsl` lighting (`shared/p9_shading`), `BoxGeometry`, `preserveBloomAlpha` |
-//! | 5 | DvdRoom, HollowCube, AttractorParticles, GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | WebGPU/TSL scenes (compute passes hand-written WGSL) + SSAO/Afterimage passes |
+//! | 5a | HollowCube, AttractorParticles, DvdRoom | first of the WebGPU/TSL group; the TSL compute passes become fragment/CPU substitutes |
+//! | 5b | GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | SSAO / Afterimage passes still to land |
 //!
 //! ChromaticLine was ported ahead of this batch (`chromatic_line.rs`, a
 //! fixture-driven port with its own `SyntheticSine`); it now shares its
@@ -572,9 +574,11 @@ impl UnitQuad {
 /// (ChromaticLine was ported ahead of batch 1; the rest are batch 1), then the
 /// batch-2 scenes `SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou`, the
 /// batch-3 scenes `WaterRipple, GlassLens, Mycelium, AroundPlus` (inventory
-/// order 10, 11, 17, 18) and the batch-4 scenes `UltraHDR, MirrorCube,
-/// ColorCube, Boxy, SoundCube` (inventory order 12, 14, 15, 16, 19). The
-/// remaining 7 scenes are added batch by batch.
+/// order 10, 11, 17, 18), the batch-4 scenes `UltraHDR, MirrorCube,
+/// ColorCube, Boxy, SoundCube` (inventory order 12, 14, 15, 16, 19) and the
+/// batch-5a scenes `HollowCube, AttractorParticles, DvdRoom`. The remaining 4
+/// scenes (`GeometricTunnel`, `RollingFire`, `SmokeRoom`, `LatentBackrooms`)
+/// are added batch by batch.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
         Box::new(chromatic::line::ChromaticLine::new()),
@@ -595,6 +599,9 @@ pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
         Box::new(scenes::color_cube::ColorCube::new()),
         Box::new(scenes::boxy::Boxy::new()),
         Box::new(scenes::sound_cube::SoundCube::new()),
+        Box::new(scenes::hollow_cube::HollowCube::new()),
+        Box::new(scenes::attractor_particles::AttractorParticles::new()),
+        Box::new(scenes::dvd_room::DvdRoom::new()),
     ]
 }
 
@@ -605,7 +612,7 @@ mod tests {
     #[test]
     fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 18);
+        assert_eq!(scenes.len(), 21);
 
         assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
         assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
@@ -628,6 +635,10 @@ mod tests {
         assert_eq!(scenes[15].name(), "Point10 Color Cube");
         assert_eq!(scenes[16].name(), "Point10 Boxy");
         assert_eq!(scenes[17].name(), "Point10 Sound Cube");
+        // Batch 5a.
+        assert_eq!(scenes[18].name(), "Point10 Hollow Cube");
+        assert_eq!(scenes[19].name(), "Point10 Attractor Particles");
+        assert_eq!(scenes[20].name(), "Point10 DVD Room");
     }
 
     #[test]

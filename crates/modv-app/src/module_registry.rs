@@ -105,9 +105,12 @@ use modv_renderers::isf::{
 use modv_renderers::point10::chromatic::line::ChromaticLine;
 use modv_renderers::point10::chromatic::wave::ChromaticWave;
 use modv_renderers::point10::scenes::around_plus::AroundPlus;
+use modv_renderers::point10::scenes::attractor_particles::AttractorParticles;
 use modv_renderers::point10::scenes::boxy::Boxy;
 use modv_renderers::point10::scenes::color_cube::ColorCube;
+use modv_renderers::point10::scenes::dvd_room::DvdRoom;
 use modv_renderers::point10::scenes::glass_lens::GlassLens;
+use modv_renderers::point10::scenes::hollow_cube::HollowCube;
 use modv_renderers::point10::scenes::it_is_coming_for_you::ItIsComingForYou;
 use modv_renderers::point10::scenes::light_tunnel::LightTunnel;
 use modv_renderers::point10::scenes::mirror_cube::MirrorCube;
@@ -258,6 +261,12 @@ pub enum Point10SceneKind {
     Boxy(Boxy),
     /// `Point10 Sound Cube` (`scenes/sound_cube.rs`).
     SoundCube(SoundCube),
+    /// `Point10 Hollow Cube` (`scenes/hollow_cube.rs`).
+    HollowCube(HollowCube),
+    /// `Point10 Attractor Particles` (`scenes/attractor_particles.rs`).
+    AttractorParticles(AttractorParticles),
+    /// `Point10 DVD Room` (`scenes/dvd_room.rs`).
+    DvdRoom(DvdRoom),
 }
 
 impl Point10SceneKind {
@@ -285,6 +294,9 @@ impl Point10SceneKind {
             "Point10 Color Cube" => Self::ColorCube(ColorCube::new()),
             "Point10 Boxy" => Self::Boxy(Boxy::new()),
             "Point10 Sound Cube" => Self::SoundCube(SoundCube::new()),
+            "Point10 Hollow Cube" => Self::HollowCube(HollowCube::new()),
+            "Point10 Attractor Particles" => Self::AttractorParticles(AttractorParticles::new()),
+            "Point10 DVD Room" => Self::DvdRoom(DvdRoom::new()),
             _ => return None,
         })
     }
@@ -298,6 +310,9 @@ impl Point10SceneKind {
     pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
         match self {
             Self::ChromaticLine(scene) => scene.apply_props(|key| get(key)),
+            Self::HollowCube(scene) => scene.apply_props(|key| get(key)),
+            Self::AttractorParticles(scene) => scene.apply_props(|key| get(key)),
+            Self::DvdRoom(scene) => scene.apply_props(|key| get(key)),
             Self::UltraHdr(scene) => scene.apply_props(|key| get(key)),
             Self::MirrorCube(scene) => scene.apply_props(|key| get(key)),
             Self::ColorCube(scene) => scene.apply_props(|key| get(key)),
@@ -324,6 +339,9 @@ impl Point10Scene for Point10SceneKind {
     fn name(&self) -> &'static str {
         match self {
             Self::ChromaticLine(scene) => scene.name(),
+            Self::HollowCube(scene) => scene.name(),
+            Self::AttractorParticles(scene) => scene.name(),
+            Self::DvdRoom(scene) => scene.name(),
             Self::UltraHdr(scene) => scene.name(),
             Self::MirrorCube(scene) => scene.name(),
             Self::ColorCube(scene) => scene.name(),
@@ -347,6 +365,9 @@ impl Point10Scene for Point10SceneKind {
     fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
         match self {
             Self::ChromaticLine(scene) => scene.init(ctx),
+            Self::HollowCube(scene) => scene.init(ctx),
+            Self::AttractorParticles(scene) => scene.init(ctx),
+            Self::DvdRoom(scene) => scene.init(ctx),
             Self::UltraHdr(scene) => scene.init(ctx),
             Self::MirrorCube(scene) => scene.init(ctx),
             Self::ColorCube(scene) => scene.init(ctx),
@@ -370,6 +391,9 @@ impl Point10Scene for Point10SceneKind {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Self::ChromaticLine(scene) => scene.resize(width, height),
+            Self::HollowCube(scene) => scene.resize(width, height),
+            Self::AttractorParticles(scene) => scene.resize(width, height),
+            Self::DvdRoom(scene) => scene.resize(width, height),
             Self::UltraHdr(scene) => scene.resize(width, height),
             Self::MirrorCube(scene) => scene.resize(width, height),
             Self::ColorCube(scene) => scene.resize(width, height),
@@ -393,6 +417,9 @@ impl Point10Scene for Point10SceneKind {
     fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
         match self {
             Self::ChromaticLine(scene) => scene.update(dt, audio),
+            Self::HollowCube(scene) => scene.update(dt, audio),
+            Self::AttractorParticles(scene) => scene.update(dt, audio),
+            Self::DvdRoom(scene) => scene.update(dt, audio),
             Self::UltraHdr(scene) => scene.update(dt, audio),
             Self::MirrorCube(scene) => scene.update(dt, audio),
             Self::ColorCube(scene) => scene.update(dt, audio),
@@ -420,6 +447,9 @@ impl Point10Scene for Point10SceneKind {
     ) {
         match self {
             Self::ChromaticLine(scene) => scene.render(encoder, target),
+            Self::HollowCube(scene) => scene.render(encoder, target),
+            Self::AttractorParticles(scene) => scene.render(encoder, target),
+            Self::DvdRoom(scene) => scene.render(encoder, target),
             Self::UltraHdr(scene) => scene.render(encoder, target),
             Self::MirrorCube(scene) => scene.render(encoder, target),
             Self::ColorCube(scene) => scene.render(encoder, target),
@@ -443,6 +473,9 @@ impl Point10Scene for Point10SceneKind {
     fn dispose(&mut self) {
         match self {
             Self::ChromaticLine(scene) => scene.dispose(),
+            Self::HollowCube(scene) => scene.dispose(),
+            Self::AttractorParticles(scene) => scene.dispose(),
+            Self::DvdRoom(scene) => scene.dispose(),
             Self::UltraHdr(scene) => scene.dispose(),
             Self::MirrorCube(scene) => scene.dispose(),
             Self::ColorCube(scene) => scene.dispose(),
@@ -466,6 +499,9 @@ impl Point10Scene for Point10SceneKind {
     fn props(&self) -> Vec<SceneProp> {
         match self {
             Self::ChromaticLine(scene) => scene.props(),
+            Self::HollowCube(scene) => scene.props(),
+            Self::AttractorParticles(scene) => scene.props(),
+            Self::DvdRoom(scene) => scene.props(),
             Self::UltraHdr(scene) => scene.props(),
             Self::MirrorCube(scene) => scene.props(),
             Self::ColorCube(scene) => scene.props(),
@@ -489,6 +525,9 @@ impl Point10Scene for Point10SceneKind {
     fn meta(&self) -> SceneMeta {
         match self {
             Self::ChromaticLine(scene) => scene.meta(),
+            Self::HollowCube(scene) => scene.meta(),
+            Self::AttractorParticles(scene) => scene.meta(),
+            Self::DvdRoom(scene) => scene.meta(),
             Self::UltraHdr(scene) => scene.meta(),
             Self::MirrorCube(scene) => scene.meta(),
             Self::ColorCube(scene) => scene.meta(),
@@ -1385,7 +1424,7 @@ mod tests {
         }
 
         // Built-in shader + 2D + Point10 definitions, all unique.
-        assert!(map.len() >= 37 + 15 + 18);
+        assert!(map.len() >= 37 + 15 + 21);
         assert_eq!(map["Bands"]["props"]["u_ringWidth"]["type"], json!("float"));
         assert_eq!(map["Bands"]["props"]["u_ringWidth"]["min"], json!(0.01));
     }
@@ -1405,7 +1444,7 @@ mod tests {
         // Point10 names are their own kind, not 2D modules.
         assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
         assert_eq!(registry.kind("Point10 Not A Scene"), None);
-        assert_eq!(registry.point10_definitions().len(), 18);
+        assert_eq!(registry.point10_definitions().len(), 21);
     }
 
     #[test]
@@ -1437,6 +1476,9 @@ mod tests {
                 "Point10 Color Cube",
                 "Point10 Boxy",
                 "Point10 Sound Cube",
+                "Point10 Hollow Cube",
+                "Point10 Attractor Particles",
+                "Point10 DVD Room",
             ]
         );
 

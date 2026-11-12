@@ -14,6 +14,9 @@
 //! | [`glass_lens`] | Glass Lens | `scenes/GlassLens.js` |
 //! | [`mycelium`] | Mycelium | `scenes/Mycelium.js` |
 //! | [`around_plus`] | Around Plus | `scenes/AroundPlus.js` |
+//! | [`hollow_cube`] | Hollow Cube | `scenes/HollowCube.js` |
+//! | [`attractor_particles`] | Attractor Particles | `scenes/AttractorParticles.js` |
+//! | [`dvd_room`] | DVD Room | `scenes/DvdRoom.js` |
 //! | [`ultra_hdr`] | Ultra HDR | `scenes/UltraHDR.js` |
 //! | [`mirror_cube`] | Mirror Cube | `scenes/MirrorCube.js` |
 //! | [`color_cube`] | Color Cube | `scenes/ColorCube.js` |
@@ -30,11 +33,14 @@
 //! five cube/lighting scenes share.
 
 pub mod around_plus;
+pub mod attractor_particles;
 pub mod boxy;
 pub mod chromatic_wave;
 pub mod color_cube;
 pub mod cube_mesh;
+pub mod dvd_room;
 pub mod glass_lens;
+pub mod hollow_cube;
 pub mod it_is_coming_for_you;
 pub mod light_tunnel;
 pub mod mirror_cube;

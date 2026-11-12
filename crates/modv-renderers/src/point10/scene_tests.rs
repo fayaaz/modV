@@ -500,6 +500,147 @@ fn sound_cube_renders() {
     assert!(transparent > 0, "SoundCube lost its transparent clear");
 }
 
+// ————— batch 5a —————
+
+/// HollowCube's cubes are 0.01 world units in a 0.5-unit shell seen by a
+/// 50° camera at z = 2.2: a 64 px frame gives them a fraction of a pixel, so
+/// the smoke test renders at 128 px.
+const HOLLOW_CUBE_SIZE: u32 = 128;
+
+#[test]
+fn hollow_cube_renders() {
+    let mut scene = crate::point10::scenes::hollow_cube::HollowCube::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, HOLLOW_CUBE_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "HollowCube produced an empty frame at {HOLLOW_CUBE_SIZE}x{HOLLOW_CUBE_SIZE}"
+    );
+}
+
+/// `CLEAR_ALPHA = 0` and `Shader2`'s `alpha = c2.a` (the cube capture's), so
+/// the empty space around the shell stays transparent.
+#[test]
+fn hollow_cube_keeps_the_background_transparent() {
+    let mut scene = crate::point10::scenes::hollow_cube::HollowCube::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, HOLLOW_CUBE_SIZE) else {
+        return;
+    };
+    let (transparent, opaque, total) = alpha_counts(&pixels);
+    assert!(
+        transparent > 0,
+        "expected an alpha-0 background, but every pixel was drawn ({total} px)"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque cubes, but none reached alpha 255"
+    );
+}
+
+/// The particle field is ~2 px per billboard at 1080p (`scale = 0.008 *
+/// particleSize` at a 9.9-unit orbit), so the smoke test maxes `particleSize`
+/// and renders at [`PARTICLE_SIZE`] to give the dots something to rasterise.
+fn attractor_particles_scene() -> crate::point10::scenes::attractor_particles::AttractorParticles {
+    let mut scene = crate::point10::scenes::attractor_particles::AttractorParticles::new();
+    // The smoke-test frame is square, so pull the orbit back until the 5x5
+    // particle field no longer fills it; max the sprite size so the ~2 px
+    // 1080p billboards still rasterise at 256 px.
+    scene.apply_props(|key| match key {
+        "particleSize" => Some(4.0),
+        "cameraDistance" => Some(20.0),
+        _ => None,
+    });
+    scene
+}
+
+#[test]
+fn attractor_particles_renders() {
+    let mut scene = attractor_particles_scene();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "AttractorParticles produced an empty frame at {PARTICLE_SIZE}x{PARTICLE_SIZE}"
+    );
+    // `SCENE_BACKGROUND = null` / `CLEAR_ALPHA = 0`: the layer alpha is the
+    // JS's transparent clear.
+    assert_eq!(scene.clear_alpha(), 0.0);
+}
+
+/// The particle field is additive on a transparent clear. At the JS density
+/// (2^18 points at `PARTICLE_SIZE`) the cloud covers the whole frame, so the
+/// meaningful layer-alpha property is that it varies (some pixels stay
+/// translucent) and that opaque pixels exist — not alpha-0 corners.
+#[test]
+fn attractor_particles_keeps_a_translucent_layer() {
+    let mut scene = attractor_particles_scene();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+        return;
+    };
+    let (_, opaque, total) = alpha_counts(&pixels);
+    let min = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .min()
+        .unwrap_or(0);
+    assert!(
+        min < 255,
+        "the additive field must leave translucent pixels ({total} px, all alpha 255)"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque pixels, but none reached alpha 255"
+    );
+}
+
+/// The DVD Room's logo and glass panes cover the middle of the frame; the
+/// clearance around the box (and the room's transparent clear) must survive
+/// the `alpha = max(rgb)` composite.
+const DVD_ROOM_SIZE: u32 = 128;
+
+#[test]
+fn dvd_room_renders() {
+    let mut scene = crate::point10::scenes::dvd_room::DvdRoom::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, DVD_ROOM_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "DvdRoom produced an empty frame at {DVD_ROOM_SIZE}x{DVD_ROOM_SIZE}"
+    );
+}
+
+/// SmokeRoom's `alpha = max(rgb)` composite leaves a faint haze across the
+/// room instead of an alpha-0 background (the JS does the same); the logo and
+/// glass still reach opaque, and the haze stays near-transparent.
+#[test]
+fn dvd_room_keeps_a_translucent_background() {
+    let mut scene = crate::point10::scenes::dvd_room::DvdRoom::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, DVD_ROOM_SIZE) else {
+        return;
+    };
+    let (_, opaque, total) = alpha_counts(&pixels);
+    let min = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .min()
+        .unwrap_or(0);
+    assert!(
+        min <= 16,
+        "the haze must stay near-transparent ({total} px, min alpha {min})"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque logo pixels, but none reached alpha 255"
+    );
+}
+
 #[test]
 fn every_scene_survives_dispose_and_reinit() {
     let Some((device, queue)) = gpu() else {
