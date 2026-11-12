@@ -67,6 +67,9 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       PERSISTENT/FLOAT buffers; corpus report — **344/351 fragments translate
       without an override (98.0 %)**, 35/36 vertex sidecars (7 overrides
       pending, documented in `docs/isf-corpus-report.md`)
+- [x] ISF modules registered in the engine: corpus bundled as `resources/isf`,
+      discovered via `--isf-dir`, props/meta synthesised, compositor rendering
+      with per-frame uniforms + group-canvas image inputs (351 registered)
 - [x] Engine integration: EngineState store, GPU compositor, real previews,
       mutations + delta stream (44+ tests)
 - [x] Mirror parity: `--emit-fixtures` + `tests/unit/engine-mirror.test.js`
@@ -104,6 +107,9 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       row-fade blending assigned to both group ids, Fade for manual changes,
       event-driven deltas
 - [ ] Scene-preview frames for the UI hover previews (≥ 25 fps)
+- [x] Gallery/output previews in the UI: main panel blits the composited ring;
+      gallery tiles poll the engine `preview/module` endpoint (renderer side
+      merged; engine endpoint in flight)
 - [ ] ISF shader scene transitions (Fade is the runtime transition for now)
 - [ ] Rename/removal migration for default Scenes on version bumps
 
