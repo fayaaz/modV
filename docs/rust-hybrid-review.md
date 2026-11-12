@@ -48,7 +48,7 @@ flush, windowless supervisor parking) remain open and are tracked here.
 
 - **Reviewed:** everything committed on `rust-hybrid` vs `origin/main`, i.e.
   the merge base `76816a0f` through the tip at the time of each review pass
-  (latest pass: **`270a0003`** — see the [Round log](#round-log)). This is
+  (latest pass: **`e916f42a`** — see the [Round log](#round-log)). This is
   ~107k added lines across 205 files: six Rust crates (`crates/`, ~90k lines),
   the Electron/main-process and renderer integration, tests, build files and
   docs.
@@ -85,8 +85,9 @@ and made this review productive. The author's response to this review (see
 “Fix-wave verification — Round 5” below) was fast, broad and mostly
 high-quality — R-1..R-30 landed, with residuals.
 
-**Status:** as of `270a0003`, engine mode remains opt-in and should stay so
-until the open items close. R-31, R-34, R-36 and the `.deb` PipeWire
+**Status:** as of `e916f42a`, engine mode remains opt-in and should stay so
+until the open items close. R-31, R-34, R-36, PipeWire mid-stream loss, the
+camera enumeration crash, Input Link mirror settle and the `.deb` PipeWire
 dependency have landed and verified; the corpus validates 351/351; Ball
 Of Fire resolves in the default Scenes. What blocks a default flip now:
 
@@ -94,31 +95,35 @@ Of Fire resolves in the default Scenes. What blocks a default flip now:
    Round 8) — a hostile shared playlist wedges the engine's event-loop
    thread (`evaluateEveryFrame` re-runs per frame); the watchdog/restart
    path turns it into a crash loop before the app goes `fatal`.
-2. **R-2 residual** — mid-stream PipeWire death pins the show to silence
-   with no log and no renderer-pump fallback (the module doc claims the
-   opposite; engine-owned capture is a new user-facing path).
-3. **R-35 (partial)** — the shader-transition pipeline-failure downgrade is
-   correct on the prepare path but unreachable there (no wgpu error scopes);
-   the apply-time failure path still shows one unblended frame with a late,
-   misattributed WARN.
+2. **Media library path — default profile broken** (Round 13): stored
+   paths are project-prefixed with a leading slash (`/default/video/…`) —
+   they fall through the absolute branch and never resolve, while the
+   advertised `/video/x` case doesn't exist; on Windows the same string is
+   non-absolute and rejected outright. Video files in engine mode are
+   broken on production installs.
+3. **R-35 (partial)** — apply-time failure path still presents one unblended
+   frame with a late, misattributed WARN; unreachable prepare-failure path.
 4. **Plugin-host P2s** — plugins can shadow core mutation types (mirror-only
    writes), async frame-hook rejections spray the unhandledrejection log
    at rAF cadence, and unsupported plugins get a dead silent checkbox.
 5. **WS-12 docs contradict the shipped Boa evaluator** — progress doc /
    `rust-hybrid.md` still say expressions are not evaluated by the engine;
    they are (and carry a sandbox caveat that is only documented in code).
-6. **WS-10 media end-to-end still broken today** — two P1s (stored media
-   paths root at `/` so engine file sources never resolve on POSIX; the
-   file-source lifetime is tied to the TextureControl component, killing
-   playback on panel changes) plus `.deb` declares neither the GStreamer
-   libs/plugins nor does the AppImage bundle them; MediaHub restarts
-   non-looping files forever and blocks the render/heartbeat thread. The
-   Webcam camera-index divergence was fixed in `28d90158`.
-7. **Point10 volume re-port** — real fluid sim but it (a) deleted Rolling
-   Fire and Geometric Tunnel render coverage, (b) loosened the SmokeRoom/
-   DvdRoom transparency contracts from min-alpha bounds to a 10 % "some
-   opaque" check, (c) always simulates the full 6.75 M-voxel grid (~432 MB
-   `Rgba16Float`, no override), and (d) left my R-33/R-34 findings open.
+6. **Media capture maturity** — orphaned file sources decode forever; the
+   `.deb` still lacks `gstreamer1.0-pipewire` (the screen path is dead on a
+   clean install); `schedule_restart` blocks the render/heartbeat thread;
+   no permanent-failure latch; `media/list-cameras` failure stops all
+   selected cameras. MediaHub's never-converging reconnect loop is the
+   engine's loudest remaining behaviour.
+7. **Point10 volume re-port** — real fluid sim but it (a) thinned Rolling
+   Fire's render coverage, (b) loosened transparency contracts, (c) always
+   simulates the full 6.75 M-voxel grid, (d) left R-33 open for DvdRoom
+   (SmokeRoom fixed), (e) scene targets still composite as
+   premultiplied (accepted-as-documented; the plain-alpha overlays will run
+   hot over bright backdrops).
+8. **groups/removeGroup leaks module orphans** — group modules stay in the
+   store and the mirror and are baked into every saved preset after a
+   removeGroup.
 
 The remaining conformance gap is not correctness but honesty and hardening:
 the app is usable in engine mode, it just cannot fail closed.
@@ -841,7 +846,9 @@ tests.
 
 - No code was compiled, tested, linted, packaged or run — this is a reading
   review with JS cross-checks. The author's e2e (144/144), benchmark and
-  "1630 tests pass" claims were **not** re-run or reproduced.
+  test-count claims were **not** re-run or reproduced (I count ~2100 raw
+  `#[test]` attributes; the author reports 1788 — a difference likely caused
+  by counting via `cargo` vs grep; noted, not arbitrated).
 - Line numbers drift with each commit; `✔` findings were re-verified at the
   reviewed tip (not every fix was re-verified by execution), `◐` findings are
   single-pass reads (verify before fixing).
@@ -855,10 +862,13 @@ tests.
   1629 vs 1630 Rust subtotals, 947 vs 1005 Vitest), both were recorded
   verbatim rather than arbitrated — running the suites was out of scope.
 - Review rounds are appended below; see [Round log](#round-log) for exactly
-  what was covered and when. Rounds 8–12 covered the expressions/plugin-host
-  work, GStreamer capture, engine media wiring and the Point10 fluid re-port
-  (`9afa21dc..270a0003`). As of the final pass, no commits newer than
-  `270a0003` had landed; the other thread had not stopped.
+  what was covered and when. Rounds 13 covered the media/PipeWire/
+  expressions hardening wave, group mutation parity and the final validation
+  docs (`270a0003..e916f42a`). The other thread stopped producing: its last
+  commit `e916f42a` ("final validation snapshot") landed 2026-11-12 16:26,
+  and for ~25 minutes it held no child processes, wrote no files and sat in
+  `ep_poll` with an idle API socket — its work had finished for this pass.
+  Any commits after that point are not reflected here.
 
 ## Fix-wave verification — Round 5 (`36672a33..916586f5`)
 
@@ -1541,133 +1551,274 @@ again). Docs bumped to 429 modules / 26 scenes / 1777 workspace tests.
   rooms-pass-JS defaults (16 steps, key light) preserved after the
   parameterisation; `fire_colour.wgsl` extraction is behaviour-preserving.
 
-## Outstanding items — the working list as of `270a0003`
+## Round 13 — `270a0003..e916f42a` (verification of the hardening wave; group mutation parity)
+
+Five commits: `2a149f16` (V4L2 camera enum, media-path re-root attempt,
+inspector-unmount fix, PipeWire mid-stream latch, expression cap/denylist),
+`a3cac91f` (review P1/P2 wave — expressions, media safety, R-33, packaging),
+`a83cdd2d` (group mutation parity), `acfde60c` (R-34 silent-pump GPU test),
+`57174b5b` (groups/updateGroupName) — rounded out by `1a94b31b` (Input Link
+mirror settle flush) and `e916f42a` (final validation docs).
+
+### `2a149f16` — what survived verification
+
+- **R-2 residual (PipeWire mid-stream loss) — VERIFIED FIXED.**
+  `state_changed` (error, or Streaming/Paused→Unconnected) and `error` both
+  latch `formats.reject()` → cloned error → `AudioFeed::pump` breaks →
+  `pump_engine_audio` logs once → `disable_engine_audio()` → renderer
+  `SET_BANDS` un-gated again. `process` parks buffers once latched (no
+  stale-format decode); heartbeat unaffected; once-only via
+  `audio_error_logged`. Caveats: a transient PipeWire ERROR state latches
+  forever with no re-arm path for the session (accept); and the `lost`
+  predicate is untested (only format-rejection latching is tested) — extract
+  and pin it.
+- **Camera enumeration — VERIFIED for the libcamera SIGSEGV root cause**
+  (Linux path queries V4L2 directly; non-Linux path untouched; metadata
+  nodes dropped by caps; 64-mode cap; target-gated `v4l` dependency).
+  New issues: fps truncation (`f.denominator / f.numerator` yields 29 for
+  30000/1001 instead of 30) and `to_discrete()` eagerly materialising the
+  continuous cross-product (~280 MB transient on a hostile device ladder
+  until the 64-mode cap fires) — bound expansion.
+- **Media path re-root — PARTIAL, and the default-profile shape remains
+  broken.** Only `^/(video|image|palette|preset|module|plugin|scene)(/|$)`
+  is re-rooted; the real POSIX library shape `/default/video/clip.mp4`
+  (project-prefixed, from `read-file.js:8`) falls through the absolute
+  return, so **engine video files still never open for the default
+  project**. On Windows the shape is non-absolute → rejected since
+  `a3cac91f` — engine files are broken there outright. Tests only pin
+  `/video/clip.mp4`.
+- **Inspector-unmount stop removed — VERIFIED (claim).** The engine source
+  is no longer stopped on panel unmount; type-switch and path-switch stop
+  it; quit stops everything. Residual: an orphaned file source (path changed
+  by preset load / module delete / scene switch) decodes forever — nothing
+  references it; `reconcileEngineSources` is cameras-only;
+  `media-mirror` can't stop it either.
+- **GeometricTunnel GPU tests restored** (`geometric_tunnel_renders`,
+  `…_keeps_a_translucent_layer`) — VERIFIED.
+
+### `a3cac91f` — the P1/P2 wave, and what it did not close
+
+- **Expressions: the denylist does not hold and no budget exists.**
+  a3cac91f changed **zero lines** of expressions.rs (the cap+denylist were
+  all in 2a149f16). Verified bypass classes: `padStart/padEnd` unblocked
+  (defeats `repeat(`), `.split/.join/.reverse/.concat`, `Object.keys/
+  values/entries`, JSON parse/stringify over host-controlled input;
+  **`({}).constructor.constructor("…compiled fresh…")()`** — the inner
+  string is never token-matched, nullifying the whole filter; whitespace
+  evasion of every spaced token (`repeat\n(1e9)`, `new\tObject`); BigInt
+  literals (`2n ** 99999999n`) — no "BigInt" substring, no exponent cap;
+  `regress-0.12` backtracking regex has no loop-count or timeout;
+  `>4096-byte source` hard-fails with only a `warn_once` to stderr (silently
+  frozen prop, no UI signal); the "unguessable" compiled-function key is
+  `__modv_expr_{nanos}_{pid}`, still discoverable via
+  `Object.getOwnPropertyNames(globalThis)` and WRITABLE → silent permanent
+  freeze of every expression in the document; NaN guards hold, but the
+  progress doc now claims the engine "trusts user presets but not hostile
+  shared playlists" — **false assurance the commit itself added**. The one
+  real mitigation is the realm reset, and it only covers cross-preset
+  pollution; within a session pollution persists.
+- **`media/start-file` absolute-local-only — VERIFIED.** `https://`,
+  `rtsp://`, `file:`, `..`, relative paths and NUL rejected at the socket,
+  both directions pinned by tests. Residual: no realpath canonicalisation —
+  the absolute path names any local file a Scene playlist (or compromised
+  renderer) names; the socket is same-UID so this is contract, not
+  confinement — but the engine's `normalise_media_path` doc claims "escape
+  the directory the renderer rooted the path under" is enforced, which it is
+  not (only scheme/`..`/relative/NUL are).
+- **Non-looping file parks at its end — VERIFIED** (`should_restart(state,
+  looping)`; `Ended` → `attempts=0`, park keeps the last frame; loop:true
+  replays from 0). **Zero unit tests for either direction** — both
+  directions only exist as GST-gated integration tests that silently skip
+  without GStreamer.
+- **Frames >8192² refused — PARTIAL.** Upload-time refusal prevents the
+  wgpu pool allocation, but the frame is already materialised by GStreamer
+  (plus `copy_rgba_rows` reserve); refusal never reaches the renderer
+  (`media/status` still reports the source live with `lastError` null —
+  frozen healthy-looking feed); for screen sources there is no
+  negotiate-time clamp at all.
+- **R-33 SmokeRoom — VERIFIED FIXED** (`emitter_model = scale(box_scale)`;
+  wind `origin.w` agrees; regression test pins it). **DvdRoom — NOT
+  FIXED**: `dvd_room.rs` logo/seed still ignore `boxScale` (`logo_model()`
+  has only pos/rot/pop); the commit message says "R-33 closed for
+  SmokeRoom" — correct, but DvdRoom carries the same bug and no test.
+- **`.deb` GStreamer deps — PARTIAL.** All five current names are valid on
+  bookworm+ (`libgstreamer1.0-0`, `libgstreamer-plugins-base1.0-0`,
+  plugins-base/good/libav) — correct and needed. Still missing
+  **`gstreamer1.0-pipewire`**, despite this same change-set documenting the
+  `pipewiresrc` screen path as implemented and tested; a `.deb` install
+  cannot use screen capture and gets `media_plugin_missing` rather than a
+  clear message.
+- **Group mutation parity (a83cdd2d) — PARTIAL.**
+  - `groups/removeGroup` leaks the group's **modules**: it cleans only the
+    six control inputs and emits `REMOVE_GROUP` — the modules stay in
+    `state.modules`, in the mirror's `modules.active`, and get written into
+    every subsequent preset/Scene. The engine has the orphan-drop logic
+    (`release_group`); the review's earlier finding stands, worse — the
+    doc-comment now cites `groups.js:204-208` (a contradicting anchor) with
+    no mirror-side note.
+  - `groups/UPDATE_GROUP` unknown key types fail the **entire** multi-key
+    update (JS applies keys verbatim; engine fails closed — a silent
+    dead-end via fire-and-forget commit, surfacing only as a main-process
+    warn). Deliberate but undocumented divergence.
+  - `groups/REPLACE_GROUP_MODULES` silently drops non-string module ids
+    (JS writes verbatim); empty array allowed; deleting a fading ghost row
+    mid-crossfade pops visually (parity with the JS mutation, but
+    preferable to guard or document).
+  - `groups/updateGroupName` (57174b5b) — clean; unknown group warns-once
+    and returns Null; payload replays cleanly into the mirror.
+  - Test claims: "modv-app 288" vs 289 counted; mirror-parity fixtures
+    (`tests/fixtures/engine/deltas.json`) not extended — no `groups/*`
+    payload-shape coverage there.
+- **`1a94b31b` — VERIFIED (read).** The settled Input Link value is no
+  longer swallowed by the 10 Hz throttle: unchanged writes now flush the
+  *current* value when the mirror's last delta differs from it, for module
+  props (`modules/UPDATE_ACTIVE_MODULE_PROP`, exact prop-schema payload),
+  meta values (`modules/UPDATE_ACTIVE_MODULE_META`) and group controls.
+  Regression test settles a link inside the interval; the framing matches
+  the JS worker's skip-if-unchanged semantics. Not re-run (no cargo).
+- **`1a94b31b`/docs** — progress counts "1788 Rust tests" — plausible by
+  count (verifier measured 1788 `#[test]`), Vitest still 947.
+- **`acfde60c` — VERIFIED.** The R-34 silent-GPU-path regression test is
+  real (122 silent frames, `any_lit` + frame-pair inequality), not a
+  vacuous skip where an adapter exists.
+- **Straight-alpha composite decision — documented and matching** (keep
+  scene targets straight; composite at present). `blend.rs:53`'s "frame is
+  presented un-premultiplied" comment still contradicts the raw-blit
+  `PRESENT_WGSL` (`compositor.rs:2910-2927`); the doc decision makes this
+  an accepted debt, not a bug — close the comment in a future pass.
+
+## Outstanding items — the working list as of `e916f42a`
 
 Ordered by severity. Everything here is fix-wave-verified or carried forward
 (marked ✔/◐ in the body). Items closed by later rounds are noted as such
 rather than deleted.
 
 **P1**
-1. **Expressions: no wall-clock/allocation budget** (`expressions.rs`) —
-   native builtin loops (`Array.from({length:1e9})`, `.map/.forEach/.reduce`,
-   `"x".repeat(1e9)`) bypass the 100k loop bound; expressions run
-   synchronously on the engine event-loop thread, and `evaluateEveryFrame`
-   assignments run every frame. A shared scenes playlist with a hostile
-   expression wedges the app (the heartbeat watchdog kills the engine;
-   restart re-applies it; budget exhausts; engine goes `fatal`). Add a
-   heap/time ceiling plus a per-evaluation cap, and document the trust
-   posture for imported playlists.
-2. **Media path rooting (engine-media.js)** — stored media paths are
-   `/` prefixed (e.g. `/video/clip.mp4`), so the POSIX
-   `media/start-file` target never resolves under the media directory;
-   files play through Webcam in the default config only by accident of
-   Windows semantics. Fix: canonicalise `item.path` into `mediaPath` (POSIX
-   join, rejecting `..`), and add tests pinning a stored `/video/x.webm`.
-3. **Media source lifetime bound to the TextureControl component** —
-   closing the inspector/switching modules or Scenes stops the engine file
-   source (`stopEngineVideoSource` at `beforeUnmount`), freezing video; a
-   preset/scene load never restarts it (no `created()` when not mounted).
-   Fix: own the source lifecycle by the texture-id/module prop and persist
-   across scene restores (mirroring the legacy `videos` auxillary).
+1. **Expressions have no wall-clock/allocation budget** (`expressions.rs`) —
+   the 4 KB source cap, the 100k VM loop bound and the 64 recursion limit
+   are the only walls, and they do not see native builtin work:
+   `padEnd/padStart`, `.split/.join/.concat`, `Object.keys/values/entries`
+   on attacker-sized inputs, `regress-0.12` backtracking regex ((`(a+)+$`)
+   against a long preset-supplied string; no timeout, no loop count),
+   BigInt literals (`2n ** 99999999n`), and the definitive escape
+   **`({}).constructor.constructor("…freshly-compiled source…")()`** — the
+   outer denylist token check never sees the inner string, nullifying the
+   whole filter including its `Function`/`eval`/`globalThis` guards.
+   Expressions run synchronously on the engine event-loop thread, and
+   `evaluateEveryFrame` assignments run every frame. The fix-wave report's
+   "denylist closes the native-builtin path" is not true. The realm reset
+   mitigates only cross-preset pollution; within a session the pollution
+   persists, and the "unguessable compiled-function key" is
+   nanoseconds+pid — discoverable and WRITABLE via
+   `Object.getOwnPropertyNames(globalThis)`. The damage surface is a
+   preset/Scene **file**, so this matters only for hostile documents — but
+   the progress doc now claims the engine "trusts user presets but not
+   hostile shared playlists", which is false assurance. Working fix: a
+   precompile-time **allowlist AST validator** (identifier/member-name
+   permitlist, no computed members, no `constructor`/`__proto__`/
+   `prototype`, no `new`, only the four scope names + `Math`/`Date`) that
+   rejects everything else — that kills every bypass class including the
+   constructor escape — or an OS-level rlimit/timeout around evaluation.
+2. **Media library path — default profile still broken; Windows now
+   rejected outright** — the re-root only recognises `/video|image|…/`,
+   but the media manager stores project-relative library paths with a
+   leading slash and the project prefix (`/default/video/clip.mp4`); those
+   fall through the absolute branch, the engine gets a non-existent path,
+   and every engine video file fails silently — the advertised
+   `/video/clip.mp4` case doesn't occur in production installs. On Windows
+   the same string is non-absolute and now rejected at the socket.
+   **This is the flagged bug from Round 10 and it is not fixed.** Pin the
+   real library shape (`/default/video/*` and per-profile variants) in the
+   fix and the tests.
+3. **Engine video sources outlive their consumers silently** — stopping on
+   panel unmount was removed (good), but an orphaned file source (preset
+   reload with a different clip / module delete / Scene switch) is never
+   stopped: GStreamer threads keep decoding and the compositor keeps
+   uploading into a GPU texture nobody samples (appsink max-buffers=2 bounds
+   memory, not CPU/GPU). Add a consumer check (stop when no module
+   references the source id, or gate the per-frame upload on liveness).
 
 **Closed / re-verified**
 - ~~R-32~~ — SmokeRoom pane/sphere order fixed with the volume re-port.
 - ~~R-28~~ — DvdRoom 5-bin bloom lane vs `band(1,9)` logo/glass split matches
   the JS.
-- ~~camera order divergence~~ — engine Webcam prop now indexes camera-like
-  sources only (`Camera | Screen | TestPattern`); files never shift it.
-  Residual: screen counts as camera engine-side, not renderer-side (benign
-  while screen start is gated off).
-- ~~R-34~~ — RollingFire no-audio path idles properly (freq_mag zeroed,
-  sim runs; `270a0003`). **No GPU-level silent-audio regression test**
-  (all silent-path tests are CPU-only; see Round 12).
-- ~~BallOfFire registry gap~~ — registered as the 26th scene in `270a0003`;
-  "Solar Flare"/"Terminal Bloom" layers resolve.
-- ~~R-31, R-36, deb PipeWire, R-1, R-4, R-10…R-30 (round 5)~~ — see Rounds 5–6.
-- Docs module/scene counts now accurate (429/26).
+- ~~R-33 (SmokeRoom)~~ — emitter mesh/seed scaled by `boxScale`
+  (regression-tested); wind falloff agrees.
+- ~~PipeWire mid-stream loss (R-2 residual)~~ — mid-stream stream death
+  latches into a `CaptureError`; renderer-pump fallback chain works
+  end-to-end; process parks once latched. (Residual: untested `lost`
+  predicate; a transient hiccup latches forever — accept or document.)
+- ~~GeometricTunnel GPU tests~~ — restored with the correct contracts.
+- ~~camera enumeration SIGSEGV~~ — V4L2 direct query verified (fps
+  truncation 29/59 vs 29.97/59.94 and eager `to_discrete` expansion issues
+  noted).
+- ~~Input Link mirror flush~~ — settled values no longer cleared by the
+  10 Hz throttle (regression test; `1a94b31b`).
+- ~~camera order divergence~~ — engine Webcam prop indexes camera-like
+  sources only (`Camera | Screen | TestPattern`) (`28d90158`).
+- ~~R-31, R-34, R-36, deb PipeWire, R-1, R-4, R-10…R-30~~ — see Rounds 5–13.
+- Docs/module counts accurate (429/26; workspace tests ~1788 noted).
 
 **P2**
-1. **R-2 residual** — PipeWire mid-stream server death is silent: no
-   `state_changed`/`error` listener → capture never reports, feed stops,
-   silence, no fallback. Register the listener and route to the same
-   fallback used for startup failures.
-2. **Point10 volume re-port (`9e3ac2a5`/`270a0003`) follow-throughs** — (a) RollingFire
-   and GeometricTunnel lost their GPU render tests; partially restored in
-   `270a0003` (+289) but RollingFire's own render coverage is still thin
-   (`render_owned_chain_frames` only exercises loud/quiet payloads);
-   (b) transparency contracts weakened from min-alpha ≤ 48/16 to “>10 %
-   of pixels < 128”;
-   (c) production always simulates the JS-full grid (~432 MB `Rgba16Float`,
-   no override) — weak iGPU/software-adapter hosts get no escape hatch;
-   (d) R-33 (`boxScale` never scales sphere/logo/emission) **still open**
-   after the rewrite;
-   (e) straight-alpha scene targets are composited as premultiplied
-   (pre-existing engine-wide): scene RGB is additively blended at full
-   strength where the canvas would contribute `rgb × alpha` — bright layers
-   over bright content run hot; black background rows are unaffected today.
-   Needs an explicit premultiply/un-premultiply decision.
-3. **R-35 (PARTIAL)** — pipeline pre-build before the transition frame +
-   same-frame downgrade on *prepare* failure (good), but that failure path
-   is unreachable in this wgpu (no error scopes; `failed[]` has no writer),
-   and the **apply-time** failure path in `render_frame_retaining` still
-   shows one unblended frame, drops `transition_from` silently and
-   downgrades next frame with a misattributed WARN. Close it in-frame at
-   the failure site, or wire wgpu error scopes.
-4. **Expressions P2s** — (a) discoverable `__modvExpressionFunctions` with
-   predictable keys (NON_ENUMERABLE + freeze the map, or unguessable keys);
-   (b) every-frame writes in nondeterministic `HashMap` order vs JS
-   first-wins semantics; (c) lodash path gaps (`props.nested.0` resolves to
-   `null`; `"a..b"` collapses); (d) `restore()` drops expression deltas
-   (mirror stale; heals only via sync); (e) shared long-lived realm —
-   prototype pollution poisons all later expressions; no realm refresh path.
-5. **Plugin host P2s** — (a) plugins can claim core mutation types and
-   shadow them to the mirror only (desync + double-fire on replay) —
-   require namespaced modules or reject non-plugin types; (b) engine
-   commits to unimplemented types vanish with zero renderer-side signal;
-   (c) async `preProcessFrame` rejections bypass the once-per-id warn and
-   flood the unhandledrejection log at rAF cadence;
-   (d) unsupported plugins get a dead, silent checkbox in the panel.
-6. **R-33** — SmokeRoom/DvdRoom lava sphere + logo (and the emission seed
-   matrix) are drawn at identity instead of `boxScale ×` the JS `_boxGroup
-   .scale`; the wind falloff already follows `boxScale`, so wind and mesh
-   disagree at non-1 scales.
-7. **GStreamer packaging + MediaHub robustness (WS-10)** — add
-   libgstreamer1.0-0, -plugins-base1.0-0, gstreamer1.0-plugins-base/good,
-   gstreamer1.0-pipewire to the `.deb` `depends` (or dlopen-style
-   loading); the Docker/toolchain images already install them. Also:
-   **screen sources must clamp negotiated caps** (`MAX_DIMENSION` applies
-   only to requested dims — a 65535×65535 node means a ~17 GB reserve →
-   abort); the 1 s start timeout must not kill slow prerolls (module doc
-   says "timeout is not a failure" — code is stricter); stalled PipeWire
-   nodes/V4L2 devices never error out (no frame deadline); dead cameras
-   stay open after `FlowError::Error` (no bus message → never moved to
-   Null); live-camera tests cannot fail.
-8. **Media reconciliation & restart** — `loop:false` files replay forever;
-   a failed re-`start` drops the `order` slot and re-indexes every later
-   source (Webcam prop moves silently); `schedule_restart` runs inline on
-   the render/heartbeat thread (2 s joins, 1 s bus wait per retry, can
-   starve the 5 s watchdog); no permanent-failure latch (retries forever at
-   cap); media is not re-armed after an engine restart (panel closed → no
-   restart); the `media/list-cameras` failure case stops every selected
-   camera; the Re-scan path ignores saved videoSettings; file starts before
-   the media-manager-state replay are silently dropped; `media-mirror` can't
-   represent CLEAR/RESET; fixed 5 s restart interval with no jitter/cap.
-9. **Media path security** — `media/start-file` accepts any path/URIs
-    (`https://…` network fetch, `..` escapes) with no canonicalisation/
-    containment, contradicting its own comment.
-
-**Closed in the fix wave, re-verified**
-- ~~R-31~~ — hoop z-scale fixed, regression test, JS parity verified.
-- ~~R-36~~ — Fade fallback lerps from eased progress (JS parity), resize path
-  covered by construction, 50 % midpoint test.
-- ~~deb linkage~~ — `libpipewire-0.3-0` declared in `deb.depends`.
-- ~~R-1~~ — ISF trailing implicit pass (30 shaders) fixed + regression test;
-  corpus now validates 351/351 (with the Light Leak caveat, item 17).
-- ~~R-4~~ — cold-start timeout closed via `engine/get-sync` + idempotent
-  replay.
-- ~~R-10, R-11, R-12, R-13, R-14, R-15, R-16, R-17, R-18, R-19, R-20, R-21,
-  R-24, R-25~~ — see Round 5.
-- ~~R-2/R-3~~ — negotiation fixed; only the mid-stream death residual above.
+1. **DvdRoom emitter ignores `boxScale`** — same class as the fixed
+   SmokeRoom case: logo mesh/emitter seed drawn at identity while the wind
+   falloff and glass follow `boxScale` (`dvd_room.rs:419-428,599`); no
+   mirror of the SmokeRoom regression test.
+2. **groups/removeGroup leaks the group's modules** — the new action cleans
+   only the six control inputs and emits `REMOVE_GROUP`; the group's
+   modules stay in `state.modules`, in the mirror's `modules.active`, and
+   in every subsequent preset/Scene (JS calls `cleanUpGroupResources` →
+   `modules/removeActiveModule`; the engine has `release_group` with the
+   same logic). Mechanical fix: call it after input cleanup.
+3. **Point10 volume re-port follow-throughs** — (a) RollingFire's render
+   coverage is still thin; (b) transparency contracts weakened to a 10 %
+   "some opaque" check; (c) production always simulates the JS-full grid
+   (~432 MB `Rgba16Float`) with no override; (d) straight-alpha scene
+   targets composited as premultiplied (accepted as a documented decision
+   — black rows unaffected; comment mismatch in `blend.rs:53`).
+4. **R-35 (PARTIAL)** — apply-time failure path still presents one
+   unblended frame with a late, misattributed WARN; the prepare-failure
+   path is unreachable in this wgpu (no error scopes; `failed[]` no
+   writer). Close at the failure site or with wgpu error scopes.
+5. **Expressions follow-throughs** — (a) `__modv_expr_…` map still
+   discoverable and WRITABLE (nanos+pid key; `Object.getOwnPropertyNames`
+   lists non-enumerables) — freeze between rebuilds or keep the handle map
+   Rust-side; (b) realm pollution persists within a session (reset covers
+   cross-preset only); (c) `restore()` drops expression deltas (mirror
+   heals only via boot re-sync today); (d) >4096-byte sources silently
+   rejected with a stderr-only `warn_once` — no UI signal.
+6. **`.deb` still lacks `gstreamer1.0-pipewire`** — the pipewiresrc
+   screen-capture path documented as working cannot run on a `.deb`
+   install; it errors with a generic plugin-missing message.
+7. **`should_restart`/`poll_health` (non-looping files) has no tests** —
+   both directions exist only as GST-gated integration tests that skip
+   without GStreamer; the park path is unpinned.
+8. **Media restart reaper** — `schedule_restart` still runs inline on the
+   render/heartbeat thread (2 s join + 1 s bus wait per retry; can starve
+   the 5 s Electron watchdog); no permanent-failure latch; `logged_failure`
+   never set (dead); `restore()` leaves `engine_meter.pending` stale;
+   `media/list-cameras` failure still reads as an empty list (a transient
+   error stops all selected cameras); the Re-scan path ignores saved
+   videoSettings; overlapping 1 Hz status polls (no in-flight guard);
+   `EngineClient` media methods are dead code.
+9. **JS plugin host P2s** — plugins can claim core mutation types and
+   shadow them to the mirror only (desync + double-fire on replay); engine
+   commits to unimplemented types vanish silently; async frame-hook
+   rejections bypass once-per-id warn and spray the unhandledrejection
+   log; unsupported plugins get a dead silent checkbox.
+10. **Media path security (residual)** — `start-file` now rejects URI
+    schemes/`..`/relative/NUL (verified), but there is no realpath
+    canonicalisation: any absolute local path a Scene playlist names is
+    opened, contradicting the `normalise_media_path` doc's "escape the
+    directory the renderer rooted" claim; and the frame-delivery allocation
+    still materialises frames >8192² before the compositor refuses them
+    (the refusal happens upstream of the allocation).
+11. **Group mutator regressions (minor)** — `groups/UPDATE_GROUP` fails the
+    whole multi-key update on any key type mismatch (JS applies verbatim);
+    `groups/REPLACE_GROUP_MODULES` silently drops non-string ids; deleting
+    a fading ghost row pops visually with no `completeTransition` guard;
+    the mirror-parity fixture (`tests/fixtures/engine/deltas.json`) was
+    not extended for the new `groups/*` mutations.
 
 **P3 / hygiene**
 8. `restore()` leaves `engine_meter.pending` stale (store a fresh one or
@@ -1737,58 +1888,305 @@ rather than deleted.
 | 10 | `418c5cc8..e88bbd07` (delta) | Engine-owned media sources (renderer + engine), WS-10 end-to-end | **2 new P1s** (media path rooting breaks files on POSIX; TextureControl lifetime freezes file video); engine/renderer contract tight (sender validation, error codes, wire shapes all verified); MediaHub P2s (loop:false replay, order-drop on failed start, thread-blocking restart, no cap); camera-order divergence repointing Webcam props |
 | 11 | `e88bbd07..28d90158` (delta) | Webcam camera index → camera-like sources (files excluded); Point10 SmokeRoom/DvdRoom re-ported to a GPU fluid sim + raymarch | Camera-index fix verified (engine side); R-28 fix verified; R-32 fix verified; **R-33/R-34 still open**; volume rewrite deleted RollingFire/GeometricTunnel GPU tests and loosened transparency contracts |
 | 12 | `28d90158..270a0003` (delta) | RollingFire re-ported to the volume sim (R-34 fix); BallOfFire registered as 26th scene; docs counts | R-34 verified fixed (CPU-gated only — no GPU silent test); BallOfFire verified end-to-end; straight-alpha scene targets composite as premultiplied (pre-existing engine-wide); SmokeRoom/DvdRoom never bind `uSway`; GPU tests pass vacuously without an adapter |
+| 13 | `270a0003..e916f42a` (delta) | V4L2 camera enumeration (libcamera SIGSEGV); media-path re-root; inspector-unmount fix; PipeWire mid-stream latch; expression cap/denylist; group mutation parity; R-34 silent-GPU test; Input Link mirror flush; `.deb` GStreamer | R-2 closed, camera crash closed, mirror flush closed, SmokeRoom R-33 closed (**DvdRoom NOT**); **expressions P1 NOT closed** (denylist bypass classes; no budget), **library-path bug NOT fixed** (`/default/video/*` still fails; Windows rejected); `groups/removeGroup` leaks group modules; `.deb` missing `gstreamer1.0-pipewire` |
+| 14 | (user-reported) | alpha/enable dead on modules, background UX, cameras dead, stutter | Root causes identified: `modules/UPDATE_ACTIVE_MODULE_META` dropped silently by the dispatch wildcard; engine window always visible + transparent pixels; blocking full-frame preview readback stalls Fifo pacing; camera caps truncation/group-permission candidates. Author ran the current build at 17:08–17:12: `camera:/dev/video0` starts (1280×720@30); a second-source attempt fails `Device '/dev/video2' is busy` (log) |
 
 <sub>Review file maintained incrementally; earlier passes are not retracted,
-only extended. Last full pass: `270a0003` — 2026-11-12.</sub>
+only extended. Latest pass: Round 14 (user-reported defects) on top of `e916f42a` — 2026-11-12. This file's own edits are
+the reviewer's working state — commit or fold them at your convenience.</sub>
 
-## Round 13 — `270a0003..HEAD` (validation fix wave)
+## Round 13 — the author's fix-wave report (recorded verbatim, with the verifier's verdicts inline)
 
-- **Expressions P1 closed** — `expr` source is capped (`MAX_EXPRESSION_SOURCE`)
+*The block below is the author's own closing note for this round, committed
+as `a3cac91f`…`e916f42a`. Ticks ✓ were re-verified by reading the code (see
+“Round 13 — verification” above); ⚠ entries are disputed — do not rely on
+them without the corrections there.*
+
+
+- **Expressions P1 closed ⚠ NOT CLOSED** — `expr` source is capped (`MAX_EXPRESSION_SOURCE`)
   with a denylist for native allocation/loop/context escapes (`Array.from`,
   `repeat/fill/map/forEach/reduce`, `Function/eval`, `globalThis`,
   `setTimeout`, `require`, …); the compiled-function map uses an unguessable,
   non-enumerable global key; `rebuild` disposes the JS realm (no prototype
   pollution across presets); every-frame writes follow document order instead
   of `HashMap` order. Hostile sources are rejected at compile time (tested);
-  ordinary maths still evaluates (≈0.7 µs).
-- **Media P1s closed** — media-library paths (`/video/clip.mp4`) are re-rooted
+  ordinary maths still evaluates (≈0.7 µs). *(Cap and denylist are real,
+  but the denylist is bypassable — padStart/padEnd, `.constructor.constructor`,
+  regress backtracking, whitespace evasion, BigInt literals — and there is
+  no wall-clock/allocation budget at all. "Hostile sources are rejected
+  at compile time" is false for the same reasons. See Round 13.)*
+- **Media P1s closed ⚠ PARTIAL / NOT FOR THE DEFAULT PROFILE** — media-library paths (`/video/clip.mp4`) are re-rooted
   under `media.path` (known folders only, `..` rejected) while true absolute
-  paths pass through; engine video sources are owned by the texture/module and
+  paths pass through; *(only the root-level `/video/...` shape is re-rooted;
+  the real default-project library shape `/default/video/clip.mp4` still
+  fails end-to-end on POSIX, and fails outright on Windows. See Round 13.)* engine video sources are owned by the texture/module and
   no longer stopped when the inspector unmounts; `media/start-file` rejects
   URI schemes, relative paths and `..`; non-looping files park at their end
   instead of replaying forever; frames larger than 8192² are refused before
   the texture pool reserves them.
-- **PipeWire P2 closed** — the monitor stream now latches `state_changed`
+- **PipeWire P2 closed ✓** — the monitor stream now latches `state_changed`
   errors/disconnects into the existing error channel, so a mid-stream server
   restart falls back to the renderer pump instead of reporting silence.
-- **Camera enumeration crash fixed** — `media/list-cameras` crashed the
+- **Camera enumeration crash fixed ✓** — `media/list-cameras` crashed the
   packaged engine with SIGSEGV: GStreamer's `DeviceMonitor` instantiates the
   libcamera provider on a GStreamer 1.28 host. Enumeration now queries V4L2
   directly (`v4l` + sysfs), filters non-capturable metadata nodes, and lists
   `/dev/video0` + `/dev/video2` with their full caps. Verified in the packaged
   AppImage (`MODV_ENGINE=1`), including a live Webcam module fed by
   `/dev/video0`.
-- **R-33 closed for SmokeRoom** — the emitter mesh/seed matrix now scales with
+- **R-33 closed for SmokeRoom ✓ (DvdRoom NOT fixed)** — the emitter mesh/seed matrix now scales with
   `boxScale` (the JS `_boxGroup.setScalar`), matching the wind-falloff radius
   (`u.origin.w`), with a regression test.
-- **Packaging** — the `.deb` declares the GStreamer runtime packages
+- **Packaging ⚠ PARTIAL** — the `.deb` declares the GStreamer runtime packages
   (`libgstreamer1.0-0`, plugins base/good/libav) alongside
   `libpipewire-0.3-0`; the AppImage still needs them from the host (the legacy
-  renderer does not), documented in AGENTS/progress.
-- **Input Link mirror flush** — a value that settled inside the 100 ms delta
+  renderer does not), documented in AGENTS/progress. *(`gstreamer1.0-pipewire`
+  is still missing — the screen-capture path in this same report is dead on a
+  `.deb` install. See Round 13.)*
+- **Input Link mirror flush ✓** — a value that settled inside the 100 ms delta
   throttle was cleared as "unchanged" before it reached the mirror, so the UI
   slider could stick at an intermediate value while the engine rendered the
   final one (reproduced by the engineParity bass link: mirror 1.37, engine
   0.63). Unchanged writes now flush the current value for module props, meta
   values and group controls, with a regression test.
-- **Volumetric fidelity** — SmokeRoom, DvdRoom, RollingFire and BallOfFire now
+- **Volumetric fidelity ✓ (with the round-12 caveats)** — SmokeRoom, DvdRoom, RollingFire and BallOfFire now
   run the real GPU volume sim + raymarch; BallOfFire is registered (26
   scenes); side-by-side captures against the legacy AppImage look structurally
   right (turbulent warm fields, raymarch strata, legible DVD wordmark, frozen
   lava core). GeometricTunnel hoop scale (R-31) and same-frame/fade transition
   fallbacks (R-35/R-36) are fixed with tests.
-- **Still open (documented):** straight-alpha Point10/ISF targets composited
+- **Still open (documented) ⚠ incomplete** — straight-alpha Point10/ISF targets composited
   through a premultiplied graph (black backdrop rows unaffected; needs an
   explicit composite-time premultiply decision), engine-mode screen capture
   (Electron portal node id), R-35 apply-time failure path, plugin-host P2s,
-  and the media-health nits (inline restart, permanent-failure latch).
+  and the media-health nits (inline restart, permanent-failure latch)
+  *— also open: the default-profile media-path shape, orphaned file sources
+  decoding forever, express's bypass classes (Rounds 8/13), DvdRoom `boxScale`,
+  `removeGroup` leaking group modules, mirror-parity fixtures not extended
+  for the new `groups/*` deltas (Round 13).*
+
+## Round 14 — user-reported defects (background, alpha, enable, cameras, perf)
+
+Reported by the user after `e916f42a`. All items here were analysed statically
+(no build/run); GPU behaviour is verified by reading only. The other agent is
+working on these now.
+
+### [P1] Module `alpha` and `enabled` (and blend mode) silently do nothing — `docs/rust-hybrid-review.md` root-cause below
+
+The inspector commits **mutation-name** mutations directly
+(`modules/UPDATE_ACTIVE_MODULE_META`, `compositeOperation`, `enabled`,
+`alpha`) via the fire-and-forget `engine/commit` facade
+(`ActiveModule.vue:152,169,186`, `GalleryItem.vue:371`). The engine's
+dispatch table (`store_ops.rs:dispatch`, the `match action` at
+`store_ops.rs:359-460`) has **no arm for `modules/UPDATE_ACTIVE_MODULE_META`**
+— it lands in the wildcard branch
+(`store_ops.rs:458-462`, `if self.warned.insert(...)`) which logs a
+warn-once and returns `Ok(Value::Null)` **without emitting a delta**. The
+renderer never applies the mutation to its mirror either (engine-mode
+`storeFacade.commit` forwards only to the engine — `engine-client.js:382`), so
+the control doesn't react at all: clicking Enable does nothing, Alpha springs
+back on the next mirrored state, and the Compositor keeps rendering with the
+stored values.
+
+Affected (same failure class — committed with a mutation name the engine does
+not register; every one of these is today silently discarded, fire-and-forget,
+zero feedback):
+
+| Mutation | Call sites | Symptom |
+|---|---|---|
+| `modules/UPDATE_ACTIVE_MODULE_META` | ActiveModule.vue:152,169,186 · GalleryItem.vue:371 · Group.vue:457 | enable/alpha/blend-mode/name do nothing |
+| `outputs/UPDATE_AUXILLARY` | Groups/webcam/aux output paths | output window never updates |
+| `outputs/RESIZE_AUXILLARY`, `outputs/REMOVE_AUXILLARY`, `outputs/TOGGLE_DEBUG`, `outputs/SET_DEBUG_ID` | debug/output tooling | debug windows |
+| `beats/SET_BPM_SOURCE` | BPM source picker | picker snaps back |
+| `modules/SWAP`, `groups/SWAP` | SWAP feature | dead button |
+| `midi/UPDATE_DEVICE`, `ndi/*`, `fonts/*` | MIDI/NDI config | dead panels |
+
+The mirror-parity fixture does not contain `modules/UPDATE_ACTIVE_MODULE_META`
+either, so no test would catch it.
+
+**Fix (whichever the author prefers):** either add a dispatch alias
+`"modules/UPDATE_ACTIVE_MODULE_META" -> update_meta(params)` (and the same
+for the other mutation-name commits), or — better — make the renderer's
+`storeFacade.commit` translate mutation names to their JS action names over
+the wire (they are the same payload shapes), or explicitly route raw
+mutation-name commits through a `commit` arm per mutation with an assigned
+owner, failing loudly otherwise. Failing loud matters here: today every one
+of these writes is invisible to both the engine state and the mirror and even
+the logs only ever show one line per boot.
+
+### [P1] `isf/*` and shader module `enabled`/`alpha` parity — check ISF modules too
+
+`render_groups` reads `module.meta.enabled` and `module.meta.alpha`
+(`compositor.rs:1410,1413`) — the engine-side contract matches the JS for
+shader/2d modules since both keys live under `meta`. The failure is purely
+the transport above: nobody can set them. Same root cause, same fix.
+
+### Background not black over transparent modules — ambiguous; two candidate paths, both cheap
+
+Every UI background is already `#000` (Preview.vue:330, GalleryItem.vue:458,
+Scenes hover tiles, output-window.html:15), and the legacy worker also
+cleared with `clearRect`. So the black backdrop is fine in the **panel**.
+The user's report is almost certainly the **winit engine window**: it is
+created visible on the desktop (titled "modV Engine", 1280×720 default; only
+`--fullscreen` makes it borderless) and never hides itself
+(`crates/modv-app/src/window.rs:330-347`,
+`WindowAttributes::default().with_title("modV Engine")`), presenting a
+framebuffer cleared with `rgba(0,0,0,0)`
+(`crates/modv-render/src/frame_graph.rs:826,906`). On compositors that
+composite window alpha, the desktop shows through transparent pixels ("the
+transparent stuff shows my wallpaper, not black"); even without alpha blending
+it is an empty, decorated, visible window on the desktop. The fix is to hide
+it (`with_visible(false)` — or an explicit `--debug-window` flag for the rare
+need to see it) and/or paint MAIN to opaque black
+(`Clear(Color::BLACK)` with alpha 1); if the fullscreen projection path is
+also in play the same opaque clear covers it.
+
+Needs a screenshot to pick between these; the one-line fix (hide the window,
+black clear) resolves either.
+
+### Neither camera works — strongest causes, ranked; needs one log line to decide
+
+Engine-mode camera path was fixed end-to-end this cycle (V4L2 direct
+enumeration fixed the libcamera SIGSEGV), and the author reportedly saw a live
+Webcam working. If both are dead for the user, check in order:
+
+1. **Enumeration yields zero cameras** (the list is empty and the panel
+   shows none — reported as "cameras don't work"): on a stock host this is
+   permission-related (`v4l2` ioctl EPERM, or the user lacks the `video`
+   group; the Docker/e2e path forwards the group explicitly). Capture the
+   engine log lines starting with `camera`/`media` at `modV Engine` start.
+2. **Capture starts but no frames** (module renders black): the camera
+   pipeline exists but preroll fails — the advertised modes from direct
+   V4L2 caps can produce `framerate=29/1` vs the driver's `30000/1001`
+   discrete interval (bug already flagged, `camera.rs:145-149`); videorate
+   should rescue it, but the caps string is still wrong at the source.
+3. **Reconnect loop never converges** — transient list error reads as
+   "empty list" and stops the selected cameras (already flagged:
+   `media/list-cameras` failure path).
+
+Observed evidence from the author's live run (logs only, not committed
+code — `/tmp/opencode/app-cam.log` 17:08, `app-cam2.log` 17:12): an
+AppImage built at 16:28 (post-`2a149f16`) logs `GStreamer ready for video
+capture`, and `camera:/dev/video0` starts successfully (`index 1, 1280x720@30`,
+~21 s after boot), while a second-source attempt fails with
+`media_start_failed: video pipeline failed to start: Device '/dev/video2' is
+busy` (GStreamer device busy, not a permission error). So at least one
+camera path is confirmed alive on the current build; the busy node is
+metadata-or-second-capture adjacent — note for the fix author: if the
+metadata node is listed by the fixed enumerator, hide it from the
+capture-list and surface "in use by another process" as a visible error.
+The user-facing outcome may still be "neither camera works" if the build
+they run enumerates zero cameras (permission/group) or was built before
+`2a149f16`. One log excerpt will disambiguate.
+
+Whatever resolves it here should be accompanied by: a unit test that the
+`30/1`-style requested-caps are always within the discrete intervals the
+device exposes, and a check in `pollStatus` that `frames == 0` with
+`lastError == null` escalates to a visible error instead of silent
+reconnect-forever.
+
+### Stutter / why the rewrite can feel worse than legacy (and better in others)
+
+The engine forwards the live output to Electron **out of band**, not through
+Chromium's GPU canvas, but the way it produces that frame is a full GPU→CPU
+readback in the frame path:
+
+1. `read_preview` (`compositor.rs:2795-2823`) does a **full-resolution
+   blocking readback of MAIN every preview publish** (`read_main_rgba8` →
+   `read_back_texture` → `MAP_READ` buffer +
+   `device.poll(PollType::wait_indefinitely())`, `compositor.rs:3005-3060`),
+   then CPU nearest-neighbour resample full-res → 320×180 (~1–3 ms). The
+   blocking poll drains the Fifo pipeline every publish — this is the frame
+   pacing killer and the most probable cause of the visible jank even on a
+   fast GPU.
+2. `ENGINE_PREVIEW_FPS = 15` (Preview.vue) paints with `putImageData`; the
+   browser then re-uploads the whole canvas to the GPU compositor every
+   paint. Cheap-ish but redundant once (1) is fixed.
+3. The **winit window presents back-to-back at the display's refresh rate**
+   (Fifo, `window.rs:6,30-37`); the renderer paints at 15 fps — the two are
+   unsynchronised, so the user sees the engine's vsync plus a mismatched
+   Chromium paint cadence.
+4. Heavy scenes genuinely cost more than legacy: the fluid-sim scenes
+   (SmokeRoom/RollingFire/DvdRoom/BallOfFire) allocate 100×100×200–150×150×300
+   voxel grids (~130–430 MB), and the per-frame cost includes the multi-pass
+   sim and raymarch. Simple shader/2D scenes, by contrast, outrun the legacy
+   canvas path (direct GPU → GPU composite), hence "better in others".
+
+**Fix (the engine should make this cheap):** produce the 320×180 preview
+**on the GPU** — render the main group to a scratch target then a single
+bilinear blit to the ring-sized texture — and read back only 230 KB per
+publish instead of ~8 MB at 1920×1080 (~35× less readback, and it unblocks
+Fifo pipelining). Alternatively, publish on `map_async` without
+`wait_indefinitely()` and let the next frame complete the mapping (drop the
+frame if not ready — previews tolerate a missed publish).
+
+Also queued for the author:
+- The mirror itself receives **per-link `UPDATE_ACTIVE_MODULE_PROP` deltas up
+  to 10 Hz** — fine — but the **whole-scene/group transition deltas** are
+  emitted per frame for every ghost alpha (10 Hz by design) and
+  `meyda/SET_BANDS` mirror @ 1 Hz metrics — ok. Main remaining sync traffic
+  risk: preset restore replays hundreds of deltas synchronously at boot —
+  fine.
+- **`ENGINE_PREVIEW_FPS` should match the ring publish rate** (30 fps) or
+  the panel should read the ring directly (it's on disk by design), removing
+  the main→renderer Buffer copy per frame entirely.
+
+### Summary of what I'd flag to the working agent
+
+1. `modules/UPDATE_ACTIVE_MODULE_META` dropped silently — enable/alpha/blend
+   dead; map the mutation or fail loud (P1).
+2. First-class `background = black`: make the main composite opaque black
+   or hide the engine window (P1 UX).
+3. Cameras: the drop is viewable/fixable in the two steps above;
+   `framerate=29/1` for 30000/1001 sources is wrong (P2).
+4. Preview path: GPU resample, async map, ~35× less readback (P2 perf).
+5. Docs: progress doc still claims “144/144”, “1788 tests”; the
+   "un-premultiplied" comment mismatch is now a documented decision (Round 13
+   note).
+
+## Round 15 — fix wave for the user-reported defects
+
+Verified on the packaged AppImage (`MODV_ENGINE=1`), 2026-11-12.
+
+- **Alpha / Enable / Blend (P1) — fixed.** `modules/UPDATE_ACTIVE_MODULE_META`
+  (and `modules/UPDATE_ACTIVE_MODULE`, `modules/UPDATE_ACTIVE_MODULE_PROP`,
+  `inputs/UPDATE_INPUT_LINK`) now alias the action handlers and emit the
+  mirror-shaped delta. Tests drive the Store through the same commits the
+  Inspector uses and assert alpha 0.5 halves the composited contribution and
+  `enabled: false` skips the draw. Live: engine and mirror both show the new
+  values; disabling every module leaves an opaque black frame.
+- **Transparent background (P1 UX) — fixed.** `present` clears the swapchain
+  with `wgpu::Color::BLACK` (was #0b0b0f) and `read_preview` flattens the
+  premultiplied main onto opaque black (`[0,0,0,255]`). Gallery/Scene hover
+  previews keep intentional transparency.
+- **Cameras (P1) — fixed.** The drop was `meta.enabled: 1` from saved Scene
+  documents while the compositor requires a boolean `true`; presets and Scene
+  snapshots now normalise `enabled` with JS truthiness on load, and the
+  renderer re-asserts it for sync/Scene-apply modules. Camera selection derives
+  its 1-based index from the engine's camera list (dedup, unavailable ids
+  dropped) instead of stale Chromium ids. Live: `WEBCAM2`/`WEBCAM2-EDGEBLUR`
+  render the feed with both cameras running; no index-mismatch warnings.
+- **Media library paths (P1) — fixed.** Project-prefixed paths such as
+  `/default/video/clip.mp4` are re-rooted under `media.path` (known media
+  folder in the first two segments), while true absolute paths
+  (`/tmp/clip.mp4`, `D:\clips\…`) still pass through. Regression tests pin
+  both forms.
+- **Engine-mode stutter (P1 perf) — fixed.** Root cause was not preview
+  forwarding (the engine presents its own native window; the VMP1 ring is
+  UI-only at ~0.02 ms mean): 429 Gallery tiles polled 0.25 Hz (~150
+  `preview/module` requests/s), the 4-slot cache thrashed, and each
+  volumetric miss rebuilt an instance allocating ~432 MB, blocking the render
+  thread 18–40 ms. Tiles now poll only while intersecting the viewport
+  (22 requests in 6 s measured), volumetric previews cache a static RGBA8
+  poster and dispose the instance, at most one preview is answered per frame,
+  snapshots save every ~5 s, and the preview ring is 640×360 at 30 fps.
+  Engine at 1920×1080 with the UI open: **120 fps, p99 23.9 ms, max 31.7 ms,
+  1 stutter/10 s** (was 120 fps, p99 49.4 ms, 253 stutters/10 s). Legacy
+  holds 60 fps / p99 ~20 ms.
+
+**Remaining, ranked:** GPU-resample the preview before read-back (or map
+async) to remove the ~32 ms full-resolution read-back outlier; the X11
+obscured-window wedge; engine output window/CLI size (defaults to 1280×720,
+no separate output window in engine mode); `groups/removeGroup` leaves its
+Modules in the store; media-health nits (inline restart, permanent-failure
+latch).

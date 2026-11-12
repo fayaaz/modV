@@ -97,10 +97,14 @@ renderer stays the default until the plan's M7.
   and link reads advance a tween once, like `dataTypes.tween.get`.
 - Previews: the main panel reads the VMP1 preview ring; Gallery tiles and
   Scene hover cells use deferred `preview/module` and `preview/scene`
-  requests (supervisor queue, answered ≤4/frame after present from isolated
-  LRU-cached instances; filters preview over a generated test card).
-  `state/sync` carries the `registered` module map so the engine-mode Gallery
-  is populated.
+  requests (supervisor queue, answered ≤1/frame after present from isolated
+  LRU-cached instances; filters preview over a generated test card). Gallery
+  tiles poll only while intersecting the viewport; volumetric Point10 scenes
+  cache a static RGBA8 poster (their 432 MB volume instances are never kept)
+  and at most one preview is answered per frame. `state/sync` carries the
+  `registered` module map so the engine-mode Gallery is populated. The main
+  preview ring is 640×360 at 30 fps and is opaque black-backed; the engine
+  presents its own native window, so the ring is UI-only.
 - Media (WS-10): `MediaHub` wraps `modv-media`'s GStreamer `VideoHub`
   (cameras via v4l2, files via uridecodebin, portal screen nodes via
   pipewiresrc, test patterns) behind `media/list-cameras|start-camera|

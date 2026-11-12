@@ -12,11 +12,12 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1788 tests pass** (modv-app 290, modv-engine 438,
+- Rust workspace: **1798 tests pass** (modv-app 299, modv-engine 439,
   modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 761).
-- Vitest: **1118 tests pass** across 89 files (engine mirror-parity replay,
+- Vitest: **1139 tests pass** across 90 files (engine mirror-parity replay,
   preview/read helpers, supervisor restart budget, preload scoping, sync
-  replay, plugin host, engine media controller and payload shapes).
+  replay, plugin host, engine media controller/paths, module meta and payload
+  shapes).
 - Real-music analyser check (opt-in fixture): 12 s of the noiseblock radio
   stream decoded to 48 kHz mono, 1199 analysis frames — bands peak at
   bass 0.85 / mid 0.48 / treble 0.30, beat envelope 1.0, tempo 160 BPM, lane
@@ -46,6 +47,22 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
   `groups/updateGroupName` and `groups/removeGroup` update the engine and the
   mirror, and no engine SIGSEGV on startup (the previous libcamera provider
   crash is gone).
+- Engine-mode UI verification (packaged app, CDP): Inspector
+  alpha/enable/blend commits reach the engine and the compositor (alpha 0.5
+  halves the contribution, disabling every module leaves an opaque black
+  frame); restored Webcam scenes (`WEBCAM2`, `WEBCAM2-EDGEBLUR`) render the
+  live feed with both cameras running and `enabled` arriving as booleans; the
+  media library's project-prefixed paths (`/default/video/…`) resolve under
+  `media.path`.
+- Engine vs legacy at 1920×1080 (same scenes, Electron UI open): the engine
+  holds **120 fps** in every scene (Smoke Room, Geometric Tunnel, Chromatic
+  Cascade, Rolling Fire, DVD Afterglow) at 720p/1080p/1440p; legacy holds its
+  60 fps cap. With the Gallery visible the engine's p99 was 46–52 ms and
+  200–300 frame gaps/10 s from thumbnail polling; after the visible-only
+  polling, volumetric poster cache, one-preview-per-frame budget and
+  640×360/30 fps preview it is **p99 23.9 ms, max 31.7 ms, 1 stutter/10 s**.
+  Preview forwarding costs ~0.02 ms mean (the engine presents its own window;
+  the VMP1 ring is UI-only) and is not the stutter cause.
 - `make lint`: clean (one pre-existing warning in an untouched component).
 - e2e: **144/144 pass** against the packaged AppImage — the full legacy suite
   plus the engine-mode specs (`engineSkeleton`: preview frames publish, engine
