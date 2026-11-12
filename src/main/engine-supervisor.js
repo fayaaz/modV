@@ -82,6 +82,23 @@ function getElectronApp() {
  * Returns null outside Electron (unit tests), where the engine falls back to
  * `$MODV_ISF_DIR` or its own development lookup.
  */
+function defaultAssetsDir() {
+  const app = getElectronApp();
+  if (!app) return null;
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "textures");
+  }
+  return path.join(
+    app.getAppPath(),
+    "src",
+    "renderer",
+    "src",
+    "application",
+    "point10",
+    "textures",
+  );
+}
+
 function defaultIsfDir() {
   const app = getElectronApp();
   if (!app) return null;
@@ -109,6 +126,7 @@ class EngineSupervisor extends EventEmitter {
     socketPath,
     statePath,
     isfDir,
+    assetsDir,
     logger,
     clientFactory,
     // Test overrides (production uses the constants above).
@@ -126,6 +144,10 @@ class EngineSupervisor extends EventEmitter {
     // reads the vendored corpus. `null` leaves the engine's own lookup
     // (`$MODV_ISF_DIR` / dev default) in charge.
     this.isfDir = isfDir === undefined ? defaultIsfDir() : isfDir;
+    // Point10 scene textures (tinore maps, panoramas, PCB, ...). Packaged
+    // builds ship them outside the asar; the engine resolves
+    // `$MODV_ASSETS_DIR` before its source-tree dev fallback.
+    this.assetsDir = assetsDir === undefined ? defaultAssetsDir() : assetsDir;
     this.restartBudget = restartBudget;
     this.restartDelayMs = restartDelayMs;
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
@@ -255,9 +277,13 @@ class EngineSupervisor extends EventEmitter {
 
     let child;
     try {
+      const env = { ...process.env };
+      if (this.assetsDir) {
+        env.MODV_ASSETS_DIR = this.assetsDir;
+      }
       child = spawn(this.binaryPath, args, {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env },
+        env,
       });
     } catch (error) {
       this.log.error(`failed to spawn the engine: ${error.message}`);

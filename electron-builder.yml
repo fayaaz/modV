@@ -12,6 +12,11 @@ extraResources:
   # packaged build (src/main/engine-supervisor.js).
   - from: src/renderer/src/application/renderers/isf/modules/isf
     to: isf
+  # Point10 scene textures (tinore maps, panoramas, PCB, water normals, ...).
+  # The engine resolves them via `$MODV_ASSETS_DIR` (src/main/engine-supervisor.js);
+  # a missing file falls back to a procedural placeholder.
+  - from: src/renderer/src/application/point10/textures
+    to: textures
 files:
   - '!**/.vscode/*'
   - '!src/*'
