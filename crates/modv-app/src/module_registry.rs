@@ -105,13 +105,18 @@ use modv_renderers::isf::{
 use modv_renderers::point10::chromatic::line::ChromaticLine;
 use modv_renderers::point10::chromatic::wave::ChromaticWave;
 use modv_renderers::point10::scenes::around_plus::AroundPlus;
+use modv_renderers::point10::scenes::boxy::Boxy;
+use modv_renderers::point10::scenes::color_cube::ColorCube;
 use modv_renderers::point10::scenes::glass_lens::GlassLens;
 use modv_renderers::point10::scenes::it_is_coming_for_you::ItIsComingForYou;
 use modv_renderers::point10::scenes::light_tunnel::LightTunnel;
+use modv_renderers::point10::scenes::mirror_cube::MirrorCube;
 use modv_renderers::point10::scenes::mycelium::Mycelium;
 use modv_renderers::point10::scenes::particle_field::ParticleField;
+use modv_renderers::point10::scenes::sound_cube::SoundCube;
 use modv_renderers::point10::scenes::spiral_particles::SpiralParticles;
 use modv_renderers::point10::scenes::square_tunnel::SquareTunnel;
+use modv_renderers::point10::scenes::ultra_hdr::UltraHdr;
 use modv_renderers::point10::scenes::water_ripple::WaterRipple;
 use modv_renderers::point10::scenes::waveform::Waveform;
 use modv_renderers::point10::scenes::wormhole::Wormhole;
@@ -243,6 +248,16 @@ pub enum Point10SceneKind {
     Mycelium(Mycelium),
     /// `Point10 Around Plus` (`scenes/around_plus.rs`).
     AroundPlus(AroundPlus),
+    /// `Point10 Ultra HDR` (`scenes/ultra_hdr.rs`).
+    UltraHdr(UltraHdr),
+    /// `Point10 Mirror Cube` (`scenes/mirror_cube.rs`).
+    MirrorCube(MirrorCube),
+    /// `Point10 Color Cube` (`scenes/color_cube.rs`).
+    ColorCube(ColorCube),
+    /// `Point10 Boxy` (`scenes/boxy.rs`).
+    Boxy(Boxy),
+    /// `Point10 Sound Cube` (`scenes/sound_cube.rs`).
+    SoundCube(SoundCube),
 }
 
 impl Point10SceneKind {
@@ -265,6 +280,11 @@ impl Point10SceneKind {
             "Point10 Glass Lens" => Self::GlassLens(GlassLens::new()),
             "Point10 Mycelium" => Self::Mycelium(Mycelium::new()),
             "Point10 Around Plus" => Self::AroundPlus(AroundPlus::new()),
+            "Point10 Ultra HDR" => Self::UltraHdr(UltraHdr::new()),
+            "Point10 Mirror Cube" => Self::MirrorCube(MirrorCube::new()),
+            "Point10 Color Cube" => Self::ColorCube(ColorCube::new()),
+            "Point10 Boxy" => Self::Boxy(Boxy::new()),
+            "Point10 Sound Cube" => Self::SoundCube(SoundCube::new()),
             _ => return None,
         })
     }
@@ -278,6 +298,11 @@ impl Point10SceneKind {
     pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
         match self {
             Self::ChromaticLine(scene) => scene.apply_props(|key| get(key)),
+            Self::UltraHdr(scene) => scene.apply_props(|key| get(key)),
+            Self::MirrorCube(scene) => scene.apply_props(|key| get(key)),
+            Self::ColorCube(scene) => scene.apply_props(|key| get(key)),
+            Self::Boxy(scene) => scene.apply_props(|key| get(key)),
+            Self::SoundCube(scene) => scene.apply_props(|key| get(key)),
             Self::WaterRipple(scene) => scene.apply_props(|key| get(key)),
             Self::GlassLens(scene) => scene.apply_props(|key| get(key)),
             Self::Mycelium(scene) => scene.apply_props(|key| get(key)),
@@ -299,6 +324,11 @@ impl Point10Scene for Point10SceneKind {
     fn name(&self) -> &'static str {
         match self {
             Self::ChromaticLine(scene) => scene.name(),
+            Self::UltraHdr(scene) => scene.name(),
+            Self::MirrorCube(scene) => scene.name(),
+            Self::ColorCube(scene) => scene.name(),
+            Self::Boxy(scene) => scene.name(),
+            Self::SoundCube(scene) => scene.name(),
             Self::WaterRipple(scene) => scene.name(),
             Self::GlassLens(scene) => scene.name(),
             Self::Mycelium(scene) => scene.name(),
@@ -317,6 +347,11 @@ impl Point10Scene for Point10SceneKind {
     fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
         match self {
             Self::ChromaticLine(scene) => scene.init(ctx),
+            Self::UltraHdr(scene) => scene.init(ctx),
+            Self::MirrorCube(scene) => scene.init(ctx),
+            Self::ColorCube(scene) => scene.init(ctx),
+            Self::Boxy(scene) => scene.init(ctx),
+            Self::SoundCube(scene) => scene.init(ctx),
             Self::WaterRipple(scene) => scene.init(ctx),
             Self::GlassLens(scene) => scene.init(ctx),
             Self::Mycelium(scene) => scene.init(ctx),
@@ -335,6 +370,11 @@ impl Point10Scene for Point10SceneKind {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Self::ChromaticLine(scene) => scene.resize(width, height),
+            Self::UltraHdr(scene) => scene.resize(width, height),
+            Self::MirrorCube(scene) => scene.resize(width, height),
+            Self::ColorCube(scene) => scene.resize(width, height),
+            Self::Boxy(scene) => scene.resize(width, height),
+            Self::SoundCube(scene) => scene.resize(width, height),
             Self::WaterRipple(scene) => scene.resize(width, height),
             Self::GlassLens(scene) => scene.resize(width, height),
             Self::Mycelium(scene) => scene.resize(width, height),
@@ -353,6 +393,11 @@ impl Point10Scene for Point10SceneKind {
     fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
         match self {
             Self::ChromaticLine(scene) => scene.update(dt, audio),
+            Self::UltraHdr(scene) => scene.update(dt, audio),
+            Self::MirrorCube(scene) => scene.update(dt, audio),
+            Self::ColorCube(scene) => scene.update(dt, audio),
+            Self::Boxy(scene) => scene.update(dt, audio),
+            Self::SoundCube(scene) => scene.update(dt, audio),
             Self::WaterRipple(scene) => scene.update(dt, audio),
             Self::GlassLens(scene) => scene.update(dt, audio),
             Self::Mycelium(scene) => scene.update(dt, audio),
@@ -375,6 +420,11 @@ impl Point10Scene for Point10SceneKind {
     ) {
         match self {
             Self::ChromaticLine(scene) => scene.render(encoder, target),
+            Self::UltraHdr(scene) => scene.render(encoder, target),
+            Self::MirrorCube(scene) => scene.render(encoder, target),
+            Self::ColorCube(scene) => scene.render(encoder, target),
+            Self::Boxy(scene) => scene.render(encoder, target),
+            Self::SoundCube(scene) => scene.render(encoder, target),
             Self::WaterRipple(scene) => scene.render(encoder, target),
             Self::GlassLens(scene) => scene.render(encoder, target),
             Self::Mycelium(scene) => scene.render(encoder, target),
@@ -393,6 +443,11 @@ impl Point10Scene for Point10SceneKind {
     fn dispose(&mut self) {
         match self {
             Self::ChromaticLine(scene) => scene.dispose(),
+            Self::UltraHdr(scene) => scene.dispose(),
+            Self::MirrorCube(scene) => scene.dispose(),
+            Self::ColorCube(scene) => scene.dispose(),
+            Self::Boxy(scene) => scene.dispose(),
+            Self::SoundCube(scene) => scene.dispose(),
             Self::WaterRipple(scene) => scene.dispose(),
             Self::GlassLens(scene) => scene.dispose(),
             Self::Mycelium(scene) => scene.dispose(),
@@ -411,6 +466,11 @@ impl Point10Scene for Point10SceneKind {
     fn props(&self) -> Vec<SceneProp> {
         match self {
             Self::ChromaticLine(scene) => scene.props(),
+            Self::UltraHdr(scene) => scene.props(),
+            Self::MirrorCube(scene) => scene.props(),
+            Self::ColorCube(scene) => scene.props(),
+            Self::Boxy(scene) => scene.props(),
+            Self::SoundCube(scene) => scene.props(),
             Self::WaterRipple(scene) => scene.props(),
             Self::GlassLens(scene) => scene.props(),
             Self::Mycelium(scene) => scene.props(),
@@ -429,6 +489,11 @@ impl Point10Scene for Point10SceneKind {
     fn meta(&self) -> SceneMeta {
         match self {
             Self::ChromaticLine(scene) => scene.meta(),
+            Self::UltraHdr(scene) => scene.meta(),
+            Self::MirrorCube(scene) => scene.meta(),
+            Self::ColorCube(scene) => scene.meta(),
+            Self::Boxy(scene) => scene.meta(),
+            Self::SoundCube(scene) => scene.meta(),
             Self::WaterRipple(scene) => scene.meta(),
             Self::GlassLens(scene) => scene.meta(),
             Self::Mycelium(scene) => scene.meta(),
@@ -1211,7 +1276,7 @@ mod tests {
         // Point10 names are their own kind, not 2D modules.
         assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
         assert_eq!(registry.kind("Point10 Not A Scene"), None);
-        assert_eq!(registry.point10_definitions().len(), 13);
+        assert_eq!(registry.point10_definitions().len(), 18);
     }
 
     #[test]
@@ -1238,6 +1303,11 @@ mod tests {
                 "Point10 Glass Lens",
                 "Point10 Mycelium",
                 "Point10 Around Plus",
+                "Point10 Ultra HDR",
+                "Point10 Mirror Cube",
+                "Point10 Color Cube",
+                "Point10 Boxy",
+                "Point10 Sound Cube",
             ]
         );
 

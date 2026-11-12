@@ -14,24 +14,37 @@
 //! | [`glass_lens`] | Glass Lens | `scenes/GlassLens.js` |
 //! | [`mycelium`] | Mycelium | `scenes/Mycelium.js` |
 //! | [`around_plus`] | Around Plus | `scenes/AroundPlus.js` |
+//! | [`ultra_hdr`] | Ultra HDR | `scenes/UltraHDR.js` |
+//! | [`mirror_cube`] | Mirror Cube | `scenes/MirrorCube.js` |
+//! | [`color_cube`] | Color Cube | `scenes/ColorCube.js` |
+//! | [`boxy`] | Boxy | `scenes/Boxy.js` |
+//! | [`sound_cube`] | Sound Cube | `scenes/SoundCube.js` |
 //!
 //! ChromaticLine lives with its shared simulation in
 //! [`crate::point10::chromatic`] ([`crate::point10::chromatic::line`]) and is
 //! registered from there by [`crate::point10::all_scenes`].
 //!
 //! [`particle_quad`] is not a scene: it is the instanced billboard pipeline
-//! ParticleField and SpiralParticles share.
+//! ParticleField and SpiralParticles share. [`cube_mesh`] is the batch-4
+//! counterpart — `BoxGeometry`, the matrix helpers and the depth attachment the
+//! five cube/lighting scenes share.
 
 pub mod around_plus;
+pub mod boxy;
 pub mod chromatic_wave;
+pub mod color_cube;
+pub mod cube_mesh;
 pub mod glass_lens;
 pub mod it_is_coming_for_you;
 pub mod light_tunnel;
+pub mod mirror_cube;
 pub mod mycelium;
 pub mod particle_field;
 pub mod particle_quad;
+pub mod sound_cube;
 pub mod spiral_particles;
 pub mod square_tunnel;
+pub mod ultra_hdr;
 pub mod water_ripple;
 pub mod waveform;
 pub mod wormhole;

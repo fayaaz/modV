@@ -2,8 +2,10 @@
 //! output.
 //!
 //! Rendered through [`crate::point10::postfx::Composer`] so the test also
-//! exercises the real presentation path (scene target → output pass). Skipped
-//! with a log line when no fallback adapter is available.
+//! exercises the real presentation path (scene target → output pass). Scenes
+//! that own their `EffectComposer` in the JS present themselves instead
+//! ([`render_owned_chain_two_frames`]). Skipped with a log line when no
+//! fallback adapter is available.
 
 use crate::point10::audio_bridge::{AUDIO_SAMPLES, AudioBridge, BandPayload};
 use crate::point10::postfx::Composer;
@@ -28,6 +30,20 @@ fn loud_payload() -> BandPayload {
     payload.lanes = [0.6; 12];
     payload.cells = [0.6; 16];
     payload.freq_mag = [0.4; AUDIO_SAMPLES];
+    payload
+}
+
+/// A quiet payload for the scenes whose bass lane is a *scale* (SoundCube's
+/// `0.3 + bass * 8`): at `loud_payload`'s 0.6 the cube is 5.1 units wide and the
+/// camera at z = 5 ends up inside it.
+fn quiet_payload() -> BandPayload {
+    let mut payload = BandPayload::silent(44_100.0);
+    payload.byte_frequency_data = vec![40; 1024];
+    payload.wave = [0.2; AUDIO_SAMPLES];
+    payload.beat = 0.2;
+    payload.lanes = [0.05; 12];
+    payload.cells = [0.05; 16];
+    payload.freq_mag = [0.05; AUDIO_SAMPLES];
     payload
 }
 
@@ -73,6 +89,16 @@ fn render_two_frames(scene: &mut dyn Point10Scene, size: u32) -> Option<Vec<u8>>
 /// same contract the engine uses (`Point10Scene::render` writes the presented
 /// frame).
 fn render_owned_chain_two_frames(scene: &mut dyn Point10Scene, size: u32) -> Option<Vec<u8>> {
+    let payload = loud_payload();
+    render_owned_chain_two_frames_with(scene, size, &payload)
+}
+
+/// [`render_owned_chain_two_frames`] with an explicit payload.
+fn render_owned_chain_two_frames_with(
+    scene: &mut dyn Point10Scene,
+    size: u32,
+    payload: &BandPayload,
+) -> Option<Vec<u8>> {
     let (device, queue) = gpu()?;
 
     let mut ctx = SceneContext::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
@@ -81,14 +107,13 @@ fn render_owned_chain_two_frames(scene: &mut dyn Point10Scene, size: u32) -> Opt
     scene.resize(size, size);
 
     let mut bridge = AudioBridge::new();
-    let payload = loud_payload();
     let target = TestTarget::new(&device, size, size);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("point10-scene-owned-chain-smoke"),
     });
 
     for _ in 0..2 {
-        bridge.update(1.0 / 60.0, Some(&payload), &Default::default());
+        bridge.update(1.0 / 60.0, Some(payload), &Default::default());
         scene.update(1.0 / 60.0, &bridge);
         scene.render(&mut encoder, &target.view);
     }
@@ -368,6 +393,111 @@ fn around_plus_renders() {
         opaque > total / 4,
         "AroundPlus drew too little of the tube: {opaque} opaque px of {total}"
     );
+}
+
+// ————— batch 4 —————
+
+#[test]
+fn ultra_hdr_renders() {
+    let mut scene = crate::point10::scenes::ultra_hdr::UltraHdr::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "UltraHDR produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+#[test]
+fn mirror_cube_renders() {
+    let mut scene = crate::point10::scenes::mirror_cube::MirrorCube::new();
+    // Expression2 zooms the camera to CAMERA_MIN_Z on a loud mid band, which
+    // fills the frame with the cube. A quiet payload keeps the preset's default
+    // 4.25 units so the frame shows both the cube and the transparent clear.
+    let Some(pixels) = render_owned_chain_two_frames_with(&mut scene, SIZE, &quiet_payload())
+    else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "MirrorCube produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // The outer cube only covers the middle of the frame, so the corners stay
+    // transparent (`CLEAR_ALPHA = 0`).
+    let (transparent, opaque, _) = alpha_counts(&pixels);
+    assert!(transparent > 0, "MirrorCube lost its transparent clear");
+    assert!(opaque > 0, "MirrorCube never wrote an opaque cube pixel");
+}
+
+#[test]
+fn color_cube_renders() {
+    let mut scene = crate::point10::scenes::color_cube::ColorCube::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "ColorCube produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+#[test]
+fn boxy_renders() {
+    let mut scene = crate::point10::scenes::boxy::Boxy::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "Boxy produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+/// Boxy defines `preserveBloomAlpha` (`Boxy.js:73-86`) and blooms with
+/// `threshold: 0`, so *every* pixel receives bloom. Without the preserve-alpha
+/// combine the additive bloom alpha turns the transparent clear into an opaque
+/// veil and the module's layer alpha is lost. This asserts the layer alpha
+/// survives: the cleared background must still be alpha 0 while the cubes are
+/// opaque.
+#[test]
+fn boxy_keeps_the_background_transparent() {
+    let mut scene = crate::point10::scenes::boxy::Boxy::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+
+    let (transparent, opaque, total) = alpha_counts(&pixels);
+    assert!(
+        transparent > 0,
+        "expected an alpha-0 background, but every pixel was drawn ({total} px)"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque cubes, but none reached alpha 255"
+    );
+}
+
+#[test]
+fn sound_cube_renders() {
+    let mut scene = crate::point10::scenes::sound_cube::SoundCube::new();
+    // `scale = 0.3 + bass * 8`, so the smoke test's full-scale payload would
+    // put the camera inside a 5-unit cube. A quiet bass lane keeps the cube in
+    // frame, which is what the preset looks like in normal playback.
+    let Some(pixels) = render_owned_chain_two_frames_with(&mut scene, SIZE, &quiet_payload())
+    else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "SoundCube produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // The composite derives its alpha from the visible glow, so the frame
+    // behind the cube stays transparent (`CLEAR_ALPHA = 0`).
+    let (transparent, _, _) = alpha_counts(&pixels);
+    assert!(transparent > 0, "SoundCube lost its transparent clear");
 }
 
 #[test]

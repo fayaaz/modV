@@ -7,8 +7,9 @@
 //!
 //! # Resolution order
 //!
-//! [`AssetLoader`] holds an ordered list of directories and resolves a bare
-//! file name against them:
+//! [`AssetLoader`] holds an ordered list of directories and resolves a file
+//! name (a plain `/`-separated relative path, e.g. `stormy/posz.jpg`) against
+//! them:
 //!
 //! 1. `$MODV_ASSETS_DIR` (the packaged app's asset directory);
 //! 2. the `assets_dir` the engine passes in [`SceneContext::assets_dir`]
@@ -140,17 +141,32 @@ impl AssetLoader {
         &self.dirs
     }
 
-    /// Resolve a bare file name (no path separators are honoured) to the first
-    /// directory that holds it.
+    /// Resolve a file name against the directories, in order.
+    ///
+    /// A name is a `/`-separated chain of plain path components: absolute
+    /// paths, empty components and `.`/`..` are rejected, so a scene can ask for
+    /// a nested asset (`stormy/posz.jpg`, Boxy's Stormy Days faces) without the
+    /// loader ever escaping an asset directory.
     pub fn resolve(&self, name: &str) -> Option<PathBuf> {
-        // Reject traversal and absolute names: scenes only ever ask for a bare
-        // asset name.
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
+        if name.is_empty() || name.contains('\\') || name.starts_with('/') {
             return None;
         }
+
+        let components: Vec<&str> = name.split('/').collect();
+        if components
+            .iter()
+            .any(|component| component.is_empty() || *component == "." || *component == "..")
+        {
+            return None;
+        }
+
         self.dirs
             .iter()
-            .map(|dir| dir.join(name))
+            .map(|dir| {
+                components
+                    .iter()
+                    .fold(dir.clone(), |path, part| path.join(part))
+            })
             .find(|path| path.is_file())
     }
 
@@ -432,9 +448,18 @@ mod tests {
         assert_eq!(loader.resolve("shared.png"), Some(first.join("shared.png")));
         assert_eq!(loader.resolve("only.png"), Some(second.join("only.png")));
         assert_eq!(loader.resolve("missing.png"), None);
-        // Bare names only.
+        // Nested names resolve inside the directory…
+        std::fs::create_dir_all(second.join("stormy")).expect("temp dir");
+        std::fs::write(second.join("stormy/posz.jpg"), b"face").expect("write");
+        assert_eq!(
+            loader.resolve("stormy/posz.jpg"),
+            Some(second.join("stormy/posz.jpg"))
+        );
+        // …but never outside it.
         assert_eq!(loader.resolve("../shared.png"), None);
+        assert_eq!(loader.resolve("stormy/../../shared.png"), None);
         assert_eq!(loader.resolve("/etc/passwd"), None);
+        assert_eq!(loader.resolve("stormy//posz.jpg"), None);
         assert_eq!(loader.resolve(""), None);
 
         let _ = std::fs::remove_dir_all(&root);

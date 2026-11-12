@@ -9,12 +9,17 @@
 //!                          all_scenes()
 //!   audio_bridge.rs        AudioBridge (audioBridge.js) + P10Audio reader (p10Audio.js)
 //!   shared/                particle_alpha (particleAlpha/particleSprite), random,
-//!                          p9_glsl (the P9Glsl.js helpers batch 2 uses, as WGSL)
+//!                          p9_glsl (the P9Glsl.js helpers batch 2 uses, as WGSL),
+//!                          p9_shading (the P9Glsl.js lighting/colour half),
+//!                          assets (texture loading + procedural fallbacks)
 //!   chromatic/             shared ring-buffer sim + the ChromaticLine/ChromaticWave scenes
 //!   chromatic_line.rs      compatibility re-export of chromatic/line.rs
 //!   postfx/                RenderPass, UnrealBloomPass, ShaderPass, OutputPass, Composer
 //!   scenes/                ParticleField, SpiralParticles, Waveform, SquareTunnel,
-//!                          LightTunnel, Wormhole, ItIsComingForYou
+//!                          LightTunnel, Wormhole, ItIsComingForYou, WaterRipple,
+//!                          GlassLens, Mycelium, AroundPlus, UltraHdr, MirrorCube,
+//!                          ColorCube, Boxy, SoundCube (+ the cube_mesh and
+//!                          particle_quad helpers)
 //! ```
 //!
 //! # Batch order
@@ -29,9 +34,9 @@
 //! | — | postfx chain | 20 of 25 scenes use `EffectComposer` (RenderPass → UnrealBloom → ShaderPass → OutputPass) |
 //! | 1 | **ChromaticWave**, ParticleField, SpiralParticles, Waveform | uses everything above, no `P9Glsl`/texture assets |
 //! | 2 | **SquareTunnel**, LightTunnel, Wormhole, ItIsComingForYou | needs `plane9/P9Glsl` + `shared/textures` + `shared/random` |
-//! | 3 | WaterRipple, GlassLens, UltraHDR | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
-//! | 4 | DvdRoom, MirrorCube, ColorCube, Boxy, Mycelium, AroundPlus, SoundCube, HollowCube | `P9Glsl` cube/room scenes, Boxy's `preserveBloomAlpha` |
-//! | 5 | AttractorParticles, GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | WebGPU/TSL scenes (compute passes hand-written WGSL) + SSAO/Afterimage passes |
+//! | 3 | WaterRipple, GlassLens, Mycelium, AroundPlus | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
+//! | 4 | **UltraHDR**, MirrorCube, ColorCube, Boxy, SoundCube | `P9Glsl` lighting (`shared/p9_shading`), `BoxGeometry`, `preserveBloomAlpha` |
+//! | 5 | DvdRoom, HollowCube, AttractorParticles, GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | WebGPU/TSL scenes (compute passes hand-written WGSL) + SSAO/Afterimage passes |
 //!
 //! ChromaticLine was ported ahead of this batch (`chromatic_line.rs`, a
 //! fixture-driven port with its own `SyntheticSine`); it now shares its
@@ -565,9 +570,11 @@ impl UnitQuad {
 /// Order is the WS-7 port order, so the Gallery list is stable:
 /// `ChromaticLine, ChromaticWave, ParticleField, SpiralParticles, Waveform`
 /// (ChromaticLine was ported ahead of batch 1; the rest are batch 1), then the
-/// batch-2 scenes `SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou`, then
-/// the batch-3 scenes `WaterRipple, GlassLens, Mycelium, AroundPlus` (inventory
-/// order 10, 11, 17, 18). The remaining 12 scenes are added batch by batch.
+/// batch-2 scenes `SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou`, the
+/// batch-3 scenes `WaterRipple, GlassLens, Mycelium, AroundPlus` (inventory
+/// order 10, 11, 17, 18) and the batch-4 scenes `UltraHDR, MirrorCube,
+/// ColorCube, Boxy, SoundCube` (inventory order 12, 14, 15, 16, 19). The
+/// remaining 7 scenes are added batch by batch.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
         Box::new(chromatic::line::ChromaticLine::new()),
@@ -583,6 +590,11 @@ pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
         Box::new(scenes::glass_lens::GlassLens::new()),
         Box::new(scenes::mycelium::Mycelium::new()),
         Box::new(scenes::around_plus::AroundPlus::new()),
+        Box::new(scenes::ultra_hdr::UltraHdr::new()),
+        Box::new(scenes::mirror_cube::MirrorCube::new()),
+        Box::new(scenes::color_cube::ColorCube::new()),
+        Box::new(scenes::boxy::Boxy::new()),
+        Box::new(scenes::sound_cube::SoundCube::new()),
     ]
 }
 
@@ -593,7 +605,7 @@ mod tests {
     #[test]
     fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 13);
+        assert_eq!(scenes.len(), 18);
 
         assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
         assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
@@ -610,6 +622,12 @@ mod tests {
         assert_eq!(scenes[10].name(), "Point10 Glass Lens");
         assert_eq!(scenes[11].name(), "Point10 Mycelium");
         assert_eq!(scenes[12].name(), "Point10 Around Plus");
+        // Batch 4, in the WS-7 inventory order (12, 14, 15, 16, 19).
+        assert_eq!(scenes[13].name(), "Point10 Ultra HDR");
+        assert_eq!(scenes[14].name(), "Point10 Mirror Cube");
+        assert_eq!(scenes[15].name(), "Point10 Color Cube");
+        assert_eq!(scenes[16].name(), "Point10 Boxy");
+        assert_eq!(scenes[17].name(), "Point10 Sound Cube");
     }
 
     #[test]
