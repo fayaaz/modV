@@ -155,13 +155,16 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       with a 24-frame JS reference fixture within 1 % and a real-music check
 - [x] Audio capture primitives: cpal input devices and a native PipeWire
       monitor stream (replaces `pw-record`), bounded queues, `AudioFeed`
-- [x] Renderer → engine audio feed: the pump forwards the full payload and
-      beats; the engine drives shader/2D/ISF/Point10 audio
+- [x] Renderer → engine audio feed (default source): the pump forwards the
+      full payload and beats; the engine drives shader/2D/ISF/Point10 audio
 - [x] Engine-side input-link evaluation: getter/state/mutation links,
       smoothing, min/max, meta inputs, `inputs/*` actions, 10 Hz deltas
-- [ ] Engine-owned capture wiring (AudioFeed + source selection in the engine
-      loop; `--audio-source renderer|pipewire|input:<device>`, in flight; the
-      renderer pump remains the default)
+- [x] Engine-owned capture wiring: `--audio-source renderer|pipewire|
+      input[:device]` (env `MODV_AUDIO_SOURCE`), `--audio-device`,
+      `--list-audio-devices`. The engine pumps `AudioFeed` before links/render,
+      owns bands/BPM/kick, ignores the renderer's writes while active
+      (warned once) and republishes meter bands at 10 Hz; capture failures
+      fall back to the renderer pump. `renderer` stays the default
 - [x] Tween runtime (WS-12a): `TweenDescriptor`/`TweenRuntime`/`TweenSet` port
       `buildFrames` exactly (BPM durations, Math.round frame counts,
       loop/alternate, steps, 41 penner easings verified against anime.js);
