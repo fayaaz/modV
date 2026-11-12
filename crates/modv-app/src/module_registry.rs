@@ -65,15 +65,52 @@
 //! `Texture 2D`) while the JS Gallery calls them `X-Drips` and `Texture2d`.
 //! Presets written by the JS app therefore miss those two modules until the
 //! names are reconciled in `modv-renderers` (out of scope for M3).
+//!
+//! ## ISF corpus (WS-4)
+//!
+//! The 351 `.fs` shaders under `src/renderer/src/application/renderers/isf/modules/isf`
+//! are not compiled into the binary: [`ModuleRegistry::build`] scans a
+//! directory at startup and registers one [`IsfDefinition`] per parsable
+//! shader (name = file stem, matching the JS `getIsfModuleName`). The scan is
+//! header-only ([`parse_isf`] never compiles GLSL), so startup stays fast; the
+//! compositor compiles a shader the first time its module draws.
+//!
+//! * [`ModuleRegistry::builtin`] registers no ISF module, which keeps the
+//!   existing unit tests and the headless benchmark independent of a corpus
+//!   on disk.
+//! * The engine resolves the corpus directory from `--isf-dir`, then
+//!   `$MODV_ISF_DIR`, then a development default relative to the executable
+//!   (see [`crate::cli::resolve_isf_dir`]) and hands it to
+//!   [`ModuleRegistry::build`]. The packaged app ships the corpus as
+//!   `resources/isf` (`electron-builder.yml`).
+//! * A file that cannot be read or parsed is skipped with a one-line warning;
+//!   the summary line reports the registered/failed counts.
+//! * ISF float props carry `MIN`/`MAX` but never `strict` in the JS renderer
+//!   (`renderers/isf/index.js:210-257`), so writes are **not** clamped. The
+//!   range is metadata for the UI controls only, exactly as in JS.
+//! * A `texture` prop is a declared image input, not a shader uniform: it is
+//!   registered so the UI can show it, and the compositor binds the group
+//!   canvas for every image input (the JS default at
+//!   `renderers/isf/index.js:84-91`). There is no texture registry yet.
+
+use std::fs;
+use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
 use modv_engine::props::PropSchema;
+use modv_renderers::isf::{
+    IsfDocument, IsfMeta, IsfProp, IsfPropType, meta_from_document, parse_isf, synthesise_props,
+};
 use modv_renderers::point10::chromatic::line::ChromaticLine;
 use modv_renderers::point10::chromatic::wave::ChromaticWave;
+use modv_renderers::point10::scenes::it_is_coming_for_you::ItIsComingForYou;
+use modv_renderers::point10::scenes::light_tunnel::LightTunnel;
 use modv_renderers::point10::scenes::particle_field::ParticleField;
 use modv_renderers::point10::scenes::spiral_particles::SpiralParticles;
+use modv_renderers::point10::scenes::square_tunnel::SquareTunnel;
 use modv_renderers::point10::scenes::waveform::Waveform;
+use modv_renderers::point10::scenes::wormhole::Wormhole;
 use modv_renderers::point10::{
     Point10Scene, SceneMeta, SceneProp, ScenePropKind, all_scenes as all_point10_scenes,
 };
@@ -97,6 +134,10 @@ pub enum ModuleKind {
     /// Scene documents and presets resolve it, but rendered through the Point10
     /// path in the compositor, never the 2D canvas facade.
     Point10,
+    /// A vendored ISF shader (`modv-renderers::isf`), registered with
+    /// `meta.type: "isf"` and rendered through the ISF runtime into its own
+    /// target texture (`IsfRuntime::draw`), then composited onto the group.
+    Isf,
 }
 
 /// A registered 2D module: its static metadata and prop descriptors, factored
@@ -125,6 +166,41 @@ pub struct Point10Definition {
     pub props: Vec<SceneProp>,
 }
 
+/// A registered ISF corpus shader: the parsed document plus the synthesised
+/// `meta`/prop table the store needs.
+///
+/// The parsed [`IsfDocument`] is kept so the compositor can compile the shader
+/// on first draw ([`crate::compositor`]) without re-reading the file. The
+/// document only holds header data and the GLSL body; no GPU work happens at
+/// registration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IsfDefinition {
+    /// Module name: the `.fs` file stem (`getIsfModuleName`,
+    /// `worker/index.worker.js:27`).
+    pub name: String,
+    /// Metadata from the ISF header (`CREDIT`/`DESCRIPTION`/`VSN`/
+    /// `MODV_CATEGORY`/`ISFVSN`).
+    pub meta: IsfMeta,
+    /// Synthesised props in declaration order, keyed by the ISF input `NAME`.
+    ///
+    /// Kept as an ordered `Vec` rather than a map because `modv-app` does not
+    /// depend on `indexmap`; order is the JS declaration order and is what the
+    /// prop panels and the compositor iterate.
+    pub props: Vec<(String, IsfProp)>,
+    /// The parsed shader (header inputs/passes + the GLSL body).
+    pub document: IsfDocument,
+}
+
+impl IsfDefinition {
+    /// The descriptor for one of the shader's inputs, if declared.
+    pub fn prop(&self, name: &str) -> Option<&IsfProp> {
+        self.props
+            .iter()
+            .find(|(prop_name, _)| prop_name == name)
+            .map(|(_, prop)| prop)
+    }
+}
+
 /// The app-side wrapper around the concrete batch-1 Point10 scenes.
 ///
 /// [`modv_renderers::point10::Point10Scene`] is the render contract and has no
@@ -147,6 +223,14 @@ pub enum Point10SceneKind {
     SpiralParticles(SpiralParticles),
     /// `Point10 Waveform` (`scenes/waveform.rs`).
     Waveform(Waveform),
+    /// `Point10 Square Tunnel` (`scenes/square_tunnel.rs`).
+    SquareTunnel(SquareTunnel),
+    /// `Point10 Light Tunnel` (`scenes/light_tunnel.rs`).
+    LightTunnel(LightTunnel),
+    /// `Point10 Wormhole` (`scenes/wormhole.rs`).
+    Wormhole(Wormhole),
+    /// `Point10 It Is Coming For You` (`scenes/it_is_coming_for_you.rs`).
+    ItIsComingForYou(ItIsComingForYou),
 }
 
 impl Point10SceneKind {
@@ -161,6 +245,10 @@ impl Point10SceneKind {
             "Point10 Particle Field" => Self::ParticleField(ParticleField::new()),
             "Point10 Spiral Particles" => Self::SpiralParticles(SpiralParticles::new()),
             "Point10 Waveform" => Self::Waveform(Waveform::new()),
+            "Point10 Square Tunnel" => Self::SquareTunnel(SquareTunnel::new()),
+            "Point10 Light Tunnel" => Self::LightTunnel(LightTunnel::new()),
+            "Point10 Wormhole" => Self::Wormhole(Wormhole::new()),
+            "Point10 It Is Coming For You" => Self::ItIsComingForYou(ItIsComingForYou::new()),
             _ => return None,
         })
     }
@@ -174,6 +262,10 @@ impl Point10SceneKind {
     pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
         match self {
             Self::ChromaticLine(scene) => scene.apply_props(|key| get(key)),
+            Self::SquareTunnel(scene) => scene.apply_props(|key| get(key)),
+            Self::LightTunnel(scene) => scene.apply_props(|key| get(key)),
+            Self::Wormhole(scene) => scene.apply_props(|key| get(key)),
+            Self::ItIsComingForYou(scene) => scene.apply_props(|key| get(key)),
             Self::ChromaticWave(scene) => scene.apply_props(|key| get(key)),
             Self::ParticleField(scene) => scene.apply_props(|key| get(key)),
             Self::SpiralParticles(scene) => scene.apply_props(|key| get(key)),
@@ -187,6 +279,10 @@ impl Point10Scene for Point10SceneKind {
     fn name(&self) -> &'static str {
         match self {
             Self::ChromaticLine(scene) => scene.name(),
+            Self::SquareTunnel(scene) => scene.name(),
+            Self::LightTunnel(scene) => scene.name(),
+            Self::Wormhole(scene) => scene.name(),
+            Self::ItIsComingForYou(scene) => scene.name(),
             Self::ChromaticWave(scene) => scene.name(),
             Self::ParticleField(scene) => scene.name(),
             Self::SpiralParticles(scene) => scene.name(),
@@ -197,6 +293,10 @@ impl Point10Scene for Point10SceneKind {
     fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
         match self {
             Self::ChromaticLine(scene) => scene.init(ctx),
+            Self::SquareTunnel(scene) => scene.init(ctx),
+            Self::LightTunnel(scene) => scene.init(ctx),
+            Self::Wormhole(scene) => scene.init(ctx),
+            Self::ItIsComingForYou(scene) => scene.init(ctx),
             Self::ChromaticWave(scene) => scene.init(ctx),
             Self::ParticleField(scene) => scene.init(ctx),
             Self::SpiralParticles(scene) => scene.init(ctx),
@@ -207,6 +307,10 @@ impl Point10Scene for Point10SceneKind {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Self::ChromaticLine(scene) => scene.resize(width, height),
+            Self::SquareTunnel(scene) => scene.resize(width, height),
+            Self::LightTunnel(scene) => scene.resize(width, height),
+            Self::Wormhole(scene) => scene.resize(width, height),
+            Self::ItIsComingForYou(scene) => scene.resize(width, height),
             Self::ChromaticWave(scene) => scene.resize(width, height),
             Self::ParticleField(scene) => scene.resize(width, height),
             Self::SpiralParticles(scene) => scene.resize(width, height),
@@ -217,6 +321,10 @@ impl Point10Scene for Point10SceneKind {
     fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
         match self {
             Self::ChromaticLine(scene) => scene.update(dt, audio),
+            Self::SquareTunnel(scene) => scene.update(dt, audio),
+            Self::LightTunnel(scene) => scene.update(dt, audio),
+            Self::Wormhole(scene) => scene.update(dt, audio),
+            Self::ItIsComingForYou(scene) => scene.update(dt, audio),
             Self::ChromaticWave(scene) => scene.update(dt, audio),
             Self::ParticleField(scene) => scene.update(dt, audio),
             Self::SpiralParticles(scene) => scene.update(dt, audio),
@@ -231,6 +339,10 @@ impl Point10Scene for Point10SceneKind {
     ) {
         match self {
             Self::ChromaticLine(scene) => scene.render(encoder, target),
+            Self::SquareTunnel(scene) => scene.render(encoder, target),
+            Self::LightTunnel(scene) => scene.render(encoder, target),
+            Self::Wormhole(scene) => scene.render(encoder, target),
+            Self::ItIsComingForYou(scene) => scene.render(encoder, target),
             Self::ChromaticWave(scene) => scene.render(encoder, target),
             Self::ParticleField(scene) => scene.render(encoder, target),
             Self::SpiralParticles(scene) => scene.render(encoder, target),
@@ -241,6 +353,10 @@ impl Point10Scene for Point10SceneKind {
     fn dispose(&mut self) {
         match self {
             Self::ChromaticLine(scene) => scene.dispose(),
+            Self::SquareTunnel(scene) => scene.dispose(),
+            Self::LightTunnel(scene) => scene.dispose(),
+            Self::Wormhole(scene) => scene.dispose(),
+            Self::ItIsComingForYou(scene) => scene.dispose(),
             Self::ChromaticWave(scene) => scene.dispose(),
             Self::ParticleField(scene) => scene.dispose(),
             Self::SpiralParticles(scene) => scene.dispose(),
@@ -251,6 +367,10 @@ impl Point10Scene for Point10SceneKind {
     fn props(&self) -> Vec<SceneProp> {
         match self {
             Self::ChromaticLine(scene) => scene.props(),
+            Self::SquareTunnel(scene) => scene.props(),
+            Self::LightTunnel(scene) => scene.props(),
+            Self::Wormhole(scene) => scene.props(),
+            Self::ItIsComingForYou(scene) => scene.props(),
             Self::ChromaticWave(scene) => scene.props(),
             Self::ParticleField(scene) => scene.props(),
             Self::SpiralParticles(scene) => scene.props(),
@@ -261,6 +381,10 @@ impl Point10Scene for Point10SceneKind {
     fn meta(&self) -> SceneMeta {
         match self {
             Self::ChromaticLine(scene) => scene.meta(),
+            Self::SquareTunnel(scene) => scene.meta(),
+            Self::LightTunnel(scene) => scene.meta(),
+            Self::Wormhole(scene) => scene.meta(),
+            Self::ItIsComingForYou(scene) => scene.meta(),
             Self::ChromaticWave(scene) => scene.meta(),
             Self::ParticleField(scene) => scene.meta(),
             Self::SpiralParticles(scene) => scene.meta(),
@@ -301,18 +425,32 @@ const TWO_D_PREVIEW_WITH_OUTPUT: &[&str] = &[
     "Pixelate",     // Pixelate.js:9
 ];
 
-/// All three built-in registries, with the metadata the store and the
-/// compositor need.
+/// All built-in registries, with the metadata the store and the compositor
+/// need.
 pub struct ModuleRegistry {
     shader: Vec<ShaderModule>,
     two_d: Vec<TwoDDefinition>,
     point10: Vec<Point10Definition>,
+    isf: Vec<IsfDefinition>,
 }
 
 impl ModuleRegistry {
     /// The 37 built-in shader modules, the 15 ported 2D modules and the ported
-    /// Point10 scenes.
+    /// Point10 scenes, with no ISF corpus.
+    ///
+    /// Used by unit tests and the headless benchmark, which must not depend on
+    /// files outside the process. The engine path calls [`Self::build`].
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn builtin() -> Self {
+        Self::build(None)
+    }
+
+    /// Build the registry, scanning `isf_dir` for the vendored ISF corpus.
+    ///
+    /// `None` (or a missing directory) registers no ISF module. Every `*.fs`
+    /// is parsed with its optional `*.vs` sidecar; unreadable or unparsable
+    /// files are skipped with a one-line warning and counted in the summary.
+    pub fn build(isf_dir: Option<&Path>) -> Self {
         let shader = all_shader_modules();
         // `all_modules()` builds one default instance per module (all cheap,
         // no GPU work) so the descriptors can be copied out once.
@@ -332,10 +470,12 @@ impl ModuleRegistry {
                 props: scene.props(),
             })
             .collect();
+        let isf = scan_isf_corpus(isf_dir);
         Self {
             shader,
             two_d,
             point10,
+            isf,
         }
     }
 
@@ -354,6 +494,11 @@ impl ModuleRegistry {
         &self.point10
     }
 
+    /// The ISF corpus definitions, in file-name order.
+    pub fn isf_definitions(&self) -> &[IsfDefinition] {
+        &self.isf
+    }
+
     /// Look up a shader module by its registration name (`$moduleName`).
     pub fn shader_module(&self, name: &str) -> Option<&ShaderModule> {
         self.shader.iter().find(|module| module.name == name)
@@ -368,6 +513,11 @@ impl ModuleRegistry {
     /// (`"Point10 Chromatic Wave"`).
     pub fn point10_definition(&self, name: &str) -> Option<&Point10Definition> {
         self.point10.iter().find(|scene| scene.meta.name == name)
+    }
+
+    /// Look up an ISF definition by the shader's file stem (`"Bloom"`).
+    pub fn isf_definition(&self, name: &str) -> Option<&IsfDefinition> {
+        self.isf.iter().find(|definition| definition.name == name)
     }
 
     /// Which renderer owns `name`, or `None` when it is not registered.
@@ -390,6 +540,12 @@ impl ModuleRegistry {
             .any(|scene| scene.meta.name == name)
         {
             Some(ModuleKind::Point10)
+        } else if self
+            .isf_definitions()
+            .iter()
+            .any(|definition| definition.name == name)
+        {
+            Some(ModuleKind::Isf)
         } else {
             None
         }
@@ -476,6 +632,34 @@ impl ModuleRegistry {
                 }
                 Some(meta)
             }
+            ModuleKind::Isf => {
+                let definition = self.isf_definition(name)?;
+                // `setupModule` (`renderers/isf/index.js:184-192`) overwrites
+                // the registration-time `author`/`version` with `CREDIT`/`VSN`
+                // and adds `description`/`category`/`isfVersion`. A missing
+                // header field stays absent, exactly like the JS `undefined`
+                // keys that `JSON.stringify` drops.
+                let mut meta = Map::new();
+                meta.insert("name".to_string(), json!(definition.name));
+                if let Some(author) = &definition.meta.author {
+                    meta.insert("author".to_string(), json!(author));
+                }
+                if let Some(version) = &definition.meta.version {
+                    meta.insert("version".to_string(), json!(version));
+                }
+                meta.insert("type".to_string(), json!("isf"));
+                if let Some(description) = &definition.meta.description {
+                    meta.insert("description".to_string(), json!(description));
+                }
+                if let Some(category) = &definition.meta.category {
+                    meta.insert("category".to_string(), json!(category));
+                }
+                meta.insert("isfVersion".to_string(), json!(definition.meta.isf_version));
+                if definition.meta.preview_with_output {
+                    meta.insert("previewWithOutput".to_string(), json!(true));
+                }
+                Some(meta)
+            }
         }
     }
 
@@ -483,8 +667,10 @@ impl ModuleRegistry {
     ///
     /// Shader props never set `strict` (`renderers/shader/modules/*.js`), so
     /// their schemas keep `strict: false`; 2D props take `type`/`min`/`max`
-    /// from [`TwoDProp`] and `strict`/`abs` from [`TWO_D_PROP_FLAGS`]; Point10
-    /// props take both from the scene's [`SceneProp`] schema.
+    /// from [`TwoDProp`] and `strict`/`abs` from [`TWO_D_PROP_FLAGS`]; ISF props
+    /// take every field from the synthesised [`IsfProp`] and are never strict
+    /// (see [`schema_for_isf`]); Point10 props take both from the scene's
+    /// [`SceneProp`] schema.
     pub fn prop_schema(&self, module_name: &str, prop: &str) -> Option<PropSchema> {
         if let Some(module) = self.shader_module(module_name) {
             let declared = module.props.iter().find(|declared| declared.name == prop)?;
@@ -497,6 +683,10 @@ impl ModuleRegistry {
                 .iter()
                 .find(|declared| declared.name == prop)?;
             return Some(schema_for_two_d(definition.meta.name, declared));
+        }
+
+        if let Some(definition) = self.isf_definition(module_name) {
+            return Some(schema_for_isf(definition.prop(prop)?));
         }
 
         let definition = self.point10_definition(module_name)?;
@@ -520,6 +710,14 @@ impl ModuleRegistry {
 
         if let Some(definition) = self.two_d_definition(module_name) {
             return Some(two_d_default_props(&definition.props));
+        }
+
+        if let Some(definition) = self.isf_definition(module_name) {
+            let mut props = Map::new();
+            for (name, prop) in &definition.props {
+                props.insert(name.clone(), default_isf_prop_value(prop));
+            }
+            return Some(Value::Object(props));
         }
 
         let definition = self.point10_definition(module_name)?;
@@ -689,6 +887,160 @@ fn default_shader_prop_value(prop: &ShaderProp) -> Value {
     }
 }
 
+/// Build a [`PropSchema`] from a synthesised ISF prop.
+///
+/// `renderers/isf/index.js:210-275` never sets `strict` for ISF inputs, even
+/// when the header declares `MIN`/`MAX`, so the schema keeps the bounds as
+/// control metadata but does **not** clamp writes. That is the JS behaviour:
+/// `modules/updateProp` only clamps `strict` props, and the shader receives
+/// out-of-range values unchanged.
+fn schema_for_isf(prop: &IsfProp) -> PropSchema {
+    PropSchema {
+        type_: prop.type_.as_str().to_string(),
+        min: prop.min,
+        max: prop.max,
+        strict: false,
+        abs: false,
+        default: Some(default_isf_prop_value(prop)),
+    }
+}
+
+/// The JSON default for an ISF prop, mirroring `getPropDefault`
+/// (`utils/get-prop-default.js:10-19`) and the synthesiser.
+///
+/// * `float` always has a default (the header `DEFAULT`, else `0.0`).
+/// * `bool` always has one (`Boolean(DEFAULT)`).
+/// * `enum` takes the value of its `selected` member. The JS returns
+///   `undefined` when no member matches the header `DEFAULT`; this port falls
+///   back to the first member so a control always has a sensible value. (The
+///   runtime still uses the document `DEFAULT` for the uniform, so the
+///   rendered result is unchanged.)
+/// * `point2D` always has one (the synthesiser substitutes `[0, 0]`).
+/// * `color` only has one when the header declares `DEFAULT`.
+/// * `image`/`event` have no default in JS; they map to `null`.
+fn default_isf_prop_value(prop: &IsfProp) -> Value {
+    match prop.type_ {
+        IsfPropType::Float => prop.default.clone().unwrap_or_else(|| json!(0.0)),
+        IsfPropType::Bool => prop.default.clone().unwrap_or(json!(false)),
+        IsfPropType::Enum => prop
+            .enum_members
+            .as_ref()
+            .and_then(|members| {
+                members
+                    .iter()
+                    .find(|member| member.selected)
+                    .or_else(|| members.first())
+            })
+            .map(|member| member.value.clone())
+            .unwrap_or(Value::Null),
+        IsfPropType::Vec4 | IsfPropType::Vec2 => prop.default.clone().unwrap_or(Value::Null),
+        IsfPropType::Texture | IsfPropType::Event => Value::Null,
+    }
+}
+
+/// Scan an ISF corpus directory and return one [`IsfDefinition`] per parsable
+/// `*.fs`, in file-name order.
+///
+/// A missing directory is reported once and yields an empty list, so the
+/// engine still starts (with the shader/2D/Point10 modules only) when the
+/// corpus was not shipped. Individual read/parse failures are warned about and
+/// skipped. The `*.vs` sidecar is optional and matched by file stem.
+fn scan_isf_corpus(dir: Option<&Path>) -> Vec<IsfDefinition> {
+    let Some(dir) = dir else {
+        return Vec::new();
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "engine: WARN ISF corpus directory {} is not readable: {error}; \
+                 no ISF modules registered",
+                dir.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut files: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("fs"))
+        })
+        .collect();
+    files.sort();
+
+    let mut definitions = Vec::with_capacity(files.len());
+    let mut failed = 0usize;
+    for path in files {
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            eprintln!(
+                "engine: WARN skipping ISF shader with a non-UTF-8 file name: {}",
+                path.display()
+            );
+            failed += 1;
+            continue;
+        };
+        let fragment = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!(
+                    "engine: WARN skipping ISF shader {} (read failed: {error})",
+                    path.display()
+                );
+                failed += 1;
+                continue;
+            }
+        };
+        let vertex_path = path.with_extension("vs");
+        let vertex = if vertex_path.is_file() {
+            match fs::read_to_string(&vertex_path) {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    eprintln!(
+                        "engine: WARN skipping ISF shader {} (vertex sidecar read failed: {error})",
+                        path.display()
+                    );
+                    failed += 1;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        match parse_isf(&fragment, vertex.as_deref()) {
+            Ok(document) => {
+                let meta = meta_from_document(&document);
+                let props = synthesise_props(&document).into_iter().collect();
+                definitions.push(IsfDefinition {
+                    name: stem.to_string(),
+                    meta,
+                    props,
+                    document,
+                });
+            }
+            Err(error) => {
+                eprintln!(
+                    "engine: WARN skipping ISF shader {} (parse failed: {error})",
+                    path.display()
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "engine: INFO registered {} ISF module(s) from {} ({} failed)",
+        definitions.len(),
+        dir.display(),
+        failed
+    );
+    definitions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,7 +1159,7 @@ mod tests {
         // Point10 names are their own kind, not 2D modules.
         assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
         assert_eq!(registry.kind("Point10 Not A Scene"), None);
-        assert_eq!(registry.point10_definitions().len(), 5);
+        assert_eq!(registry.point10_definitions().len(), 9);
     }
 
     #[test]
@@ -826,6 +1178,10 @@ mod tests {
                 "Point10 Particle Field",
                 "Point10 Spiral Particles",
                 "Point10 Waveform",
+                "Point10 Square Tunnel",
+                "Point10 Light Tunnel",
+                "Point10 Wormhole",
+                "Point10 It Is Coming For You",
             ]
         );
 
@@ -981,5 +1337,195 @@ mod tests {
                 definition.meta.name
             );
         }
+    }
+
+    // ————————————————— ISF corpus (WS-4) —————————————————
+
+    /// Write one inline ISF shader into a fresh temporary directory and return
+    /// that directory.
+    fn write_inline_isf(source: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("modv-isf-registry-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp corpus directory");
+        std::fs::write(dir.join("Inline Test.fs"), source).expect("inline shader written");
+        dir
+    }
+
+    /// Every input kind the synthesiser handles, in declaration order.
+    const INLINE_ISF: &str = r#"/*{
+        "CREDIT": "by test",
+        "DESCRIPTION": "inline corpus entry",
+        "VSN": "2.1",
+        "ISFVSN": "2",
+        "MODV_CATEGORY": "3D Scenes",
+        "INPUTS": [
+            { "NAME": "gain", "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.75 },
+            { "NAME": "flip", "TYPE": "bool", "DEFAULT": true },
+            { "NAME": "mode", "LABEL": "ignored", "TYPE": "long", "DEFAULT": 2,
+              "VALUES": [0, 2, 5], "LABELS": ["zero", "two", "five"] },
+            { "NAME": "tint", "TYPE": "color", "DEFAULT": [0.5, 0.25, 0.0, 1.0] },
+            { "NAME": "centre", "TYPE": "point2D", "DEFAULT": [0.25, 0.75] },
+            { "NAME": "inputImage", "TYPE": "image" },
+            { "NAME": "restart", "TYPE": "event" }
+        ]
+    }*/
+    void main() { gl_FragColor = vec4(0.0); }
+    "#;
+
+    #[test]
+    fn isf_props_match_the_javascript_synthesis() {
+        let dir = write_inline_isf(INLINE_ISF);
+        let registry = ModuleRegistry::build(Some(&dir));
+        assert_eq!(registry.kind("Inline Test"), Some(ModuleKind::Isf));
+
+        let props = registry
+            .default_props("Inline Test")
+            .expect("the shader declares props");
+        assert_eq!(props["gain"], json!(0.75));
+        assert_eq!(props["flip"], json!(true));
+        assert_eq!(props["mode"], json!(2), "the selected enum member");
+        assert_eq!(props["tint"], json!([0.5, 0.25, 0.0, 1.0]));
+        assert_eq!(props["centre"], json!([0.25, 0.75]));
+        assert_eq!(props["inputImage"], json!(null));
+        assert_eq!(props["restart"], json!(null));
+
+        let definition = registry
+            .isf_definition("Inline Test")
+            .expect("registered definition");
+        let kinds: Vec<&str> = definition
+            .props
+            .iter()
+            .map(|(_, prop)| prop.type_.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["float", "bool", "enum", "vec4", "vec2", "texture", "event"]
+        );
+        assert_eq!(definition.props[0].1.step, Some(0.01));
+        assert_eq!(definition.props[2].1.label, "mode");
+
+        // `setupModule` metadata, including the image-input preview flag.
+        assert_eq!(definition.meta.author.as_deref(), Some("by test"));
+        assert_eq!(
+            definition.meta.description.as_deref(),
+            Some("inline corpus entry")
+        );
+        assert_eq!(definition.meta.version.as_deref(), Some("2.1"));
+        assert_eq!(definition.meta.category.as_deref(), Some("3d-scenes"));
+        assert!(definition.meta.preview_with_output);
+        assert_eq!(definition.meta.isf_version, 2.0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn isf_meta_fields_map_to_the_js_module_meta() {
+        let dir = write_inline_isf(INLINE_ISF);
+        let registry = ModuleRegistry::build(Some(&dir));
+        let meta = registry.meta_fields("Inline Test").expect("registered");
+        assert_eq!(meta["name"], json!("Inline Test"));
+        assert_eq!(meta["author"], json!("by test"));
+        assert_eq!(meta["description"], json!("inline corpus entry"));
+        assert_eq!(meta["version"], json!("2.1"));
+        assert_eq!(meta["type"], json!("isf"));
+        assert_eq!(meta["category"], json!("3d-scenes"));
+        assert_eq!(meta["isfVersion"], json!(2.0));
+        assert_eq!(meta["previewWithOutput"], json!(true));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn isf_prop_schemas_keep_bounds_but_do_not_clamp() {
+        let dir = write_inline_isf(INLINE_ISF);
+        let registry = ModuleRegistry::build(Some(&dir));
+
+        let gain = registry.prop_schema("Inline Test", "gain").expect("float");
+        assert_eq!(gain.type_, "float");
+        assert_eq!(gain.min, Some(0.0));
+        assert_eq!(gain.max, Some(2.0));
+        assert!(!gain.strict, "ISF synthesis never sets strict");
+        assert!(!gain.abs);
+
+        // The store's coercion pipeline must leave an out-of-range write alone
+        // (the JS renderer only clamps `strict` props).
+        let coerced = modv_engine::props::coerce_prop_value(&gain, &json!(99.0));
+        assert_eq!(coerced, json!(99.0));
+
+        let mode = registry.prop_schema("Inline Test", "mode").expect("enum");
+        assert_eq!(mode.type_, "enum");
+        assert_eq!(mode.default, Some(json!(2)));
+
+        let image = registry
+            .prop_schema("Inline Test", "inputImage")
+            .expect("texture");
+        assert_eq!(image.type_, "texture");
+
+        let event = registry
+            .prop_schema("Inline Test", "restart")
+            .expect("event");
+        assert_eq!(event.type_, "event");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn isf_corpus_directory_is_scanned_into_definitions() {
+        let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/renderer/src/application/renderers/isf/modules/isf");
+        if !corpus.is_dir() {
+            eprintln!("skipping ISF corpus test: {} is missing", corpus.display());
+            return;
+        }
+
+        let registry = ModuleRegistry::build(Some(&corpus));
+        let definitions = registry.isf_definitions();
+        let file_count = std::fs::read_dir(&corpus)
+            .expect("corpus directory reads")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("fs"))
+            })
+            .count();
+        assert!(
+            definitions.len() >= 340,
+            "expected at least 340 parsable shaders, got {}",
+            definitions.len()
+        );
+        assert!(
+            definitions.len() <= file_count,
+            "registered more definitions ({}) than .fs files ({file_count})",
+            definitions.len()
+        );
+
+        for name in [
+            "Color Invert",
+            "Bloom",
+            "badtv",
+            "Circular Screen",
+            "Posterize",
+            "Vignette",
+            "ASCII Art",
+        ] {
+            assert_eq!(
+                registry.kind(name),
+                Some(ModuleKind::Isf),
+                "{name} should be registered from the corpus"
+            );
+        }
+
+        // A known filter exposes its image input and float props.
+        let bloom = registry.isf_definition("Bloom").expect("Bloom registered");
+        assert!(bloom.prop("inputImage").is_some());
+        assert!(bloom.prop("blurAmount").is_some());
+        assert!(bloom.meta.preview_with_output);
+        assert!(bloom.document.passes.len() > 1, "Bloom is multi-pass");
     }
 }

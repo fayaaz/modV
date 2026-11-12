@@ -8,6 +8,169 @@
 // window.engine comes from the preload (src/preload/index.js) and fronts the
 // main process's engine-protocol.js — the renderer never touches the socket.
 
+import { createLogger } from "./logger";
+
+const logger = createLogger("renderer:engine-client");
+
+/** Pixel format ids from the engine's VMP1 preview ring (crates/modv-ipc). */
+const FORMAT_RGBA8 = 1;
+const FORMAT_BGRA8 = 2;
+
+/** The engine publishes frames with 32-bit pixels. */
+const BYTES_PER_PIXEL = 4;
+
+/**
+ * Pure throttle used by both preview surfaces: is a pull due at `nowMs`?
+ *
+ * `lastMs` is the timestamp of the last pull; `null`/`undefined` means "nothing
+ * pulled yet", which is always due. A non-positive or non-finite `fps` disables
+ * polling entirely (used while a panel is hidden).
+ */
+function shouldRefresh(nowMs, lastMs, fps) {
+  if (!Number.isFinite(nowMs)) return false;
+  if (!Number.isFinite(fps) || fps <= 0) return false;
+  if (lastMs === null || lastMs === undefined) return true;
+  if (!Number.isFinite(lastMs)) return false;
+  return nowMs - lastMs >= 1000 / fps;
+}
+
+/**
+ * Decode the base64 RGBA8 payload of a `preview/module` response.
+ *
+ * Decoded here in the renderer rather than in the preload/main so the bytes
+ * exist in exactly one place (this side of the bridge); the IPC payload stays a
+ * plain string, which is what `ipcRenderer.invoke` serialises cheapest.
+ *
+ * @returns {Uint8Array | null} null for a missing/empty/undecodable payload.
+ */
+function decodeBase64Pixels(base64) {
+  if (typeof base64 !== "string" || base64.length === 0) {
+    return null;
+  }
+
+  let binary;
+  try {
+    binary = atob(base64);
+  } catch (_error) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Normalise a raw engine frame into `{ width, height, data }` where `data` is a
+ * tightly packed RGBA8 `Uint8ClampedArray` copy — the shape
+ * `new ImageData(data, width, height)` expects.
+ *
+ * Handles the ring's padded `stride` (rows are copied out one at a time) and
+ * BGRA8 frames (B/R swapped), and refuses buffers that are too short for the
+ * declared geometry.
+ *
+ * @param {Uint8Array | Buffer | null} source
+ * @param {{ width?: number, height?: number, stride?: number, format?: number }} geometry
+ * @returns {{ width: number, height: number, data: Uint8ClampedArray } | null}
+ */
+function toFrameData(source, { width, height, stride, format } = {}) {
+  if (!source || typeof source.length !== "number") {
+    return null;
+  }
+
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) {
+    return null;
+  }
+
+  const rowBytes = w * BYTES_PER_PIXEL;
+  const sourceStride =
+    Number.isInteger(stride) && stride >= rowBytes ? stride : rowBytes;
+  // The last row only needs `rowBytes`; trailing padding may be truncated by
+  // the main process' bounded slot read.
+  const needed = sourceStride * (h - 1) + rowBytes;
+  if (source.length < needed) {
+    return null;
+  }
+
+  const data = new Uint8ClampedArray(rowBytes * h);
+  if (sourceStride === rowBytes) {
+    data.set(source.subarray(0, rowBytes * h));
+  } else {
+    for (let row = 0; row < h; row += 1) {
+      const start = row * sourceStride;
+      data.set(source.subarray(start, start + rowBytes), row * rowBytes);
+    }
+  }
+
+  if (Number(format) === FORMAT_BGRA8) {
+    for (let i = 0; i < data.length; i += BYTES_PER_PIXEL) {
+      const b = data[i];
+      data[i] = data[i + 2];
+      data[i + 2] = b;
+    }
+  }
+
+  return { width: w, height: h, data };
+}
+
+/**
+ * `engine/preview` reply → frame data for the main-window preview panel.
+ *
+ * The reply is `{ info, frame, pixels }`: `info` is the `preview/ready`
+ * handshake (`{ width, height, stride, format, … }`) and `frame` the
+ * `preview/frame` event for the slot that was read. A missing `pixels` means
+ * the engine has not produced a frame yet.
+ */
+function outputPreviewFromResponse(response) {
+  if (!response || typeof response !== "object" || !response.pixels) {
+    return null;
+  }
+
+  const { info, frame } = response;
+
+  return toFrameData(response.pixels, {
+    width: frame?.width ?? info?.width,
+    height: frame?.height ?? info?.height,
+    stride: frame?.stride ?? info?.stride,
+    format: frame?.format ?? info?.format,
+  });
+}
+
+/**
+ * `preview/module` reply → frame data for a Gallery tile.
+ *
+ * The engine returns `{ width, height, pixels }` with base64 RGBA8 (raw bytes
+ * are accepted too). The payload must be exactly one tightly packed frame;
+ * anything else is treated as "no preview yet" so a half-written or stale
+ * response never fills a tile with garbage.
+ */
+function modulePreviewFromResponse(response) {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+
+  const w = Number(response.width);
+  const h = Number(response.height);
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) {
+    return null;
+  }
+
+  const source =
+    typeof response.pixels === "string"
+      ? decodeBase64Pixels(response.pixels)
+      : response.pixels;
+
+  if (!source || source.length !== w * h * BYTES_PER_PIXEL) {
+    return null;
+  }
+
+  return toFrameData(source, { width: w, height: h, format: response.format });
+}
+
 export default class EngineClient {
   constructor() {
     if (!window.engine) {
@@ -21,6 +184,8 @@ export default class EngineClient {
     this._previewFrameCount = 0;
     this._stateCallback = null;
     this._stateFromInvoke = false;
+    // Preview surfaces a warning has already been logged for (tiles poll).
+    this._previewWarned = new Set();
 
     if (typeof window !== "undefined") {
       window.__enginePreviewCount = 0;
@@ -86,6 +251,76 @@ export default class EngineClient {
     return this.engine.requestPreview();
   }
 
+  /**
+   * Main-window preview frame as `{ width, height, data }` for a 2D canvas.
+   *
+   * Engine mode only (the preload API exists only when MODV_ENGINE=1). Resolves
+   * to null while the engine is stopped or has not published a frame yet — the
+   * caller leaves its canvas blank and retries.
+   */
+  requestOutputPreview() {
+    let pending;
+    try {
+      pending = this.engine.requestPreview?.();
+    } catch (error) {
+      this._previewFailed("output", error);
+      return Promise.resolve(null);
+    }
+
+    return Promise.resolve(pending)
+      .then((response) => outputPreviewFromResponse(response))
+      .catch((error) => {
+        this._previewFailed("output", error);
+        return null;
+      });
+  }
+
+  /**
+   * Gallery thumbnail for `moduleName`, rendered by the engine at
+   * `width` × `height`. Resolves to `{ width, height, data }` or null.
+   *
+   * The engine side is `preview/module` (another workstream); until it exists
+   * every call rejects and resolves to null, so tiles simply stay blank. Only
+   * the first failure per module is logged — tiles poll, so warning every poll
+   * would flood the log.
+   */
+  requestModulePreview(moduleName, width, height) {
+    if (typeof moduleName !== "string" || moduleName.length === 0) {
+      return Promise.resolve(null);
+    }
+
+    let pending;
+    try {
+      pending = this.engine.requestModulePreview({ moduleName, width, height });
+    } catch (error) {
+      this._previewFailed(`module:${moduleName}`, error);
+      return Promise.resolve(null);
+    }
+
+    return Promise.resolve(pending)
+      .then((response) => {
+        const frame = modulePreviewFromResponse(response);
+        if (frame) this._previewWarned.delete(`module:${moduleName}`);
+        return frame;
+      })
+      .catch((error) => {
+        this._previewFailed(`module:${moduleName}`, error);
+        return null;
+      });
+  }
+
+  /** Log the first failure of each preview surface; tiles poll, so once is enough. */
+  _previewFailed(key, error) {
+    if (this._previewWarned.has(key)) {
+      return;
+    }
+    this._previewWarned.add(key);
+    logger.warn("engine preview unavailable", {
+      surface: key,
+      message: error?.message || String(error),
+    });
+  }
+
   snapshot() {
     return this.engine.snapshot();
   }
@@ -99,3 +334,14 @@ export default class EngineClient {
     }
   }
 }
+
+// Pure preview helpers, exported for the unit tests (tests/unit/engine-preview).
+export {
+  decodeBase64Pixels,
+  modulePreviewFromResponse,
+  outputPreviewFromResponse,
+  shouldRefresh,
+  toFrameData,
+  FORMAT_BGRA8,
+  FORMAT_RGBA8,
+};

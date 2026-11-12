@@ -25,6 +25,11 @@
 //! third target. The arithmetic is identical: `dst = src + bloom` with
 //! `blendFunc(ONE, ONE)`.
 //!
+//! `Boxy.js:preserveBloomAlpha` (used by Wormhole) is the same colour add with
+//! the destination **alpha** kept (`blendSrcAlpha = ZERO`, `blendDstAlpha =
+//! ONE`); [`Composer::set_preserve_bloom_alpha`] switches the combine to that
+//! entry point.
+//!
 //! # Formats
 //!
 //! Every intermediate target is [`crate::point10::HDR_FORMAT`]

@@ -251,6 +251,53 @@ fn bloom_spreads_energy_to_neighbours() {
     );
 }
 
+/// `preserveBloomAlpha` (Boxy.js:73-86, used by Wormhole): the bloom still
+/// lights the neighbours, but it must not add into the frame's alpha.
+#[test]
+fn preserve_bloom_alpha_keeps_the_destination_alpha() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    // A 4x4 white patch with a transparent frame: the same setup as
+    // `bloom_spreads_energy_to_neighbours`.
+    let patch = (30, 30, 4, 4);
+    let scene = SolidScene::new(
+        &device,
+        &queue,
+        Composer::scene_format(),
+        [1.0, 1.0, 1.0, 1.0],
+        Some(patch),
+    );
+    let neighbour = (SIZE / 2 + 6, SIZE / 2);
+
+    let mut additive = Composer::new(&device, &queue, SIZE, SIZE, wgpu::TextureFormat::Rgba8Unorm);
+    additive.enable_bloom(1.0, 0.5, 0.0);
+    let additive_frame = render_frame(&device, &queue, &mut additive, &scene);
+    let additive_pixel = additive_frame.pixel(&device, &queue, neighbour.0, neighbour.1);
+
+    let mut preserved = Composer::new(&device, &queue, SIZE, SIZE, wgpu::TextureFormat::Rgba8Unorm);
+    preserved.enable_bloom(1.0, 0.5, 0.0);
+    preserved.set_preserve_bloom_alpha(true);
+    assert!(preserved.preserve_bloom_alpha());
+    let preserved_frame = render_frame(&device, &queue, &mut preserved, &scene);
+    let preserved_pixel = preserved_frame.pixel(&device, &queue, neighbour.0, neighbour.1);
+
+    // Both add the bloom colour...
+    assert!(
+        additive_pixel[0] > 8 && preserved_pixel[0] > 8,
+        "bloom should light the neighbour in both modes: {additive_pixel:?} / {preserved_pixel:?}"
+    );
+    // ...but only the default mode adds it into the alpha.
+    assert!(
+        additive_pixel[3] > 0,
+        "the additive combine is expected to raise alpha: {additive_pixel:?}"
+    );
+    assert_eq!(
+        preserved_pixel[3], 0,
+        "preserveBloomAlpha must keep the transparent background: {preserved_pixel:?}"
+    );
+}
+
 #[test]
 fn composer_resize_rebuilds_the_chain() {
     let Some((device, queue)) = gpu() else {

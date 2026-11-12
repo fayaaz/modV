@@ -6,7 +6,7 @@
 //! with M1 (WS-14) and are unused here. `--emit-fixtures` writes the M2 parity
 //! fixtures and exits before any GPU/window work (see [`crate::fixtures`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, Command, value_parser};
 
@@ -46,6 +46,10 @@ pub struct Cli {
     /// `snapshot.json`) into this directory and exit. Runs before any GPU,
     /// window or socket setup — see [`crate::fixtures`].
     pub emit_fixtures: Option<PathBuf>,
+    /// Directory holding the vendored ISF corpus (`*.fs` + `*.vs`), resolved
+    /// from `--isf-dir`, then `$MODV_ISF_DIR`, then a development default.
+    /// See [`resolve_isf_dir`].
+    pub isf_dir: Option<PathBuf>,
 }
 
 impl Cli {
@@ -163,6 +167,13 @@ pub fn parse() -> Cli {
                 .help("Write the deterministic store fixtures (deltas.json, snapshot.json) into DIR and exit")
                 .value_parser(value_parser!(PathBuf)),
         )
+        .arg(
+            Arg::new("isf-dir")
+                .long("isf-dir")
+                .value_name("PATH")
+                .help("Directory with the ISF corpus (*.fs + optional *.vs); defaults to $MODV_ISF_DIR or a dev path")
+                .value_parser(value_parser!(PathBuf)),
+        )
         .get_matches();
 
     let socket = matches.get_one::<String>("socket").map(PathBuf::from);
@@ -199,5 +210,47 @@ pub fn parse() -> Cli {
         socket,
         state: matches.get_one::<String>("state").map(PathBuf::from),
         emit_fixtures: matches.get_one::<PathBuf>("emit-fixtures").cloned(),
+        isf_dir: resolve_isf_dir(matches.get_one::<PathBuf>("isf-dir").cloned()),
     }
+}
+
+/// Resolve the ISF corpus directory the engine should scan.
+///
+/// Order (first match wins):
+///
+/// 1. `--isf-dir <PATH>` (the Electron supervisor always passes this);
+/// 2. `$MODV_ISF_DIR`;
+/// 3. a development default relative to the executable. The canonical Docker
+///    build writes `crates/target/release/modv-engine`, so the repository root
+///    is three levels above the binary directory and the corpus is at
+///    `src/renderer/src/application/renderers/isf/modules/isf`. A Cargo
+///    `target/` at the repository root and the current working directory are
+///    tried as well. A missing directory is not an error: the engine starts
+///    without ISF modules (the scan warns once).
+pub fn resolve_isf_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    if let Some(path) = std::env::var_os("MODV_ISF_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    development_isf_dir()
+}
+
+/// The development-only corpus lookup described on [`resolve_isf_dir`].
+fn development_isf_dir() -> Option<PathBuf> {
+    let relative = Path::new("src/renderer/src/application/renderers/isf/modules/isf");
+    let mut candidates = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(binary_dir) = executable.parent() {
+            // `crates/target/release` → repository root.
+            candidates.push(binary_dir.join("..").join("..").join("..").join(relative));
+            // `<repo>/target/release` (workspace target at the repository root).
+            candidates.push(binary_dir.join("..").join("..").join(relative));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(relative));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_dir())
 }

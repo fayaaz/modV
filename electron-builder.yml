@@ -7,6 +7,11 @@ directories:
 extraResources:
   - from: crates/target/release/modv-engine
     to: modv-engine
+  # The engine reads the ISF corpus as plain files (it scans the directory at
+  # startup), so it must live outside the asar; `--isf-dir` points here in a
+  # packaged build (src/main/engine-supervisor.js).
+  - from: src/renderer/src/application/renderers/isf/modules/isf
+    to: isf
 files:
   - '!**/.vscode/*'
   - '!src/*'

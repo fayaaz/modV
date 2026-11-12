@@ -26,6 +26,17 @@
 //! [`crate::point10::Point10Scene::resize`]) — the composer does not own scene
 //! state.
 //!
+//! # Preserving the frame alpha (`preserveBloomAlpha`)
+//!
+//! The default combine is three's additive bloom (`dst = base + bloom`, alpha
+//! included). Scenes that clear to transparent and bloom with `threshold: 0`
+//! (Wormhole, via `Boxy.js:preserveBloomAlpha`) need the bloom **colour**
+//! without the bloom **alpha**, otherwise the transparent background turns
+//! into an opaque veil. [`Composer::set_preserve_bloom_alpha`] switches the
+//! combine pass to `fs_preserve_alpha`, which returns `base.rgb + bloom.rgb`
+//! with `base.a` — the same arithmetic as `blendSrcAlpha = ZERO`,
+//! `blendDstAlpha = ONE`.
+//!
 //! # Not here
 //!
 //! No texture pool from `modv-render`: `modv-renderers` does not depend on the
@@ -47,6 +58,10 @@ use crate::point10::{FULLSCREEN_TRIANGLE_WGSL, HDR_FORMAT};
 /// configures.
 struct CombinePass {
     pipeline: wgpu::RenderPipeline,
+    /// `preserveBloomAlpha` variant (additive RGB, destination alpha kept).
+    preserve_pipeline: wgpu::RenderPipeline,
+    /// Whether [`CombinePass::preserve_pipeline`] is the active one.
+    preserve_alpha: bool,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     bind_group: Option<wgpu::BindGroup>,
@@ -102,41 +117,58 @@ impl CombinePass {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-postfx-combine-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+
+        let build = |label: &str, entry_point: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry_point),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
 
         Self {
-            pipeline,
+            pipeline: build("point10-postfx-combine-pipeline", "fs_main"),
+            preserve_pipeline: build(
+                "point10-postfx-combine-preserve-pipeline",
+                "fs_preserve_alpha",
+            ),
+            preserve_alpha: false,
             bind_group_layout,
             sampler: linear_sampler(device, "point10-postfx-combine-sampler"),
             bind_group: None,
         }
+    }
+
+    /// Select the `preserveBloomAlpha` arithmetic.
+    fn set_preserve_alpha(&mut self, preserve: bool) {
+        self.preserve_alpha = preserve;
+    }
+
+    fn preserve_alpha(&self) -> bool {
+        self.preserve_alpha
     }
 
     fn set_sources(
@@ -169,6 +201,11 @@ impl CombinePass {
         let Some(bind_group) = self.bind_group.as_ref() else {
             return;
         };
+        let pipeline = if self.preserve_alpha {
+            &self.preserve_pipeline
+        } else {
+            &self.pipeline
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("point10-postfx-combine"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -185,7 +222,7 @@ impl CombinePass {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -285,6 +322,24 @@ impl Composer {
         self.rebind();
     }
 
+    /// Use `preserveBloomAlpha`'s arithmetic for the bloom combine
+    /// (`Boxy.js:73-86`; Wormhole is the batch-2 scene that needs it).
+    ///
+    /// three's additive bloom composite also adds the bloom RGB into the
+    /// destination **alpha**. With `threshold: 0` every pixel receives bloom,
+    /// so a scene that clears to transparent black would get an opaque veil
+    /// laid over it and lose its layer alpha. `preserveBloomAlpha` keeps the
+    /// destination alpha while still adding the bloom colour; the Rust
+    /// equivalent is [`CombinePass`]'s `fs_preserve_alpha` entry.
+    pub fn set_preserve_bloom_alpha(&mut self, preserve: bool) {
+        self.combine.set_preserve_alpha(preserve);
+    }
+
+    /// Whether the combine pass preserves the destination alpha.
+    pub fn preserve_bloom_alpha(&self) -> bool {
+        self.combine.preserve_alpha()
+    }
+
     /// Turn bloom off again (the chain becomes blit → output).
     pub fn disable_bloom(&mut self) {
         self.bloom = None;
@@ -294,6 +349,11 @@ impl Composer {
     /// Mutable access to the bloom pass (setting strength/radius/threshold).
     pub fn bloom_mut(&mut self) -> Option<&mut UnrealBloomPass> {
         self.bloom.as_mut()
+    }
+
+    /// Read-only access to the bloom pass.
+    pub fn bloom(&self) -> Option<&UnrealBloomPass> {
+        self.bloom.as_ref()
     }
 
     /// Mutable access to the output pass (tone mapping, exposure).

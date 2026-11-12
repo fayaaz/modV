@@ -38,6 +38,16 @@ const engineApi = {
   requestPreview() {
     return ipcRenderer.invoke("engine/preview");
   },
+  // Gallery thumbnails: the engine renders one module off-graph and answers
+  // with { width, height, pixels } where pixels is base64 RGBA8. The renderer
+  // decodes it (application/engine-client.js) so no bytes are duplicated here.
+  requestModulePreview({ moduleName, width, height } = {}) {
+    return ipcRenderer.invoke("engine/preview-module", {
+      moduleName,
+      width,
+      height,
+    });
+  },
   getState() {
     return ipcRenderer.invoke("engine/get-state");
   },

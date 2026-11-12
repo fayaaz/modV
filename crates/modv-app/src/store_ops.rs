@@ -69,6 +69,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
@@ -127,7 +128,9 @@ impl From<PresetError> for StoreError {
 pub struct Store {
     pub(crate) state: EngineState,
     pub(crate) deltas: DeltaStream,
-    pub(crate) registry: ModuleRegistry,
+    /// The module registry, shared with the compositor (which needs the same
+    /// ISF definitions to compile a shader on first draw).
+    pub(crate) registry: Arc<ModuleRegistry>,
     /// The Scene list, performance config and seeding metadata (WS-8 / M5b).
     pub(crate) scenes: crate::scene_ops::ScenesState,
     /// `<state parent>/scenes.json`, resolved from `--state` on construction.
@@ -166,6 +169,18 @@ impl Store {
     /// (`scenes/hydrateScenes` + `scenes/ensureDefaultScenes`) loads or seeds
     /// it. A store without a state path keeps Scenes in memory only.
     pub fn with_state_path(state_path: Option<&std::path::Path>) -> Self {
+        Self::with_state_path_and_isf(state_path, None)
+    }
+
+    /// [`Self::with_state_path`] plus the ISF corpus directory.
+    ///
+    /// [`ModuleRegistry::build`] scans `isf_dir` once; unreadable or
+    /// unparsable shaders are skipped and logged. `None` registers no ISF
+    /// module, matching [`Store::with_state_path`].
+    pub fn with_state_path_and_isf(
+        state_path: Option<&std::path::Path>,
+        isf_dir: Option<&std::path::Path>,
+    ) -> Self {
         let scenes_path = state_path
             .and_then(std::path::Path::parent)
             .map(|parent| parent.join(crate::scene_ops::SCENES_STORAGE_FILENAME));
@@ -180,7 +195,7 @@ impl Store {
         Self {
             state: EngineState::new(),
             deltas: DeltaStream::new(),
-            registry: ModuleRegistry::builtin(),
+            registry: Arc::new(ModuleRegistry::build(isf_dir)),
             scenes: crate::scene_ops::ScenesState::default(),
             scenes_path,
             applied_scene_id: None,
@@ -188,6 +203,12 @@ impl Store {
             audio: AudioFrame::default(),
             warned: HashSet::new(),
         }
+    }
+
+    /// A shared handle to the registry, for the compositor to build against the
+    /// same module definitions (including the scanned ISF corpus).
+    pub fn registry_arc(&self) -> Arc<ModuleRegistry> {
+        Arc::clone(&self.registry)
     }
 
     /// The current state (read-only; the compositor renders from this).
@@ -1781,6 +1802,132 @@ mod tests {
             .find(|delta| delta.r#type == "modules/UPDATE_ACTIVE_MODULE_PROP")
             .expect("a prop delta was emitted");
         assert_eq!(prop_delta.payload["data"]["type"], json!("float"));
+    }
+
+    // ————————————————— ISF corpus modules (WS-4) —————————————————
+
+    /// Write one inline ISF shader into a fresh temporary directory.
+    fn write_inline_isf(source: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("modv-isf-store-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp corpus directory");
+        std::fs::write(dir.join("Inline Test.fs"), source).expect("inline shader written");
+        dir
+    }
+
+    const INLINE_ISF: &str = r#"/*{
+        "CREDIT": "by test",
+        "VSN": "1.0.0",
+        "ISFVSN": "2",
+        "INPUTS": [
+            { "NAME": "gain", "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.5 },
+            { "NAME": "flip", "TYPE": "bool", "DEFAULT": false },
+            { "NAME": "mode", "TYPE": "long", "DEFAULT": 1,
+              "VALUES": [0, 1, 2], "LABELS": ["a", "b", "c"] }
+        ]
+    }*/
+    void main() { gl_FragColor = vec4(1.0); }
+    "#;
+
+    #[test]
+    fn make_active_module_isf_uses_the_registry_meta_and_props() {
+        let dir = write_inline_isf(INLINE_ISF);
+        let mut store = Store::with_state_path_and_isf(None, Some(&dir));
+
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Inline Test"}),
+            )
+            .expect("makeActiveModule dispatches");
+        assert_eq!(module["meta"]["name"], json!("Inline Test"));
+        assert_eq!(module["meta"]["type"], json!("isf"));
+        assert_eq!(module["meta"]["author"], json!("by test"));
+        assert_eq!(module["meta"]["version"], json!("1.0.0"));
+        assert_eq!(module["$status"], json!([]), "registered, no error status");
+
+        assert_eq!(module["props"]["gain"], json!(0.5));
+        assert_eq!(module["props"]["flip"], json!(false));
+        assert_eq!(module["props"]["mode"], json!(1));
+
+        let id = module["$id"].as_str().unwrap().to_string();
+        assert_eq!(store.state().modules[&id].module_name, "Inline Test");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_prop_isf_does_not_clamp_declared_ranges() {
+        let dir = write_inline_isf(INLINE_ISF);
+        let mut store = Store::with_state_path_and_isf(None, Some(&dir));
+        let module = store
+            .dispatch(
+                "modules/makeActiveModule",
+                json!({"moduleName": "Inline Test"}),
+            )
+            .expect("makeActiveModule dispatches");
+        let id = module["$id"].as_str().unwrap().to_string();
+
+        // ISF synthesis never sets `strict`, so the JS renderer stores the
+        // out-of-range value unchanged; the shader clamps if it wants to.
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "gain", "data": {"value": 99.0}}),
+            )
+            .expect("updateProp dispatches");
+        assert_eq!(store.state().modules[&id].props["gain"], json!(99.0));
+
+        store
+            .dispatch(
+                "modules/updateProp",
+                json!({"moduleId": id, "prop": "gain", "data": {"value": -3.0}}),
+            )
+            .expect("updateProp dispatches");
+        assert_eq!(store.state().modules[&id].props["gain"], json!(-3.0));
+
+        // The delta still reports the float data type from the schema.
+        let deltas = store.drain_deltas();
+        let prop_delta = deltas
+            .iter()
+            .rev()
+            .find(|delta| delta.r#type == "modules/UPDATE_ACTIVE_MODULE_PROP")
+            .expect("a prop delta was emitted");
+        assert_eq!(prop_delta.payload["data"]["type"], json!("float"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn make_active_module_isf_corpus_shader_has_its_props() {
+        let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/renderer/src/application/renderers/isf/modules/isf");
+        if !corpus.is_dir() {
+            eprintln!("skipping ISF store test: {} is missing", corpus.display());
+            return;
+        }
+        let mut store = Store::with_state_path_and_isf(None, Some(&corpus));
+        let module = store
+            .dispatch("modules/makeActiveModule", json!({"moduleName": "Bloom"}))
+            .expect("makeActiveModule dispatches");
+
+        assert_eq!(module["meta"]["name"], json!("Bloom"));
+        assert_eq!(module["meta"]["type"], json!("isf"));
+        assert_eq!(module["meta"]["author"], json!("by VIDVOX"));
+        assert_eq!(module["meta"]["previewWithOutput"], json!(true));
+        assert_eq!(module["$status"], json!([]));
+
+        // `Bloom.fs` declares the image input and the two float props with
+        // their header defaults.
+        assert_eq!(module["props"]["inputImage"], json!(null));
+        assert_eq!(module["props"]["blurAmount"], json!(12));
+        assert_eq!(module["props"]["intensity"], json!(0));
+        assert!(
+            module["props"].get("inputImage").is_some(),
+            "the texture prop is registered so panels can show it"
+        );
     }
 
     #[test]

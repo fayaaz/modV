@@ -514,8 +514,9 @@ class ModV {
     this.canvas = canvas;
 
     if (this.engineMode) {
-      // The engine presents the output natively in its own window; the
-      // renderer's hidden canvas stays untouched (no OffscreenCanvas handoff).
+      // The engine composites and presents output itself; this renderer only
+      // paints preview frames (Preview.vue, GalleryItem.vue) into plain 2D
+      // canvases, so there is no OffscreenCanvas handoff and no GPU context.
     } else {
       const offscreen = this.canvas.transferControlToOffscreen();
 
@@ -1129,6 +1130,28 @@ class ModV {
         this.scheduleVideoReconnect(deviceId, { allowMuted: true });
       }
     }
+  }
+
+  // WS-14 previews. Engine mode only: the main-window preview panel and the
+  // Gallery tiles draw frames the engine composited (no GPU context exists in
+  // this renderer). Both resolve to `{ width, height, data }` where `data` is a
+  // tightly packed `Uint8ClampedArray` for `new ImageData(...)`, or null while
+  // the engine has nothing to show. Legacy mode owns its canvases through the
+  // worker, so these are null there.
+  requestOutputPreview() {
+    if (!this.engineMode) {
+      return Promise.resolve(null);
+    }
+
+    return this.engineClient.requestOutputPreview();
+  }
+
+  requestModulePreview(moduleName, width, height) {
+    if (!this.engineMode) {
+      return Promise.resolve(null);
+    }
+
+    return this.engineClient.requestModulePreview(moduleName, width, height);
   }
 
   async generatePreset() {

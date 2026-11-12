@@ -95,8 +95,8 @@
 //!
 //! ## Deliberate M3/M4 limitations
 //!
-//! * **ISF/three modules do not render.** They log once and are skipped (their
-//!   renderers land in M4).
+//! * **three modules do not render.** They log once and are skipped (their
+//!   renderer is out of scope for the hybrid engine).
 //! * **No `input_texture` for 2D modules.** `Webcam` and `Texture2D` draw
 //!   nothing while `DrawContext::input_texture` is `None` — exactly what the
 //!   JS does when the video/texture source is missing. Media inputs land with
@@ -165,6 +165,45 @@
 //! today, so scenes see silence rather than "no analyser"). M6 replaces this
 //! function with the analyser's real payload and nothing else moves.
 //!
+//! ## ISF corpus (WS-4)
+//!
+//! `meta.type == "isf"` modules are registered from the vendored corpus (see
+//! [`crate::module_registry`]) and rendered through
+//! [`modv_renderers::isf`]. The first time a module id draws:
+//!
+//! 1. The registry's parsed [`IsfDocument`] is compiled with
+//!    [`IsfRuntime::compile`] for `Rgba8Unorm` (the group format). Compilation
+//!    is per **instance**, while the translated pipeline is cached in the
+//!    runtime's bounded LRU; the [`CompiledIsf`] owns the pass buffers and the
+//!    uniform buffer.
+//! 2. A module-sized target texture is allocated (rebuilt when the output
+//!    resizes; the pass buffers themselves are resized inside
+//!    [`IsfRuntime::draw`], so a resize never recompiles).
+//! 3. Every frame `IsfRuntime::draw` renders the passes into that target with
+//!    `TIME`/`TIMEDELTA`/`FRAMEINDEX`/`DATE` (wall clock, month 1-based,
+//!    `DATE.w` = seconds since midnight) and the module's coerced prop values.
+//! 4. The target is composited onto the group with the module's
+//!    `meta.alpha`/`meta.compositeOperation`, the same helper the shader, 2D
+//!    and Point10 paths use.
+//!
+//! Input images: every declared `image` input receives the **group canvas**
+//! view, the JS default when no texture prop is resolved
+//! (`renderers/isf/index.js:84-91`). There is no texture registry yet, so a
+//! texture prop's value cannot be turned into a GPU texture; the group-canvas
+//! default is the implemented behaviour for every image input.
+//!
+//! Audio inputs are **static**: no analyser feeds `audio`/`audioFFT` textures
+//! yet (WS-9/M6), so the runtime binds its 1×1 transparent dummy and the
+//! `_imgSize`/`_imgRect` uniforms describe that dummy. ISF shaders that read
+//! audio are frozen until the engine audio feed lands; their other inputs and
+//! passes still run.
+//!
+//! Compile-on-activate cost: the first frame after a module is added runs the
+//! GLSL → WGSL translation and pipeline creation on the render thread. The
+//! corpus translates in a few milliseconds per shader on the reference
+//! machine, but a heavy multi-pass shader can stall that frame; predictive
+//! prewarming (like Point10's) is a follow-up.
+//!
 //! ## Present boundary
 //!
 //! All internal textures are `Rgba8Unorm`; canvas blend math is done on the
@@ -178,6 +217,8 @@
 //! conversion: module-to-group and group-to-main composites never linearise.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -190,6 +231,9 @@ use modv_render::frame_graph::{
     Executor, FrameGraph, GraphError, MAIN_TEXTURE_ID, PassNode, TextureId, TextureSurfaces,
 };
 use modv_render::wgpu;
+use modv_renderers::isf::{
+    CompiledIsf, IsfDocument, IsfFrameUniforms, IsfRuntime, IsfValue, IsfValues,
+};
 use modv_renderers::point10::audio_bridge::{
     AUDIO_SAMPLES, AudioBridge, BandPayload, LANES_PER_BAND, RawBands, ResponsivenessLevers,
     band_of_cell,
@@ -404,6 +448,23 @@ struct Point10Instance {
     last_time: Option<f32>,
 }
 
+/// One ISF module's live GPU state.
+///
+/// The JS renderer keeps one `ISFRenderer` and one input list per module id
+/// (`renderers/isf/index.js:283-291`); this struct is that state. The
+/// [`CompiledIsf`] is built lazily on the module's first draw and then reused
+/// (the runtime's bounded cache only holds the pipelines).
+struct IsfInstance {
+    /// The compiled shader, or `None` until the first draw.
+    compiled: Option<CompiledIsf>,
+    /// The module-sized render target, rebuilt when the output resizes.
+    target: Option<OutputTexture>,
+    /// Size the target was allocated for.
+    size: Option<(u32, u32)>,
+    /// `FrameInfo::time_seconds` of the previous frame, for `TIMEDELTA`.
+    last_time: Option<f32>,
+}
+
 /// The GPU compositor: shader renderer, frame-graph executor, textures.
 pub struct Compositor {
     device: wgpu::Device,
@@ -411,7 +472,8 @@ pub struct Compositor {
     shader: ShaderRenderer,
     executor: Executor,
     surfaces: TextureSurfaces,
-    registry: ModuleRegistry,
+    registry: Arc<ModuleRegistry>,
+    isf_runtime: IsfRuntime,
     size: (u32, u32),
     main: Option<OutputTexture>,
     module_input: Option<OutputTexture>,
@@ -434,6 +496,11 @@ pub struct Compositor {
     /// Point10 module ids whose scene could not be created; skipped without
     /// retrying each frame.
     failed_point10: HashSet<String>,
+    /// Live ISF instances keyed by module id.
+    isf: HashMap<String, IsfInstance>,
+    /// ISF module ids whose compile failed; skipped without retrying each
+    /// frame.
+    failed_isf: HashSet<String>,
     /// One-shot log keys (unknown blend mode, skipped module type, ...).
     warned: HashSet<String>,
     /// Sampler for module input textures — Repeat/Linear, matching
@@ -446,8 +513,22 @@ pub struct Compositor {
 }
 
 impl Compositor {
-    /// Build the compositor against the engine's device and queue.
+    /// Build the compositor against the engine's device and queue with the
+    /// built-in shader/2D/Point10 modules only (no ISF corpus).
+    ///
+    /// The engine path uses [`Compositor::with_registry`] so the compositor
+    /// shares the store's registry and its scanned ISF definitions.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        Self::with_registry(device, queue, Arc::new(ModuleRegistry::builtin()))
+    }
+
+    /// Build the compositor against a shared [`ModuleRegistry`].
+    pub fn with_registry(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        registry: Arc<ModuleRegistry>,
+    ) -> Self {
         let shader = ShaderRenderer::new(
             device.clone(),
             queue.clone(),
@@ -511,7 +592,8 @@ impl Compositor {
             shader,
             executor,
             surfaces: TextureSurfaces::new(),
-            registry: ModuleRegistry::builtin(),
+            registry,
+            isf_runtime: IsfRuntime::new(device.clone(), queue.clone(), 4),
             size: (0, 0),
             main: None,
             module_input: None,
@@ -524,6 +606,8 @@ impl Compositor {
             failed_two_d: HashSet::new(),
             point10: HashMap::new(),
             failed_point10: HashSet::new(),
+            isf: HashMap::new(),
+            failed_isf: HashSet::new(),
             warned: HashSet::new(),
             group_sampler,
             present_sampler,
@@ -558,6 +642,13 @@ impl Compositor {
             instance.target = None;
             instance.size = None;
         }
+        // ISF targets are output-sized too. The compiled shader owns the pass
+        // buffers and resizes them itself in `draw`, so only the target is
+        // dropped here.
+        for instance in self.isf.values_mut() {
+            instance.target = None;
+            instance.size = None;
+        }
     }
 
     /// Drop all GPU-side state (used after `engine/restore`).
@@ -581,6 +672,11 @@ impl Compositor {
             instance.scene.dispose();
         }
         self.failed_point10.clear();
+        self.isf.clear();
+        self.failed_isf.clear();
+        // Drop translated pipelines too: a restored state can reference
+        // different shaders, and the cache is bounded but never expired.
+        self.isf_runtime = IsfRuntime::new(self.device.clone(), self.queue.clone(), 4);
     }
 
     fn drop_output_textures(&mut self) {
@@ -809,6 +905,9 @@ impl Compositor {
                 }
                 return self.render_two_d_module(module, module_id, target, frame);
             }
+            // Vendored ISF shaders register with `meta.type: "isf"` and render
+            // through the ISF runtime into their own target.
+            "isf" => return self.render_isf_module(module, module_id, target, frame),
             "shader" => {}
             other => {
                 self.warn_once(
@@ -1261,6 +1360,222 @@ impl Compositor {
         self.composite(texture_id, target.clone(), alpha, blend)
     }
 
+    /// Render one ISF shader into its module target and composite the result
+    /// onto the group target (`renderers/isf/index.js:58-124`).
+    ///
+    /// The shader is compiled on the module's first draw and kept for the
+    /// instance's lifetime (the runtime's bounded LRU only caches the
+    /// pipelines). Frame uniforms follow `ISFRenderer.setDateUniforms`:
+    /// `FRAMEINDEX` is 1-based, `DATE` is `[year, month 1-based, day, seconds
+    /// since midnight]`. Audio inputs stay bound to the runtime's dummy
+    /// texture until the engine audio feed lands (WS-9/M6).
+    fn render_isf_module(
+        &mut self,
+        module: &ModuleInstance,
+        module_id: &str,
+        target: &TextureId,
+        frame: &FrameInfo,
+    ) -> Result<(), CompositorError> {
+        if self.failed_isf.contains(module_id) {
+            return Ok(());
+        }
+
+        // Clone the `Arc` so the definition borrow does not conflict with the
+        // mutable runtime/instance borrows below.
+        let registry = Arc::clone(&self.registry);
+        let Some(definition) = registry.isf_definition(&module.module_name) else {
+            self.warn_once(
+                format!("unregistered-isf:{}", module.module_name),
+                &format!(
+                    "engine: WARN ISF shader '{}' is not in the registry; skipping \
+                     (was the corpus directory missing?)",
+                    module.module_name
+                ),
+            );
+            self.failed_isf.insert(module_id.to_string());
+            return Ok(());
+        };
+
+        // `loop.js:410-412`: alpha and composite operation come from the meta.
+        let alpha = module
+            .meta
+            .get("alpha")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let blend_token = module
+            .meta
+            .get("compositeOperation")
+            .and_then(Value::as_str)
+            .unwrap_or("normal")
+            .to_string();
+        let blend = self.render_blend_mode(&blend_token);
+
+        let (width, height) = self.size;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let texture_id = isf_texture_id(module_id);
+
+        self.isf
+            .entry(module_id.to_string())
+            .or_insert(IsfInstance {
+                compiled: None,
+                target: None,
+                size: None,
+                last_time: None,
+            });
+
+        // The module target is output-sized and rebuilt when the output
+        // resizes. `IsfRuntime::draw` resizes the pass buffers itself.
+        let needs_target = self
+            .isf
+            .get(module_id)
+            .map(|instance| instance.target.is_none() || instance.size != Some((width, height)))
+            .unwrap_or(false);
+        let new_target = if needs_target {
+            let texture =
+                self.create_output_texture(&format!("modv-isf-{module_id}"), width, height);
+            // The runtime blits the final pass with a clearing load, so this is
+            // only a guard against undefined memory if the shader never draws.
+            self.clear_texture(&texture.texture, "isf-allocate");
+            Some(texture)
+        } else {
+            None
+        };
+
+        // Register whichever texture the shader draws into so the frame-graph
+        // composite can sample it.
+        let target_texture = match &new_target {
+            Some(texture) => Some(texture.texture.clone()),
+            None => self
+                .isf
+                .get(module_id)
+                .and_then(|instance| instance.target.as_ref())
+                .map(|texture| texture.texture.clone()),
+        };
+        let Some(target_texture) = target_texture else {
+            return Ok(());
+        };
+        self.surfaces.insert(texture_id.clone(), target_texture);
+
+        // Input images sample the group canvas — the JS default when no
+        // texture prop resolves (`renderers/isf/index.js:84-91`). There is no
+        // texture registry yet, so a texture prop cannot supply a GPU texture.
+        let Some(group_texture) = self.surfaces.get(target).cloned() else {
+            return Ok(());
+        };
+        let group_view = group_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let image_inputs: Vec<(&str, &wgpu::TextureView)> = definition
+            .document
+            .inputs
+            .iter()
+            .filter(|input| input.type_ == "image")
+            .map(|input| (input.name.as_str(), &group_view))
+            .collect();
+
+        // Compile lazily. A compiled shader is tied to its target format; the
+        // group format is fixed, so this only recompiles if that ever changes.
+        let needs_compile = self
+            .isf
+            .get(module_id)
+            .and_then(|instance| instance.compiled.as_ref())
+            .map(|compiled| compiled.target_format != format)
+            .unwrap_or(true);
+        if needs_compile {
+            match self
+                .isf_runtime
+                .compile(&definition.document, &definition.name, format)
+            {
+                Ok(compiled) => {
+                    if let Some(instance) = self.isf.get_mut(module_id) {
+                        instance.compiled = Some(compiled);
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "engine: WARN ISF shader '{}' failed to compile: {error}",
+                        definition.name
+                    );
+                    self.failed_isf.insert(module_id.to_string());
+                    self.isf.remove(module_id);
+                    self.surfaces.remove(&texture_id);
+                    return Ok(());
+                }
+            }
+        }
+
+        // Values present in the module's prop bag; the runtime fills anything
+        // missing from the document defaults.
+        let values = isf_values(&definition.document, &module.props);
+        let date = isf_wall_clock_date();
+
+        let draw_error = {
+            // Split the borrows: the instance lives in `isf`, the compiler and
+            // pipeline cache in `isf_runtime`.
+            let Self {
+                isf, isf_runtime, ..
+            } = self;
+            let Some(instance) = isf.get_mut(module_id) else {
+                return Ok(());
+            };
+            if let Some(texture) = new_target {
+                instance.target = Some(texture);
+                instance.size = Some((width, height));
+            }
+
+            // `timing.js`-style per-instance delta: the first frame is 0.
+            let time_delta = match instance.last_time {
+                Some(previous) if (frame.time_seconds - previous).is_finite() => {
+                    (frame.time_seconds - previous).max(0.0)
+                }
+                _ => 0.0,
+            };
+            instance.last_time = Some(frame.time_seconds);
+
+            let uniforms = IsfFrameUniforms {
+                time: frame.time_seconds,
+                time_delta,
+                // `frameIndex += 1` starts at 1 in the JS renderer.
+                frame_index: frame.frame_index as i32 + 1,
+                date,
+            };
+
+            let Some(compiled) = instance.compiled.as_mut() else {
+                return Ok(());
+            };
+            let Some(render_target) = instance.target.as_ref() else {
+                return Ok(());
+            };
+            isf_runtime
+                .draw(
+                    compiled,
+                    &render_target.view,
+                    [width, height],
+                    uniforms,
+                    &values,
+                    &image_inputs,
+                    // Audio inputs are static until WS-9/M6: the runtime binds
+                    // its 1x1 transparent dummy for them.
+                    &[],
+                )
+                .err()
+        };
+
+        // A shader that fails at draw time (an invalid WIDTH formula, a GPU
+        // validation error) must not take the render loop down with it: skip
+        // the module for the rest of its life, like a compile failure.
+        if let Some(error) = draw_error {
+            eprintln!(
+                "engine: WARN ISF shader '{}' failed to draw: {error}",
+                definition.name
+            );
+            self.failed_isf.insert(module_id.to_string());
+            self.isf.remove(module_id);
+            self.surfaces.remove(&texture_id);
+            return Ok(());
+        }
+
+        self.composite(texture_id, target.clone(), alpha, blend)
+    }
+
     /// Main composite (`loop.js:555-663`).
     fn compose_main(
         &mut self,
@@ -1460,6 +1775,19 @@ impl Compositor {
             self.surfaces.remove(&point10_texture_id(&id));
         }
         self.failed_point10
+            .retain(|id| live_modules.contains(id.as_str()));
+
+        let stale_isf: Vec<String> = self
+            .isf
+            .keys()
+            .filter(|id| !live_modules.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale_isf {
+            self.isf.remove(&id);
+            self.surfaces.remove(&isf_texture_id(&id));
+        }
+        self.failed_isf
             .retain(|id| live_modules.contains(id.as_str()));
     }
 
@@ -2005,6 +2333,125 @@ fn two_d_texture_id(module_id: &str) -> TextureId {
 /// The frame-graph texture id of a Point10 scene's target.
 fn point10_texture_id(module_id: &str) -> TextureId {
     TextureId::from(format!("point10:{module_id}"))
+}
+
+/// The frame-graph texture id of an ISF module's target.
+fn isf_texture_id(module_id: &str) -> TextureId {
+    TextureId::from(format!("isf:{module_id}"))
+}
+
+/// Build the per-frame [`IsfValues`] from a module's prop bag.
+///
+/// Only inputs with a usable value are inserted; anything missing (or of the
+/// wrong shape) is left out so the runtime falls back to the document
+/// default. Image/audio inputs are textures and are not uniform values.
+fn isf_values(document: &IsfDocument, props: &Value) -> IsfValues {
+    let mut values = IsfValues::new();
+    for input in &document.inputs {
+        let value = props.get(&input.name);
+        match input.type_.as_str() {
+            "float" => {
+                if let Some(number) = value
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                {
+                    values.insert(input.name.clone(), IsfValue::Float(number));
+                }
+            }
+            "long" => {
+                if let Some(value) = value {
+                    values.insert(input.name.clone(), IsfValue::Int(isf_int(value)));
+                }
+            }
+            "bool" | "event" => {
+                // Events have no trigger plumbing yet; a stored truthy value
+                // still maps to `true` (JS: `!!props[NAME]`).
+                values.insert(
+                    input.name.clone(),
+                    IsfValue::Bool(value.and_then(Value::as_bool).unwrap_or(false)),
+                );
+            }
+            "point2D" => {
+                if let Some([x, y]) = json_vec2(value) {
+                    values.insert(input.name.clone(), IsfValue::Vec2([x, y]));
+                }
+            }
+            "color" => {
+                if let Some(colour) = json_vec4(value) {
+                    values.insert(input.name.clone(), IsfValue::Vec4(colour));
+                }
+            }
+            // `image`/`audio`/`audioFFT` are texture inputs, not uniform members.
+            _ => {}
+        }
+    }
+    values
+}
+
+/// Read a `long` value as `i32`, tolerating numbers, numeric strings and bools
+/// (presets and input links can carry any of them).
+fn isf_int(value: &Value) -> i32 {
+    match value {
+        Value::Number(number) => number.as_f64().unwrap_or(0.0) as i32,
+        Value::String(text) => text.trim().parse().unwrap_or(0),
+        Value::Bool(value) => i32::from(*value),
+        _ => 0,
+    }
+}
+
+/// Read a `point2D` prop (`[x, y]`) into two floats.
+fn json_vec2(value: Option<&Value>) -> Option<[f32; 2]> {
+    let entries = value?.as_array()?;
+    Some([
+        entries.first()?.as_f64()? as f32,
+        entries.get(1)?.as_f64()? as f32,
+    ])
+}
+
+/// Read a `color` prop (`[r, g, b, a]`) into four floats.
+fn json_vec4(value: Option<&Value>) -> Option<[f32; 4]> {
+    let entries = value?.as_array()?;
+    let mut colour = [0.0f32; 4];
+    for (index, slot) in colour.iter_mut().enumerate() {
+        *slot = entries.get(index)?.as_f64()? as f32;
+    }
+    Some(colour)
+}
+
+/// `DATE` for [`IsfFrameUniforms`]: `[year, month 1-based, day, seconds since
+/// midnight]`, read from the wall clock (the JS renderer's `setDateUniforms`).
+/// The clock is UTC so the date and the seconds-since-midnight share a zone
+/// (the engine has no timezone database); a visual shader only uses this for
+/// slow day/night variation.
+fn isf_wall_clock_date() -> [f32; 4] {
+    let unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let days = unix_seconds.div_euclid(86_400);
+    let seconds = unix_seconds.rem_euclid(86_400) as f32;
+    let (year, month, day) = civil_from_days(days);
+    [year as f32, month as f32, day as f32, seconds]
+}
+
+/// Gregorian date from days since 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month as u32, day as u32)
 }
 
 /// Longest frame the Point10 scene clock reports, mirroring
@@ -2773,6 +3220,166 @@ mod tests {
                 .surfaces
                 .get(&point10_texture_id("module-a"))
                 .is_none()
+        );
+    }
+
+    // ————————————————— ISF corpus path (WS-4) —————————————————
+
+    /// The vendored corpus directory, or `None` when this checkout does not
+    /// have it (the test then skips like a missing GPU adapter).
+    fn corpus_dir() -> Option<std::path::PathBuf> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/renderer/src/application/renderers/isf/modules/isf");
+        if dir.is_dir() {
+            Some(dir)
+        } else {
+            eprintln!("skipping ISF compositor test: {} is missing", dir.display());
+            None
+        }
+    }
+
+    /// A registry with the corpus registered, or `None` on a missing corpus.
+    fn corpus_registry() -> Option<Arc<ModuleRegistry>> {
+        Some(Arc::new(ModuleRegistry::build(Some(&corpus_dir()?))))
+    }
+
+    /// An ISF module record (`meta.type == "isf"`).
+    fn isf_module(module_id: &str, name: &str, props: Value) -> ModuleInstance {
+        serde_json::from_value(json!({
+            "$id": module_id,
+            "$moduleName": name,
+            "meta": {
+                "name": name,
+                "type": "isf",
+                "enabled": true,
+                "alpha": 1.0,
+                "compositeOperation": "normal"
+            },
+            "props": props,
+            "data": {}
+        }))
+        .expect("ISF module decodes")
+    }
+
+    /// One clearing `Effects` group with the given ISF modules, in draw order.
+    fn isf_state(modules: &[(&str, &str, Value)]) -> EngineState {
+        let ids: Vec<&str> = modules.iter().map(|(id, _, _)| *id).collect();
+        let mut state = EngineState::new();
+        state.groups.push(group_with(
+            "group-a",
+            "Effects",
+            &ids,
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        ));
+        for (id, name, props) in modules {
+            state
+                .modules
+                .insert(id.to_string(), isf_module(id, name, props.clone()));
+        }
+        state
+    }
+
+    fn isf_compositor(engine: &Engine, registry: Arc<ModuleRegistry>) -> Compositor {
+        let mut compositor = Compositor::with_registry(&engine.device, &engine.queue, registry);
+        compositor.resize(SIZE, SIZE);
+        compositor
+    }
+
+    #[test]
+    fn isf_generator_renders_through_the_runtime() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let Some(registry) = corpus_registry() else {
+            return;
+        };
+        let mut compositor = isf_compositor(&engine, registry);
+
+        let state = isf_state(&[("module-a", "Checkerboard", json!({}))]);
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("frame renders");
+
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert!(
+            lit_pixels(&pixels) > 0,
+            "Checkerboard (a pure ISF generator) drew nothing"
+        );
+        assert!(compositor.isf.contains_key("module-a"));
+        assert!(compositor.isf["module-a"].compiled.is_some());
+    }
+
+    #[test]
+    fn isf_image_input_samples_the_group_canvas() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let Some(registry) = corpus_registry() else {
+            return;
+        };
+        let mut compositor = isf_compositor(&engine, registry);
+
+        // Checkerboard draws into the group; Color Invert then samples the
+        // group canvas through its `inputImage` and inverts it — the JS
+        // default binding for an image input (`renderers/isf/index.js:84-91`).
+        let mut state = isf_state(&[("module-a", "Checkerboard", json!({}))]);
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("checkerboard frame renders");
+        let checkerboard = compositor.read_main_rgba8().expect("main reads back");
+
+        state.modules.insert(
+            "module-b".to_string(),
+            isf_module("module-b", "Color Invert", json!({})),
+        );
+        state.groups[0].modules.push("module-b".to_string());
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("invert frame renders");
+        let inverted = compositor.read_main_rgba8().expect("main reads back");
+
+        assert!(lit_pixels(&inverted) > 0, "the inverted frame is empty");
+        assert_ne!(
+            checkerboard, inverted,
+            "Color Invert did not sample the group canvas"
+        );
+    }
+
+    #[test]
+    fn isf_multi_pass_filter_renders_through_the_runtime() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let Some(registry) = corpus_registry() else {
+            return;
+        };
+        let mut compositor = isf_compositor(&engine, registry);
+
+        // Bloom is a 7-pass filter: every pass renders into its own buffer and
+        // the last one blits into the module target.
+        let state = isf_state(&[
+            ("module-a", "Checkerboard", json!({})),
+            (
+                "module-b",
+                "Bloom",
+                json!({"blurAmount": 6.0, "intensity": 1.0}),
+            ),
+        ]);
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("frame renders");
+
+        let pixels = compositor.read_main_rgba8().expect("main reads back");
+        assert!(lit_pixels(&pixels) > 0, "Bloom produced an empty frame");
+        let bloom = compositor.isf.get("module-b").expect("Bloom instance");
+        let compiled = bloom.compiled.as_ref().expect("Bloom compiled");
+        assert!(
+            compiled.passes.len() >= 7,
+            "Bloom should keep its multi-pass graph"
         );
     }
 

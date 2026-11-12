@@ -445,8 +445,12 @@ pub struct CompiledIsf {
     pub layout: UniformLayout,
     /// ISF defaults for inputs the caller does not supply.
     pub default_values: IsfValues,
-    /// The uniform buffer, `passes.len() * RUNTIME_UNIFORM_STRIDE` bytes.
+    /// The uniform buffer, `passes.len() * uniform_stride` bytes.
     pub uniform_buffer: wgpu::Buffer,
+    /// Per-pass uniform slice size. At least [`RUNTIME_UNIFORM_STRIDE`] and a
+    /// multiple of the device's dynamic-offset alignment: shaders with many
+    /// inputs (e.g. Bloom) have a uniform block larger than one 256-byte slot.
+    pub uniform_stride: u64,
     /// The format pipelines were compiled for.
     pub target_format: wgpu::TextureFormat,
     /// The pass that paints to the destination (the last pass with a target).
@@ -811,9 +815,22 @@ impl IsfRuntime {
             }
         }
 
+        // Dynamic uniform offsets must be aligned to the device limit (256 on
+        // desktop GPUs); the block itself can exceed the base stride when a
+        // shader declares many inputs.
+        let alignment = self
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment
+            .max(16) as u64;
+        let uniform_stride = round_up_u64(
+            layout.size.max(RUNTIME_UNIFORM_STRIDE as usize) as u64,
+            alignment,
+        );
+
         let uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("modV ISF uniform buffer"),
-            size: (passes.len() as u64).max(1) * RUNTIME_UNIFORM_STRIDE,
+            size: (passes.len() as u64).max(1) * uniform_stride,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -850,6 +867,7 @@ impl IsfRuntime {
             layout,
             default_values,
             uniform_buffer,
+            uniform_stride,
             target_format,
             last_target,
             pass_pipelines,
@@ -963,7 +981,7 @@ impl IsfRuntime {
         }
 
         // 3. Encode every pass's uniform slice.
-        let stride = RUNTIME_UNIFORM_STRIDE as usize;
+        let stride = compiled.uniform_stride as usize;
         let mut uniform_bytes = vec![0u8; compiled.passes.len().max(1) * stride];
         for (index, pass) in compiled.passes.iter().enumerate() {
             let render_size = match pass.target {
@@ -1063,7 +1081,7 @@ impl IsfRuntime {
             render_pass.set_bind_group(
                 0,
                 &bind_group,
-                &[(index as u64 * RUNTIME_UNIFORM_STRIDE) as u32],
+                &[(index as u64 * compiled.uniform_stride) as u32],
             );
             render_pass.draw(0..3, 0..1);
         }
@@ -1301,6 +1319,13 @@ fn encode_uniforms(
             UniformSource::ImageFlip(_) => write_i32(destination, offset, 0),
         }
     }
+}
+
+fn round_up_u64(value: u64, align: u64) -> u64 {
+    if align == 0 {
+        return value;
+    }
+    value.div_ceil(align) * align
 }
 
 fn write_f32(destination: &mut [u8], offset: usize, value: f32) {
@@ -1683,6 +1708,76 @@ mod tests {
                 pixel[2]
             );
         }
+    }
+
+    #[test]
+    fn many_inputs_grow_the_uniform_stride_beyond_one_256_byte_slot() {
+        // Regression: the per-pass uniform slice was a fixed 256 bytes, so a
+        // shader with many inputs (e.g. Bloom's ten image inputs) wrote past
+        // the slot and panicked. The stride must be the block size rounded up
+        // to the dynamic-offset alignment.
+        let mut inputs = Vec::new();
+        for index in 0..10 {
+            inputs.push(format!(r#"{{ "NAME": "image{index}", "TYPE": "image" }}"#));
+        }
+        for index in 0..20 {
+            inputs.push(format!(
+                r#"{{ "NAME": "float{index}", "TYPE": "float", "DEFAULT": 0.5 }}"#
+            ));
+        }
+        for index in 0..6 {
+            inputs.push(format!(
+                r#"{{ "NAME": "colour{index}", "TYPE": "color", "DEFAULT": [1,0,0,1] }}"#
+            ));
+        }
+        for index in 0..6 {
+            inputs.push(format!(
+                r#"{{ "NAME": "point{index}", "TYPE": "point2D", "DEFAULT": [0.5,0.5] }}"#
+            ));
+        }
+        let shader = format!(
+            "/*{{ \"INPUTS\": [{}] }}*/\nvoid main() {{ gl_FragColor = IMG_NORM_PIXEL(image0, vec2(0.5)); }}",
+            inputs.join(",")
+        );
+        let document = doc(&shader);
+
+        let Some(mut runtime) = try_runtime() else {
+            eprintln!("skipping ISF uniform-stride test: no adapter");
+            return;
+        };
+        let mut compiled = runtime
+            .compile(&document, "Many Inputs", wgpu::TextureFormat::Rgba8Unorm)
+            .expect("compiles");
+        assert!(
+            compiled.layout.size > RUNTIME_UNIFORM_STRIDE as usize,
+            "test shader must exceed one uniform slot (layout {})",
+            compiled.layout.size
+        );
+        assert!(compiled.uniform_stride >= compiled.layout.size as u64);
+        assert_eq!(
+            compiled.uniform_stride % 16,
+            0,
+            "dynamic offsets must stay aligned"
+        );
+
+        let destination = target(&runtime, 8, wgpu::TextureFormat::Rgba8Unorm);
+        let destination_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        runtime
+            .draw(
+                &mut compiled,
+                &destination_view,
+                [8, 8],
+                IsfFrameUniforms {
+                    time: 0.0,
+                    time_delta: 0.0,
+                    frame_index: 0,
+                    date: [2026.0, 11.0, 12.0, 0.0],
+                },
+                &IsfValues::new(),
+                &[],
+                &[],
+            )
+            .expect("draws without overflowing the uniform slot");
     }
 
     #[test]

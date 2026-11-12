@@ -1,7 +1,8 @@
 // WS-14 — IPC surface between the renderer and the engine supervisor.
 //
 // Renderer → engine: commit (fire-and-forget), dispatch (request/response,
-//   resolves with the action's return value), snapshot, preview fetch.
+//   resolves with the action's return value), snapshot, preview fetch
+//   (main output ring slot + off-graph module thumbnails for the Gallery).
 // Engine → renderer: `engine/delta` (the commitQueue-compatible {type,payload}
 //   records from `state/delta` events), `engine/state` (lifecycle transitions),
 //   `engine/preview-frame` (preview ring header, for the frame counter).
@@ -17,6 +18,20 @@ import { createLogger } from "./logger";
 import { windows } from "./windows";
 
 const logger = createLogger("engine-ipc");
+
+/** Upper bound for a Gallery thumbnail request (tiles render well below this). */
+const MODULE_PREVIEW_MAX_SIZE = 512;
+
+/**
+ * Clamp a requested module-preview edge: tiles ask for their pixel size scaled
+ * by the display's device-pixel ratio, so keep it a positive integer and stop a
+ * bogus value from asking the engine for a huge off-screen render.
+ */
+function previewDimension(value) {
+  const size = Math.round(Number(value));
+  if (!Number.isFinite(size) || size <= 0) return MODULE_PREVIEW_MAX_SIZE;
+  return Math.min(size, MODULE_PREVIEW_MAX_SIZE);
+}
 
 function mainWebContents() {
   return windows.mainWindow?.webContents || null;
@@ -103,6 +118,32 @@ export function registerEngineIpc(getSupervisor) {
     return { info, frame, pixels };
   });
 
+  // Gallery thumbnails. The engine renders the named module off the live graph
+  // (the Rust counterpart of the worker's `isGallery` auxillary output) and
+  // answers with `{ width, height, pixels }`, `pixels` being base64 RGBA8 of a
+  // tightly packed width × height frame. Errors (module not implemented by the
+  // engine yet, renderer busy, …) reject the invoke; the renderer treats that
+  // as "no preview yet" and retries on its own cadence.
+  ipcMain.handle("engine/preview-module", async (_event, message) => {
+    const sup = getSupervisor();
+    if (!sup?.isRunning()) return null;
+
+    const { moduleName, width, height } = message || {};
+    if (typeof moduleName !== "string" || moduleName.length === 0) {
+      return null;
+    }
+
+    return sup.client.request(
+      "preview/module",
+      {
+        moduleName,
+        width: previewDimension(width),
+        height: previewDimension(height),
+      },
+      5000,
+    );
+  });
+
   // -- engine → renderer ---------------------------------------------------
 
   const sup = getSupervisor();
@@ -142,6 +183,7 @@ export const ENGINE_IPC_CHANNELS = {
     "engine/dispatch",
     "engine/snapshot",
     "engine/preview",
+    "engine/preview-module",
     "engine/get-state",
   ],
 };

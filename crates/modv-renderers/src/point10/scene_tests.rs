@@ -62,6 +62,41 @@ fn render_two_frames(scene: &mut dyn Point10Scene, size: u32) -> Option<Vec<u8>>
     Some(target.read(&device, &queue))
 }
 
+/// [`render_two_frames`] for scenes that own their `EffectComposer`
+/// (LightTunnel, Wormhole, ItIsComingForYou).
+///
+/// Those scenes present themselves: their `render` runs their own
+/// `RenderPass -> UnrealBloomPass -> OutputPass` chain straight into the target
+/// it is handed. Wrapping them in [`render_two_frames`]' composer would
+/// tone-map and sRGB-encode twice, so this path initialises the scene with the
+/// destination format and lets it draw into the destination directly — the
+/// same contract the engine uses (`Point10Scene::render` writes the presented
+/// frame).
+fn render_owned_chain_two_frames(scene: &mut dyn Point10Scene, size: u32) -> Option<Vec<u8>> {
+    let (device, queue) = gpu()?;
+
+    let mut ctx = SceneContext::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    ctx.resize(size, size);
+    scene.init(&mut ctx);
+    scene.resize(size, size);
+
+    let mut bridge = AudioBridge::new();
+    let payload = loud_payload();
+    let target = TestTarget::new(&device, size, size);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("point10-scene-owned-chain-smoke"),
+    });
+
+    for _ in 0..2 {
+        bridge.update(1.0 / 60.0, Some(&payload), &Default::default());
+        scene.update(1.0 / 60.0, &bridge);
+        scene.render(&mut encoder, &target.view);
+    }
+    queue.submit(Some(encoder.finish()));
+
+    Some(target.read(&device, &queue))
+}
+
 #[test]
 fn chromatic_line_renders() {
     let mut scenes = all_scenes();
@@ -124,6 +159,107 @@ fn waveform_renders() {
     assert!(
         any_lit(&pixels),
         "Waveform produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+// ————— batch 2 —————
+
+#[test]
+fn square_tunnel_renders() {
+    let mut scene = crate::point10::scenes::square_tunnel::SquareTunnel::new();
+    let Some(pixels) = render_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "SquareTunnel produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // `Clear1` is opaque black, so every pixel has alpha 255.
+    assert!(
+        pixels.chunks_exact(4).all(|pixel| pixel[3] == 255),
+        "SquareTunnel must stay opaque (setClearColor(0x000000, 1))"
+    );
+}
+
+#[test]
+fn light_tunnel_renders() {
+    let mut scene = crate::point10::scenes::light_tunnel::LightTunnel::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "LightTunnel produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+#[test]
+fn wormhole_renders() {
+    let mut scene = crate::point10::scenes::wormhole::Wormhole::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "Wormhole produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+/// ItIsComingForYou's sprites are 50-60 px, so a 64 px frame is almost all
+/// sprite. Render at 256 px to see both the cloud and the gaps around it; the
+/// fragment count is the same (the sprite size is constant in pixels).
+const IT_IS_COMING_SIZE: u32 = 256;
+
+#[test]
+fn it_is_coming_for_you_renders() {
+    let mut scene = crate::point10::scenes::it_is_coming_for_you::ItIsComingForYou::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, IT_IS_COMING_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "ItIsComingForYou produced an empty frame at {IT_IS_COMING_SIZE}x{IT_IS_COMING_SIZE}"
+    );
+}
+
+/// The scene is deliberately background-free (`CLEAR_ALPHA = 0`,
+/// `ItIsComingForYou.js:51-52`): the cloud must composite over the layers
+/// below, so the pixels that no point covers keep alpha 0 while the cloud
+/// itself is opaque.
+#[test]
+fn it_is_coming_for_you_keeps_the_background_transparent() {
+    let mut scene = crate::point10::scenes::it_is_coming_for_you::ItIsComingForYou::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, IT_IS_COMING_SIZE) else {
+        return;
+    };
+
+    let pixel_count = pixels.len() / 4;
+    let mut transparent = 0_usize;
+    let mut opaque = 0_usize;
+    for pixel in pixels.chunks_exact(4) {
+        if pixel[3] == 0 {
+            transparent += 1;
+        }
+        if pixel[3] == 255 {
+            opaque += 1;
+        }
+    }
+
+    assert!(
+        transparent > 0,
+        "expected an alpha-0 background, but every pixel was drawn ({pixel_count} px)"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque point sprites, but no pixel reached alpha 255"
+    );
+    // The cloud is a sparse band, not a full-frame wash: most of the frame is
+    // still background.
+    assert!(
+        transparent > pixel_count / 4,
+        "the cloud covers too much of the frame: {transparent} transparent px of {pixel_count}"
     );
 }
 

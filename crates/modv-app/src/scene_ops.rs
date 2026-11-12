@@ -3092,6 +3092,67 @@ mod tests {
     }
 
     #[test]
+    fn apply_scene_materialises_isf_modules_from_the_corpus() {
+        let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/renderer/src/application/renderers/isf/modules/isf");
+        if !corpus.is_dir() {
+            eprintln!("skipping ISF Scene test: {} is missing", corpus.display());
+            return;
+        }
+        let mut store = Store::with_state_path_and_isf(None, Some(&corpus));
+        seed_scene(
+            &mut store,
+            json!({
+                "id": "scene-isf",
+                "name": "ISF scene",
+                "groups": [{
+                    "id": "doc-isf",
+                    "name": "Effects",
+                    "hidden": false,
+                    "modules": ["doc-bloom"],
+                    "enabled": 1,
+                    "alpha": 1,
+                    "inherit": true,
+                    "inheritFrom": -1,
+                    "pipeline": false,
+                    "clearing": true,
+                    "compositeOperation": "normal",
+                }],
+                "modules": {
+                    "doc-bloom": {
+                        "$id": "doc-bloom",
+                        "$moduleName": "Bloom",
+                        "meta": { "name": "Bloom", "enabled": true },
+                        "props": { "blurAmount": 6.0 },
+                        "data": {},
+                        "$props": {},
+                    },
+                },
+            }),
+        );
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-isf" }))
+            .expect("applyScene dispatches");
+
+        let group = store
+            .state()
+            .groups
+            .iter()
+            .find(|group| group.name == "Effects")
+            .expect("Effects group");
+        let module_id = &group.modules[0];
+        let module = store.state().modules.get(module_id).expect("module exists");
+        assert_eq!(module.module_name, "Bloom");
+        assert_eq!(module.status, Vec::<Value>::new(), "registered, no error");
+        // The registry meta survives the apply; the snapshot prop overrides the
+        // default and the other declared prop keeps its header default.
+        assert_eq!(module.meta["type"], json!("isf"));
+        assert_eq!(module.meta["author"], json!("by VIDVOX"));
+        assert_eq!(module.props["blurAmount"], json!(6.0));
+        assert_eq!(module.props["intensity"], json!(0));
+    }
+
+    #[test]
     fn apply_scene_replaces_previous_groups_and_keeps_gallery_and_non_scene() {
         let mut store = Store::new();
         store

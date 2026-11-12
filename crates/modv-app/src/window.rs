@@ -87,7 +87,8 @@ struct WindowedApp {
 impl WindowedApp {
     fn new(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Self {
         let start = Instant::now();
-        let mut store = Store::with_state_path(cli.state.as_deref());
+        let mut store =
+            Store::with_state_path_and_isf(cli.state.as_deref(), cli.isf_dir.as_deref());
         if let Some(path) = &cli.state {
             match store.restore_from_file(path) {
                 Ok(true) => eprintln!(
@@ -213,7 +214,8 @@ impl WindowedApp {
             }
         };
 
-        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        let mut compositor =
+            Compositor::with_registry(&engine.device, &engine.queue, self.store.registry_arc());
         let (width, height) = surface.dimensions();
         compositor.resize(width, height);
 

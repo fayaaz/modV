@@ -72,6 +72,31 @@ function getElectronApp() {
   }
 }
 
+/**
+ * Resolve the ISF corpus directory: packaged → `resources/isf`
+ * (electron-builder `extraResources`), development → the vendored source tree.
+ * Returns null outside Electron (unit tests), where the engine falls back to
+ * `$MODV_ISF_DIR` or its own development lookup.
+ */
+function defaultIsfDir() {
+  const app = getElectronApp();
+  if (!app) return null;
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "isf");
+  }
+  return path.join(
+    app.getAppPath(),
+    "src",
+    "renderer",
+    "src",
+    "application",
+    "renderers",
+    "isf",
+    "modules",
+    "isf",
+  );
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class EngineSupervisor extends EventEmitter {
@@ -79,6 +104,7 @@ class EngineSupervisor extends EventEmitter {
     binaryPath,
     socketPath,
     statePath,
+    isfDir,
     logger,
     clientFactory,
     // Test overrides (production uses the constants above).
@@ -92,6 +118,10 @@ class EngineSupervisor extends EventEmitter {
     super();
     this.binaryPath = binaryPath || defaultEngineBinary();
     this.socketPath = socketPath || defaultSocketPath();
+    // Resolved once: the packaged app ships `resources/isf`, development
+    // reads the vendored corpus. `null` leaves the engine's own lookup
+    // (`$MODV_ISF_DIR` / dev default) in charge.
+    this.isfDir = isfDir === undefined ? defaultIsfDir() : isfDir;
     this.restartBudget = restartBudget;
     this.restartDelayMs = restartDelayMs;
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
@@ -207,20 +237,18 @@ class EngineSupervisor extends EventEmitter {
     this._setState("starting");
     // The engine owns the snapshot file: it restores from it at startup and
     // flushes it on shutdown, so a restart needs no state bytes from us.
-    this.log.info(
-      `starting engine: ${this.binaryPath} --socket ${this.socketPath} --state ${this.statePath}`,
-    );
+    const args = ["--socket", this.socketPath, "--state", this.statePath];
+    if (this.isfDir) {
+      args.push("--isf-dir", this.isfDir);
+    }
+    this.log.info(`starting engine: ${this.binaryPath} ${args.join(" ")}`);
 
     let child;
     try {
-      child = spawn(
-        this.binaryPath,
-        ["--socket", this.socketPath, "--state", this.statePath],
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env },
-        },
-      );
+      child = spawn(this.binaryPath, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env },
+      });
     } catch (error) {
       this.log.error(`failed to spawn the engine: ${error.message}`);
       this._scheduleRestart("spawn-failed");

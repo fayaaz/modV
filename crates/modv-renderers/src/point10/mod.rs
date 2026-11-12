@@ -8,11 +8,13 @@
 //!   mod.rs                 this file: Point10Scene, SceneContext, prop/meta schemas,
 //!                          all_scenes()
 //!   audio_bridge.rs        AudioBridge (audioBridge.js) + P10Audio reader (p10Audio.js)
-//!   shared/                particle_alpha (particleAlpha/particleSprite), random
+//!   shared/                particle_alpha (particleAlpha/particleSprite), random,
+//!                          p9_glsl (the P9Glsl.js helpers batch 2 uses, as WGSL)
 //!   chromatic/             shared ring-buffer sim + the ChromaticLine/ChromaticWave scenes
 //!   chromatic_line.rs      compatibility re-export of chromatic/line.rs
 //!   postfx/                RenderPass, UnrealBloomPass, ShaderPass, OutputPass, Composer
-//!   scenes/                ParticleField, SpiralParticles, Waveform
+//!   scenes/                ParticleField, SpiralParticles, Waveform, SquareTunnel,
+//!                          LightTunnel, Wormhole, ItIsComingForYou
 //! ```
 //!
 //! # Batch order
@@ -26,7 +28,7 @@
 //! | — | audio bridge | every scene reads `P10Audio`; the bridge is the only audio entry point |
 //! | — | postfx chain | 20 of 25 scenes use `EffectComposer` (RenderPass → UnrealBloom → ShaderPass → OutputPass) |
 //! | 1 | **ChromaticWave**, ParticleField, SpiralParticles, Waveform | uses everything above, no `P9Glsl`/texture assets |
-//! | 2 | SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou | needs `plane9/P9Glsl` + `shared/textures` + `shared/random` |
+//! | 2 | **SquareTunnel**, LightTunnel, Wormhole, ItIsComingForYou | needs `plane9/P9Glsl` + `shared/textures` + `shared/random` |
 //! | 3 | WaterRipple, GlassLens, UltraHDR | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
 //! | 4 | DvdRoom, MirrorCube, ColorCube, Boxy, Mycelium, AroundPlus, SoundCube, HollowCube | `P9Glsl` cube/room scenes, Boxy's `preserveBloomAlpha` |
 //! | 5 | AttractorParticles, GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | WebGPU/TSL scenes (compute passes hand-written WGSL) + SSAO/Afterimage passes |
@@ -63,6 +65,10 @@
 //! origin (`adapter.js:299-301`). The scenes that need a projection
 //! ([`scenes::ParticleField`], [`scenes::SpiralParticles`],
 //! [`scenes::Waveform`]) carry that camera as constants in their WGSL.
+//! [`scenes::Wormhole`] and [`scenes::ItIsComingForYou`] build their own
+//! cameras in `_init` (`Wormhole.js:216-227`,
+//! `ItIsComingForYou.js:262-274`), so those two inline their own projection.
+//! The two tunnels are fullscreen shaders and ignore the camera entirely.
 //!
 //! # `SceneContext` and the scene's own GPU resources
 //!
@@ -384,6 +390,23 @@ impl SceneContext {
         layout: &wgpu::PipelineLayout,
         blend: Option<wgpu::BlendState>,
     ) -> wgpu::RenderPipeline {
+        self.fullscreen_pipeline_with_format(label, shader, layout, self.target_format, blend)
+    }
+
+    /// [`SceneContext::fullscreen_pipeline`] for an explicit target format.
+    ///
+    /// The composer-owning scenes draw into the composer's HDR scene target
+    /// ([`postfx::Composer::scene_format`]), which is not the engine's
+    /// destination format, so they cannot use the context's `target_format`
+    /// for their scene pipeline.
+    pub fn fullscreen_pipeline_with_format(
+        &self,
+        label: &str,
+        shader: &wgpu::ShaderModule,
+        layout: &wgpu::PipelineLayout,
+        format: wgpu::TextureFormat,
+        blend: Option<wgpu::BlendState>,
+    ) -> wgpu::RenderPipeline {
         let device = &self.device;
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
@@ -405,7 +428,7 @@ impl SceneContext {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.target_format,
+                    format,
                     blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -498,8 +521,9 @@ impl UnitQuad {
 ///
 /// Order is the WS-7 port order, so the Gallery list is stable:
 /// `ChromaticLine, ChromaticWave, ParticleField, SpiralParticles, Waveform`
-/// (ChromaticLine was ported ahead of batch 1; the rest are batch 1 — see the
-/// module docs). The remaining 20 scenes are added batch by batch.
+/// (ChromaticLine was ported ahead of batch 1; the rest are batch 1), then the
+/// batch-2 scenes `SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou`.
+/// The remaining 16 scenes are added batch by batch.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
         Box::new(chromatic::line::ChromaticLine::new()),
@@ -507,6 +531,10 @@ pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
         Box::new(scenes::particle_field::ParticleField::new()),
         Box::new(scenes::spiral_particles::SpiralParticles::new()),
         Box::new(scenes::waveform::Waveform::new()),
+        Box::new(scenes::square_tunnel::SquareTunnel::new()),
+        Box::new(scenes::light_tunnel::LightTunnel::new()),
+        Box::new(scenes::wormhole::Wormhole::new()),
+        Box::new(scenes::it_is_coming_for_you::ItIsComingForYou::new()),
     ]
 }
 
@@ -517,13 +545,18 @@ mod tests {
     #[test]
     fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 5);
+        assert_eq!(scenes.len(), 9);
 
         assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
         assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
         assert_eq!(scenes[2].name(), "Point10 Particle Field");
         assert_eq!(scenes[3].name(), "Point10 Spiral Particles");
         assert_eq!(scenes[4].name(), "Point10 Waveform");
+        // Batch 2, in the WS-7 inventory order.
+        assert_eq!(scenes[5].name(), "Point10 Square Tunnel");
+        assert_eq!(scenes[6].name(), "Point10 Light Tunnel");
+        assert_eq!(scenes[7].name(), "Point10 Wormhole");
+        assert_eq!(scenes[8].name(), "Point10 It Is Coming For You");
     }
 
     #[test]

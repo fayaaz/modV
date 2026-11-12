@@ -10,14 +10,29 @@
     @dblclick="doubleClick"
     @mousedown="mouseDown"
   >
-    <canvas ref="canvas"></canvas>
+    <canvas ref="canvas" :class="{ 'engine-canvas': engineMode }"></canvas>
     <div class="title">{{ moduleName }}</div>
   </div>
 </template>
 
 <script>
 import { GROUP_ENABLED, GROUP_DISABLED } from "../application/constants.js";
+import { shouldRefresh } from "../application/engine-client.js";
 import { GalleryItemContextMenu } from "../menus/context/galleryItemContextMenu";
+
+// Engine mode: the engine renders the named module off the live graph (the Rust
+// counterpart of the worker's `isGallery` auxillary output) and answers with a
+// base64 RGBA8 frame. Tiles are tiny, so poll slowly: one frame on mount, ~10
+// fps while hovered, one every four seconds otherwise. Nothing here touches the
+// socket while the tile is unmounted.
+const GALLERY_HOVER_FPS = 10;
+const GALLERY_IDLE_FPS = 0.25;
+// The engine may not implement `preview/module` yet (or may be mid-restart):
+// back off so a Gallery full of tiles cannot flood the control socket.
+const GALLERY_FAILURE_RETRY_MS = 15_000;
+// Fallback request size when the tile has not been laid out yet.
+const GALLERY_FALLBACK_WIDTH = 160;
+const GALLERY_FALLBACK_HEIGHT = 90;
 
 export default {
   props: {
@@ -37,7 +52,20 @@ export default {
     };
   },
 
+  computed: {
+    engineMode() {
+      return this.$modV?.engineMode === true;
+    },
+  },
+
   async mounted() {
+    if (this.engineMode) {
+      // No canvas transfer: the worker does not exist, and the tile's own 2D
+      // canvas is a display copy of an engine-rendered frame.
+      this.startEnginePreview();
+      return;
+    }
+
     const { canvas } = this.$refs;
     const { width, height } = canvas;
     const offscreen = canvas.transferControlToOffscreen();
@@ -93,6 +121,14 @@ export default {
   },
 
   async beforeUnmount() {
+    if (this.engineMode) {
+      // There is no gallery Module in the store and no auxillary output to
+      // release in engine mode — just stop the polling and the drag listener.
+      this.stopEnginePreview();
+      this.mouseUp();
+      return;
+    }
+
     await this.$modV.store.dispatch("modules/removeActiveModule", {
       moduleId: this.id,
     });
@@ -108,7 +144,171 @@ export default {
   },
 
   methods: {
+    /**
+     * Engine mode: poll the engine for this module's thumbnail.
+     *
+     * `requestModulePreview` resolves to `{ width, height, data }` (or null
+     * while the engine has no preview for the module), painted into the tile's
+     * own 2D canvas with `putImageData`.
+     */
+    startEnginePreview() {
+      const { canvas } = this.$refs;
+
+      this._enginePreview = {
+        ctx: canvas.getContext("2d"),
+        timer: null,
+        inFlight: false,
+        disposed: false,
+        hovered: false,
+        failures: 0,
+        // null → nothing pulled yet, so the first frame is due immediately.
+        lastMs: null,
+      };
+
+      this.scheduleEnginePreview();
+    },
+
+    stopEnginePreview() {
+      const state = this._enginePreview;
+      if (!state) {
+        return;
+      }
+
+      state.disposed = true;
+      if (state.timer !== null) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+
+      this._enginePreview = null;
+    },
+
+    /** Current poll rate: hovered tiles refresh, idle tiles sample. */
+    enginePreviewFps(state) {
+      return state.hovered ? GALLERY_HOVER_FPS : GALLERY_IDLE_FPS;
+    },
+
+    /** Queue the next pull, honouring the current rate and any failure backoff. */
+    scheduleEnginePreview() {
+      const state = this._enginePreview;
+      if (!state || state.disposed || state.inFlight || state.timer !== null) {
+        return;
+      }
+
+      const now = performance.now();
+      const fps = this.enginePreviewFps(state);
+      let wait = 0;
+
+      if (state.failures > 0) {
+        wait = GALLERY_FAILURE_RETRY_MS;
+      } else if (!shouldRefresh(now, state.lastMs, fps)) {
+        wait = Math.max(0, state.lastMs + 1000 / fps - now);
+      }
+
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        void this.pullEnginePreview();
+      }, wait);
+    },
+
+    async pullEnginePreview() {
+      const state = this._enginePreview;
+      if (!state || state.disposed || state.inFlight) {
+        return;
+      }
+
+      // Hover changes shorten the interval, so re-check it at pull time too.
+      const now = performance.now();
+      if (!shouldRefresh(now, state.lastMs, this.enginePreviewFps(state))) {
+        this.scheduleEnginePreview();
+        return;
+      }
+
+      const { width, height } = this.enginePreviewSize();
+      state.lastMs = now;
+      state.inFlight = true;
+
+      try {
+        const frame = await this.$modV.requestModulePreview(
+          this.moduleName,
+          width,
+          height,
+        );
+
+        if (!frame || this._enginePreview !== state || state.disposed) {
+          if (this._enginePreview === state) {
+            state.failures += 1;
+          }
+          return;
+        }
+
+        state.failures = 0;
+        this.drawEnginePreviewFrame(state, frame);
+      } finally {
+        state.inFlight = false;
+        this.scheduleEnginePreview();
+      }
+    },
+
+    /** Backing-store size for the request, from the tile's laid-out size. */
+    enginePreviewSize() {
+      const rect = this.$refs.canvas?.getBoundingClientRect?.();
+      const quality = this.renderQuality || 1;
+
+      return {
+        width: Math.max(
+          1,
+          Math.round((rect?.width || GALLERY_FALLBACK_WIDTH) * quality),
+        ),
+        height: Math.max(
+          1,
+          Math.round((rect?.height || GALLERY_FALLBACK_HEIGHT) * quality),
+        ),
+      };
+    },
+
+    drawEnginePreviewFrame(state, { width, height, data }) {
+      const { canvas } = this.$refs;
+      if (!canvas || data.length !== width * height * 4) {
+        return;
+      }
+
+      // 1:1 backing store; the tile's CSS scales it to fit.
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const ctx = state.ctx || canvas.getContext("2d");
+      state.ctx = ctx;
+      ctx.putImageData(new ImageData(data, width, height), 0, 0);
+    },
+
+    /** Hover changed: switch rates and pull sooner when the tile is focused. */
+    setEngineHover(hovered) {
+      const state = this._enginePreview;
+      if (!state || state.disposed) {
+        return;
+      }
+
+      state.hovered = hovered;
+
+      if (hovered && state.timer !== null) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+
+      this.scheduleEnginePreview();
+    },
+
     async focus() {
+      if (this.engineMode) {
+        // No gallery Module to enable: the engine renders the thumbnail
+        // off-graph, so hovering only changes the poll rate.
+        this.setEngineHover(true);
+        return;
+      }
+
       const {
         id,
         groupId,
@@ -152,6 +352,13 @@ export default {
     },
 
     blur() {
+      if (this.engineMode) {
+        // Drop back to the idle poll rate; there is no gallery Group or Module
+        // to disable (the engine renders the thumbnail off-graph).
+        this.setEngineHover(false);
+        return;
+      }
+
       this.$modV.store.commit("modules/UPDATE_ACTIVE_MODULE_META", {
         id: this.id,
         metaKey: "enabled",
@@ -231,6 +438,15 @@ canvas {
   transition: 150ms opacity;
   width: 100%;
   height: 100%;
+}
+
+/*
+  Engine mode draws an engine-rendered frame into the tile's own 2D canvas; the
+  backdrop matches the black the worker's auxillary canvas used to show before
+  the first frame arrives.
+*/
+.gallery-item canvas.engine-canvas {
+  background: #000;
 }
 
 .gallery-item .title {
