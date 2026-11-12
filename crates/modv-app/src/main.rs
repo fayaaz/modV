@@ -11,6 +11,7 @@ mod headless;
 mod ids;
 mod module_registry;
 mod report;
+mod scene_ops;
 mod store_ops;
 mod supervisor;
 mod window;

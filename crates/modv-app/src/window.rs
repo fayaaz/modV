@@ -84,7 +84,7 @@ struct WindowedApp {
 impl WindowedApp {
     fn new(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Self {
         let start = Instant::now();
-        let mut store = Store::new();
+        let mut store = Store::with_state_path(cli.state.as_deref());
         if let Some(path) = &cli.state {
             match store.restore_from_file(path) {
                 Ok(true) => eprintln!(
@@ -105,6 +105,19 @@ impl WindowedApp {
                         path.display()
                     );
                 }
+            }
+
+            // The Scene list lives beside the snapshot. The renderer also
+            // dispatches these boot actions; running them here keeps a
+            // headless/supervised engine usable before the UI connects, and
+            // the second pass is idempotent (`ensureDefaultScenes` seeds
+            // nothing once the defaults version matches).
+            if let Err(error) = store.dispatch("scenes/hydrateScenes", serde_json::json!({})) {
+                eprintln!("engine: WARN could not hydrate Scenes: {error}");
+            }
+            if let Err(error) = store.dispatch("scenes/ensureDefaultScenes", serde_json::json!({}))
+            {
+                eprintln!("engine: WARN could not seed default Scenes: {error}");
             }
         }
         let supervisor = cli.socket.as_ref().and_then(|socket_path| {

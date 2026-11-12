@@ -55,9 +55,11 @@
 //! * **No `set` hook / renderer side effects.** `updateProp`'s optional
 //!   `props[x].set` call and the renderer `updateModule` hooks are renderer
 //!   concerns that land with their porting milestones.
-//! * **Unknown actions are accepted.** The renderer fires boot-time actions
-//!   (scene seeding, hydration, ...) that M2 does not implement; those log
-//!   once and return `Ok(null)`, exactly like the M1 supervisor did.
+//! * **Unknown actions are accepted.** The renderer fires boot-time and
+//!   UI actions the engine does not implement yet; those log once and return
+//!   `Ok(null)`, exactly like the M1 supervisor did. The Scene actions live in
+//!   [`crate::scene_ops`] (WS-8 / M5b); the performance runtime
+//!   (`scenes/tick`, transitions, previews) is still no-op until M5c/M5d.
 
 use std::collections::HashSet;
 use std::fs;
@@ -119,16 +121,22 @@ impl From<PresetError> for StoreError {
 
 /// The authoritative engine store.
 pub struct Store {
-    state: EngineState,
-    deltas: DeltaStream,
-    registry: ModuleRegistry,
+    pub(crate) state: EngineState,
+    pub(crate) deltas: DeltaStream,
+    pub(crate) registry: ModuleRegistry,
+    /// The Scene list, performance config and seeding metadata (WS-8 / M5b).
+    pub(crate) scenes: crate::scene_ops::ScenesState,
+    /// `<state parent>/scenes.json`, resolved from `--state` on construction.
+    pub(crate) scenes_path: Option<std::path::PathBuf>,
+    /// The Scene this store last applied (`applySceneNow`'s active Scene).
+    pub(crate) applied_scene_id: Option<String>,
     /// The current audio frame handed to modules and shader uniforms.
     ///
     /// Filled by `meyda/SET_BANDS` from the renderer's audio pump (see
     /// [`Store::set_bands`]). The engine performs no analysis yet (WS-9 / M6),
     /// so wave/FFT/features stay zeroed.
     audio: AudioFrame,
-    warned: HashSet<String>,
+    pub(crate) warned: HashSet<String>,
 }
 
 impl Default for Store {
@@ -138,12 +146,28 @@ impl Default for Store {
 }
 
 impl Store {
-    /// An empty store with the built-in shader registry.
+    /// An empty store with the built-in shader registry and no Scene storage.
     pub fn new() -> Self {
+        Self::with_state_path(None)
+    }
+
+    /// A store whose Scene list lives beside the engine's `--state` file
+    /// (`<state parent>/scenes.json`, WS-13).
+    ///
+    /// The path is only resolved here; the renderer's boot dispatch
+    /// (`scenes/hydrateScenes` + `scenes/ensureDefaultScenes`) loads or seeds
+    /// it. A store without a state path keeps Scenes in memory only.
+    pub fn with_state_path(state_path: Option<&std::path::Path>) -> Self {
+        let scenes_path = state_path
+            .and_then(std::path::Path::parent)
+            .map(|parent| parent.join(crate::scene_ops::SCENES_STORAGE_FILENAME));
         Self {
             state: EngineState::new(),
             deltas: DeltaStream::new(),
             registry: ModuleRegistry::builtin(),
+            scenes: crate::scene_ops::ScenesState::default(),
+            scenes_path,
+            applied_scene_id: None,
             audio: AudioFrame::default(),
             warned: HashSet::new(),
         }
@@ -201,6 +225,25 @@ impl Store {
             "modules/updateActiveModule" => self.update_active_module(params),
             "modules/removeActiveModule" => self.remove_active_module(params),
             "meyda/SET_BANDS" => self.set_bands(params),
+            // ————————————————— Scenes (WS-8 / M5b) —————————————————
+            "scenes/hydrateScenes" => self.hydrate_scenes(),
+            "scenes/ensureDefaultScenes" => self.ensure_default_scenes(),
+            "scenes/loadScenesFromDisk" => self.load_scenes_from_disk(),
+            "scenes/loadSceneFromJson" => self.load_scene_from_json(params),
+            "scenes/importPlaylist" => self.import_playlist_action(params),
+            "scenes/exportPlaylist" => Ok(self.export_playlist_action()),
+            "scenes/removeScene" => self.remove_scene_action(params),
+            "scenes/setRowNames" => self.set_row_names(params),
+            "scenes/updatePerformance" => self.update_performance_action(params),
+            "scenes/setPerformanceEnabled" => self.set_performance_enabled(params),
+            "scenes/applyScene" => self.apply_scene_action(params),
+            "scenes/captureLiveStateToScene" => self.capture_live_state_to_scene(params),
+            "scenes/persistScenes" => {
+                if let Err(error) = self.persist_scenes() {
+                    eprintln!("engine: WARN could not save the Scene list: {error}");
+                }
+                Ok(Value::Null)
+            }
             other => {
                 if self.warned.insert(format!("action:{other}")) {
                     eprintln!("engine: WARN dispatch {other} not implemented yet (M2+)");
@@ -800,7 +843,7 @@ impl Store {
     }
 
     /// Log `message` at most once per `key`.
-    fn warn_once(&mut self, key: String, message: &str) {
+    pub(crate) fn warn_once(&mut self, key: String, message: &str) {
         if self.warned.insert(key) {
             eprintln!("{message}");
         }
@@ -993,7 +1036,7 @@ fn inherit_from_value(value: Option<&Value>) -> InheritFrom {
 }
 
 /// Serialise a value, falling back to `null` for the impossible failure.
-fn json_value(value: &impl serde::Serialize) -> Value {
+pub(crate) fn json_value(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
@@ -1002,7 +1045,7 @@ fn json_value(value: &impl serde::Serialize) -> Value {
 /// [`ModuleInstance::status`] is skipped when empty (the preset shape), but a
 /// live JS module always carries `$status: []` (`modules.js:251-258`) and the
 /// mirror's `ADD_ACTIVE_MODULE` payload must match the object the UI expects.
-fn module_json(module: &ModuleInstance) -> Value {
+pub(crate) fn module_json(module: &ModuleInstance) -> Value {
     let mut value = json_value(module);
     if let Value::Object(map) = &mut value {
         map.entry("$status".to_string())
