@@ -68,6 +68,54 @@ const EXPRESSION_LOOP_LIMIT: u64 = 100_000;
 /// Maximum JS recursion depth inside one expression.
 const EXPRESSION_RECURSION_LIMIT: usize = 64;
 
+/// Maximum expression source length (a hostile playlist must not embed a
+/// megabyte expression).
+const MAX_EXPRESSION_SOURCE: usize = 4096;
+
+/// Constructs that can allocate or loop outside Boa's loop-iteration budget
+/// (native builtins) or reach the embedding context. Expressions are simple
+/// arithmetic/maths in practice; rejecting these keeps a hostile preset from
+/// wedging the engine thread. Documented on the module.
+const FORBIDDEN_EXPRESSION_TOKENS: &[&str] = &[
+    "while",
+    "for ",
+    "for(",
+    "=>",
+    "function",
+    "class ",
+    "new ",
+    "Array",
+    "Uint8",
+    "Uint16",
+    "Uint32",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Float32",
+    "Float64",
+    "BigInt",
+    "repeat(",
+    "repeat (",
+    "fill(",
+    "fill (",
+    "map(",
+    "map (",
+    "forEach(",
+    "forEach (",
+    "reduce(",
+    "reduce (",
+    "eval(",
+    "Function(",
+    "setTimeout",
+    "setInterval",
+    "requestAnimationFrame",
+    "globalThis",
+    "import(",
+    "require(",
+    "WebAssembly",
+    "__modvExpression",
+];
+
 /// An error from compiling or evaluating an expression.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ExpressionError {
@@ -140,13 +188,21 @@ impl ExpressionEngine {
         context.set_runtime_limits(limits);
 
         let functions = JsObject::with_object_proto(context.intrinsics());
-        // The set can only fail if the global object is not extensible, which
-        // it is for a default context. Ignoring the result keeps `new`
-        // infallible; `compile` reports a missing map as a compile error.
+        // An unguessable, non-enumerable key keeps the compiled function map
+        // unreachable from expression code (the map itself must stay writable
+        // so `compile` can add functions).
+        let key = format!(
+            "__modv_expr_{:x}_{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(0),
+            std::process::id()
+        );
         let _ = context.register_global_property(
-            js_string!("__modvExpressionFunctions"),
+            js_string!(key.as_str()),
             functions.clone(),
-            Attribute::WRITABLE | Attribute::CONFIGURABLE | Attribute::NON_ENUMERABLE,
+            Attribute::WRITABLE | Attribute::NON_ENUMERABLE,
         );
 
         Self {
@@ -156,12 +212,33 @@ impl ExpressionEngine {
         }
     }
 
+    /// Replace the JS realm and drop every compiled function.
+    ///
+    /// Called when a preset/Scene replaces the expression assignments: a
+    /// long-lived realm lets one expression's prototype pollution affect every
+    /// later expression, and recompilation is cheap relative to a preset load.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     /// Compile `source` into a reusable handle.
     ///
     /// The wrapper mirrors the JS `new Function` body: the four scope names
     /// are parameters and the source is the returned expression. A syntax error
     /// is reported as [`ExpressionError::Compile`].
     pub fn compile(&mut self, source: &str) -> Result<ExpressionHandle, ExpressionError> {
+        if source.len() > MAX_EXPRESSION_SOURCE {
+            return Err(ExpressionError::Compile(format!(
+                "expression is longer than {MAX_EXPRESSION_SOURCE} bytes"
+            )));
+        }
+        for token in FORBIDDEN_EXPRESSION_TOKENS {
+            if source.contains(token) {
+                return Err(ExpressionError::Compile(format!(
+                    "expression uses the unsupported construct {token:?}"
+                )));
+            }
+        }
         // The newlines matter: a trailing `// comment` in the user's source
         // would otherwise swallow the closing parenthesis.
         let wrapper =
@@ -475,22 +552,33 @@ mod tests {
     }
 
     #[test]
-    fn runaway_loop_hits_the_runtime_limit() {
+    fn runaway_loops_and_allocations_are_rejected_at_compile_time() {
         let mut engine = ExpressionEngine::new();
-        let handle = engine
-            .compile("(() => { while (true) {} })()")
-            .expect("compiles");
-        let error = engine
+        for source in [
+            "(() => { while (true) {} })()",
+            "Array.from({ length: 1000000000 })",
+            "'x'.repeat(1000000000)",
+            "value.map((x) => x)",
+        ] {
+            let error = engine
+                .compile(source)
+                .expect_err("hostile expressions are rejected");
+            assert!(matches!(error, ExpressionError::Compile(_)), "{source}");
+        }
+
+        // Ordinary maths still compiles and runs.
+        let handle = engine.compile("value * 2 + Math.sin(time / 1000)").unwrap();
+        let value = engine
             .evaluate(
                 &handle,
                 &ExpressionScope {
-                    value: &json!(0),
+                    value: &json!(2),
                     time_ms: 0.0,
                     input_value: &Value::Null,
                     osc: &json!({}),
                 },
             )
-            .expect_err("loop limit throws");
-        assert!(matches!(error, ExpressionError::Runtime(_)));
+            .expect("safe expression evaluates");
+        assert_eq!(value, json!(4));
     }
 }

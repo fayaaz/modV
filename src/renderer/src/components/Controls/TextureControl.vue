@@ -291,9 +291,10 @@ export default {
     }
   },
 
-  beforeUnmount() {
-    void this.stopEngineVideoSource();
-  },
+  // The engine video source is owned by the texture/module, not this
+  // component: closing the inspector or switching Scenes must not stop the
+  // pipeline. It is stopped when the texture type/path changes and on app
+  // shutdown (`stopMediaCapture`).
 
   methods: {
     setTexture(type) {

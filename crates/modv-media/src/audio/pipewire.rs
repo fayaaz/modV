@@ -63,6 +63,7 @@ use std::time::Duration;
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
+use pw::stream::StreamState;
 use spa::param::ParamType;
 use spa::param::format::{MediaSubtype, MediaType};
 use spa::param::format_utils;
@@ -466,6 +467,21 @@ fn monitor_thread(
 
     let listener = stream
         .add_local_listener_with_user_data(data)
+        // R-2 residual: a server restart/shutdown used to stop callbacks
+        // silently (the analyser then reported silence forever). Latch the
+        // stream loss into the same error channel as a bad format, so
+        // `AudioFeed` stops the monitor and the engine falls back to the
+        // renderer pump.
+        .state_changed(|_, user_data, old, new| {
+            let lost = matches!(new, StreamState::Error(_))
+                || (matches!(old, StreamState::Streaming | StreamState::Paused)
+                    && matches!(new, StreamState::Unconnected));
+            if lost {
+                user_data
+                    .formats
+                    .reject(format!("PipeWire stream lost ({old:?} -> {new:?})"));
+            }
+        })
         .param_changed(|_, user_data, id, param| {
             let Some(param) = param else {
                 return;

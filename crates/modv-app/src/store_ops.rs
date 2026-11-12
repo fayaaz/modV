@@ -1986,7 +1986,18 @@ impl Store {
     /// back through `updateProp`/`updateMeta`), so one input is evaluated at
     /// most once per frame and cannot recurse into itself.
     fn apply_every_frame_expressions(&mut self, now: Duration) {
-        for input_id in self.expression_cache.every_frame_inputs() {
+        // Document order, first assignment per input wins (JS object order),
+        // rather than the cache's HashMap order.
+        let mut seen = std::collections::HashSet::new();
+        let inputs: Vec<String> = self
+            .state
+            .expressions
+            .values()
+            .filter(|assignment| assignment.evaluate_every_frame)
+            .filter(|assignment| seen.insert(assignment.input_id.clone()))
+            .map(|assignment| assignment.input_id.clone())
+            .collect();
+        for input_id in inputs {
             let Some(input) = self.state.inputs.get(&input_id) else {
                 continue;
             };

@@ -35,3 +35,7 @@ gst-video = { package = "gstreamer-video", version = "0.24.5" }
 # Docker `rust` stage); `pipewire-sys` generates its bindings with bindgen, so
 # the image also carries libclang-dev.
 pipewire = "0.9.2"
+# V4L2 camera enumeration (WS-10). GStreamer's DeviceMonitor pulls in the
+# libcamera provider, which segfaults on some hosts; querying V4L2 directly is
+# what the legacy `enumerateDevices()` effectively did and is stable.
+v4l = "0.14"

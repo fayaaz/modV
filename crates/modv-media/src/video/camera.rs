@@ -17,9 +17,11 @@
 
 use std::cmp::Ordering;
 
+#[allow(unused_imports)]
 use gst::prelude::*;
 
 use super::pipeline::FRAME_RATE_PRESETS;
+#[cfg(not(target_os = "linux"))]
 use super::source::ensure_gst;
 
 /// Bounds on the work of one enumeration: a buggy provider can advertise
@@ -75,10 +77,115 @@ impl CameraInfo {
 
 /// Enumerate V4L2 video sources.
 ///
-/// Returns an empty list when GStreamer cannot initialise, the device monitor
-/// cannot start, or the host simply has no camera (the common case in CI and in
-/// the packaged-engine Docker image, which ships no V4L2 device).
+/// On Linux this queries V4L2 directly instead of `gst::DeviceMonitor`: the
+/// GStreamer monitor instantiates the `libcamera` device provider, which
+/// segfaults on some hosts (GStreamer 1.28 + libcamera 0.7 on a UVC camera),
+/// and the legacy renderer's `enumerateDevices()` is V4L2 anyway. Other
+/// platforms keep the device-monitor path.
+///
+/// Returns an empty list when the host has no camera (the common case in CI
+/// and in the packaged-engine Docker image, which ships no V4L2 device).
 pub fn list_cameras() -> Vec<CameraInfo> {
+    #[cfg(target_os = "linux")]
+    {
+        list_linux_cameras()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        list_monitor_cameras()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn list_linux_cameras() -> Vec<CameraInfo> {
+    use std::fs;
+    use v4l::capability::Flags;
+    use v4l::prelude::*;
+    use v4l::video::Capture;
+
+    let Ok(entries) = fs::read_dir("/sys/class/video4linux") else {
+        return Vec::new();
+    };
+
+    let mut cameras = Vec::new();
+    for entry in entries.flatten() {
+        let node = entry.file_name().to_string_lossy().to_string();
+        if !node.starts_with("video") {
+            continue;
+        }
+        let path = format!("/dev/{node}");
+        let Ok(device) = Device::with_path(&path) else {
+            continue;
+        };
+        let Ok(caps) = device.query_caps() else {
+            continue;
+        };
+        let capture = caps.capabilities.contains(Flags::VIDEO_CAPTURE)
+            || caps.capabilities.contains(Flags::VIDEO_CAPTURE_MPLANE);
+        if !capture {
+            // Metadata nodes (UVC exposes one per camera) are not capturable.
+            continue;
+        }
+
+        let mut modes = Vec::new();
+        if let Ok(formats) = device.enum_formats() {
+            'formats: for format in formats.iter().take(MAX_CAPS_STRUCTURES) {
+                let Ok(sizes) = device.enum_framesizes(format.fourcc) else {
+                    continue;
+                };
+                for size in sizes.into_iter().take(MAX_CAPS_STRUCTURES) {
+                    for discrete in size.size.to_discrete() {
+                        let fps = device
+                            .enum_frameintervals(format.fourcc, discrete.width, discrete.height)
+                            .ok()
+                            .and_then(|intervals| {
+                                intervals
+                                    .into_iter()
+                                    .find_map(|interval| match interval.interval {
+                                        v4l::frameinterval::FrameIntervalEnum::Discrete(f) => {
+                                            (f.numerator > 0)
+                                                .then(|| (f.denominator / f.numerator).max(1))
+                                        }
+                                        _ => None,
+                                    })
+                            })
+                            .unwrap_or(0);
+                        modes.push(VideoMode {
+                            width: discrete.width,
+                            height: discrete.height,
+                            fps,
+                        });
+                        if modes.len() >= MAX_MODES {
+                            break 'formats;
+                        }
+                    }
+                }
+            }
+        }
+        modes.sort_by_key(|mode| (mode.width * mode.height, mode.fps));
+        modes.dedup();
+        modes.truncate(MAX_MODES);
+
+        let name = fs::read_to_string(format!("/sys/class/video4linux/{node}/name"))
+            .map(|name| name.trim().to_string())
+            .unwrap_or_default();
+        let name = if name.is_empty() { caps.card } else { name };
+
+        cameras.push(CameraInfo {
+            id: path.clone(),
+            name,
+            path: Some(path),
+            caps: modes,
+        });
+    }
+
+    cameras.sort_by(|left, right| natural_cmp(&left.id, &right.id));
+    cameras.dedup_by(|left, right| left.id == right.id);
+    cameras
+}
+
+#[cfg(not(target_os = "linux"))]
+fn list_monitor_cameras() -> Vec<CameraInfo> {
     if ensure_gst().is_err() {
         return Vec::new();
     }
@@ -109,6 +216,7 @@ pub fn list_cameras() -> Vec<CameraInfo> {
     cameras
 }
 
+#[cfg(not(target_os = "linux"))]
 fn camera_from_device(device: &gst::Device) -> Option<CameraInfo> {
     let name = device.display_name().to_string();
     let properties = device.properties();

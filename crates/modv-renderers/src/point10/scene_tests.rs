@@ -978,6 +978,58 @@ fn assert_alpha_tracks_rgb(pixels: &[u8]) {
     }
 }
 
+// ————— batch 5b —————
+
+/// The tunnel fills the frame with hoops, so 96 px shows several rings and the
+/// SSAO creases without turning into a solid block.
+const GEOMETRIC_TUNNEL_SIZE: u32 = 96;
+
+#[test]
+fn geometric_tunnel_renders() {
+    let mut scene = crate::point10::scenes::geometric_tunnel::GeometricTunnel::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, GEOMETRIC_TUNNEL_SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "GeometricTunnel produced an empty frame at {GEOMETRIC_TUNNEL_SIZE}x{GEOMETRIC_TUNNEL_SIZE}"
+    );
+}
+
+/// `screenClearAlpha = 0` and the final pass writes `alpha = clamp(max(rgb))`.
+/// With ACES exposure 1 the tone-mapped hoops never reach 1.0, so the layer is
+/// never fully opaque — the JS behaves the same. What must hold is that the
+/// background stays near-transparent (the fog floor is the only lift) while the
+/// lit hoops carry a clearly higher alpha.
+#[test]
+fn geometric_tunnel_keeps_a_translucent_layer() {
+    let mut scene = crate::point10::scenes::geometric_tunnel::GeometricTunnel::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, GEOMETRIC_TUNNEL_SIZE) else {
+        return;
+    };
+    let min = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .min()
+        .unwrap_or(0);
+    let max = pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .max()
+        .unwrap_or(0);
+    let total = pixels.len() / 4;
+    assert!(
+        min <= 48,
+        "the tunnel's empty background must stay translucent ({total} px, min alpha {min})"
+    );
+    assert!(
+        max > 64,
+        "the lit hoops must carry a stronger alpha than the background (max {max})"
+    );
+}
+
 #[test]
 fn rolling_fire_renders() {
     let mut scene =

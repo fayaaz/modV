@@ -313,7 +313,16 @@ describe("toEngineMediaPath", () => {
     );
   });
 
-  it("passes an absolute path through unchanged", () => {
+  it("re-roots a media-library path that starts with a slash", () => {
+    expect(toEngineMediaPath("/home/u/VmodV/media", "/video/clip.mp4")).toBe(
+      "/home/u/VmodV/media/video/clip.mp4",
+    );
+    expect(
+      toEngineMediaPath("/home/u/VmodV/media", "/video/../secret.mp4"),
+    ).toBeNull();
+  });
+
+  it("passes a true absolute path through unchanged", () => {
     expect(toEngineMediaPath("/home/u/VmodV/media", "/tmp/clip.mp4")).toBe(
       "/tmp/clip.mp4",
     );

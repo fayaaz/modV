@@ -347,7 +347,21 @@ export function toEngineMediaPath(mediaPath, filePath, platform = "linux") {
   const windows = platform === "win32";
   const separator = windows ? "\\" : "/";
 
-  if (isAbsolutePath(trimmed)) {
+  // The media library stores media-directory-relative paths that start with
+  // "/" (e.g. "/video/clip.mp4"). On POSIX those look absolute, so treat a
+  // leading slash as media-relative whenever the media path is known; only a
+  // non-rooted path or a Windows drive path is a true absolute path.
+  // The media library stores paths like "/video/clip.mp4" (folder-rooted,
+  // media-directory-relative) while a user-selected file can be a true
+  // absolute path such as "/tmp/clip.mp4". Only the known media folders are
+  // re-rooted; anything else stays absolute.
+  const mediaRooted =
+    !windows &&
+    /^\/(video|image|palette|preset|module|plugin|scene)(\/|$)/.test(trimmed);
+  if (
+    isAbsolutePath(trimmed) &&
+    !(mediaRooted && typeof mediaPath === "string" && mediaPath.length > 0)
+  ) {
     // A bare root ("/", "C:\\") is not a usable video path.
     return /^[\\/]+$/.test(trimmed) ? null : trimmed;
   }
@@ -358,7 +372,7 @@ export function toEngineMediaPath(mediaPath, filePath, platform = "linux") {
 
   const segments = trimmed.split(/[\\/]+/).filter((segment) => segment.length);
 
-  if (segments.length === 0) {
+  if (segments.length === 0 || segments.some((segment) => segment === "..")) {
     return null;
   }
 

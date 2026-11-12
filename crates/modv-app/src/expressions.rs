@@ -100,7 +100,19 @@ impl ExpressionCache {
     /// the previous compiled map is replaced wholesale, which is what a
     /// preset/Scene restore or a `expressions/remove` needs.
     pub fn rebuild(&mut self, state: &EngineState) -> Vec<ExpressionFailure> {
+        // A fresh realm per rebuild: a long-lived Boa context lets one
+        // expression's prototype pollution affect later expressions (and
+        // persists across preset/Scene loads). Recompilation is cheap relative
+        // to loading a document. Old handles die with the realm, so drop them
+        // before the reset (releasing them afterwards would delete the newly
+        // compiled functions: handle keys restart at 0).
         let previous = std::mem::take(&mut self.by_input);
+        if let Some(engine) = self.engine.as_mut() {
+            for compiled in previous.values() {
+                engine.release(&compiled.handle);
+            }
+            engine.reset();
+        }
         self.by_input = HashMap::new();
         let mut failures = Vec::new();
 
@@ -120,9 +132,6 @@ impl ExpressionCache {
             }
         }
 
-        for compiled in previous.into_values() {
-            self.release(&compiled.handle);
-        }
         failures
     }
 
