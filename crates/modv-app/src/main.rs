@@ -1,8 +1,15 @@
-//! modv-engine binary — M0 spike harness. See docs/rust-hybrid.md (M0).
+//! modv-engine binary — the engine process. See docs/rust-hybrid.md.
+//!
+//! M0 spike harness plus the M1 supervision channel and the M2 store +
+//! compositor: windowed rendering of the engine state, control socket,
+//! snapshot/restore and the shared-memory preview ring.
 
 mod cli;
+mod compositor;
 mod headless;
+mod ids;
 mod report;
+mod store_ops;
 mod supervisor;
 mod window;
 

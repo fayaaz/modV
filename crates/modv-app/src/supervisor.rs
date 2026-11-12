@@ -1,57 +1,53 @@
-//! WS-14 / M1 — the engine side of the control channel and the preview ring.
+//! WS-14 / M1–M2 — the engine side of the control channel and the preview ring.
 //!
 //! One [`EngineSupervisor`] owns:
 //! * the non-blocking `SocketServer` bound to `--socket`;
 //! * the `VMP1` preview ring in `/dev/shm` (published to clients over the
 //!   socket as `preview/ready` + `preview/frame` events);
 //! * the state snapshot written to `--state` (crash-safe: tmp file + rename),
-//!   reloaded at startup so a supervisor restart restores the last frame
-//!   count instead of starting from zero;
+//!   reloaded at startup so a supervisor restart restores the last state;
 //! * the heartbeat the Electron supervisor watchdog keys off
 //!   (`engine/heartbeat` every second).
 //!
-//! M1 scope note: the engine has no store yet (that is WS-1, M2), so
-//! `state/commit` / `state/dispatch` are accepted, acknowledged and logged —
-//! unknown dispatches return `ok: true, result: null` rather than an error,
-//! because the renderer legitimately fires boot-time actions (seeding,
-//! hydration) the engine does not implement yet. `engine/shutdown` is the
-//! only request with behaviour: persist the snapshot, then signal the event
-//! loop to exit.
+//! ## M2 changes relative to M1
 //!
-//! The preview currently publishes the flat clear colour on a CPU-side
-//! 320×180 buffer. WS-2/M2 replaces it with the compositor's output frame;
-//! the transport (ring + events + seqlock) is already the final shape.
+//! * The state itself lives in [`Store`](crate::store_ops::Store); the
+//!   supervisor no longer fakes dispatch results or holds a `Snapshot` struct.
+//!   `state/snapshot` returns the six-key preset document plus the engine
+//!   counters, `state/commit`/`state/dispatch` call `Store::dispatch`, and
+//!   `engine/restore` reloads the state (from the request or the state file).
+//! * Every successful mutation is broadcast as one `state/delta` event with
+//!   the `{ type, payload }` record shape the renderer's mirror replays
+//!   (`worker/index.worker.js:136-144`).
+//! * `state/commit` and `state/dispatch` are the same code path: M2 has no
+//!   separate action layer (inputs/expressions add one in WS-1b/WS-12), so a
+//!   commit is dispatched and its return value is only sent to the caller.
+//! * The preview no longer publishes a flat clear colour: the window loop asks
+//!   the compositor for a real frame (`Compositor::read_preview`) and hands the
+//!   written [`PreviewFrame`] back to [`EngineSupervisor::publish_preview`].
+//!
+//! `engine/shutdown` is still the only request with side effects beyond the
+//! store: persist the snapshot, then signal the event loop to exit.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use modv_ipc::frame::{KIND_EVENT, KIND_REQUEST};
 use modv_ipc::message::{Event, Incoming, Request, Response, from_frame};
-use modv_ipc::preview::PreviewRing;
+use modv_ipc::preview::{PreviewFrame, PreviewRing};
 use modv_ipc::socket::SocketServer;
+
+use crate::compositor::{PREVIEW_HEIGHT, PREVIEW_WIDTH};
+use crate::store_ops::{Store, frames_presented_in};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(33); // ≤ 30 fps
 const SNAPSHOT_SAVE_EVERY_FRAMES: u64 = 120;
-const PREVIEW_WIDTH: u32 = 320;
-const PREVIEW_HEIGHT: u32 = 180;
-// Matches window.rs's clear colour. The preview publishes this until WS-2
-// wires the real compositor output through.
-const CLEAR_RGBA: [u8; 4] = [11, 11, 15, 255];
-
-/// On-disk state snapshot (the M1 stand-in for the full engine state).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Snapshot {
-    version: u32,
-    saved_at_epoch_ms: u64,
-    frames_presented: u64,
-}
 
 /// The engine-side supervision state. Created before the window exists and
 /// polled from the frame loop.
@@ -65,31 +61,29 @@ pub struct EngineSupervisor {
     last_heartbeat: Instant,
     last_preview: Option<Instant>,
     preview: Option<PreviewRing>,
-    preview_pixels: Vec<u8>,
+    /// Set when the ring could not be created; the preview channel is optional
+    /// (the UI falls back to nothing), so retrying every frame would only spam
+    /// the log.
+    preview_unavailable: bool,
     shutdown_requested: bool,
+    /// Set by `engine/restore`; the window loop drops the compositor's GPU
+    /// state (stale group textures and module slots) when it sees this.
+    reset_requested: bool,
     unknown_dispatches_warned: HashSet<String>,
 }
 
 impl EngineSupervisor {
-    /// Bind the control socket and load the snapshot, if any.
+    /// Bind the control socket and read the restored frame count, if any.
     pub fn new(socket_path: PathBuf, state_path: Option<PathBuf>) -> io::Result<Self> {
         let server = SocketServer::bind(&socket_path)?;
         let restored_frames = state_path
             .as_ref()
-            .and_then(|path| load_snapshot(path))
-            .map(|s| s.frames_presented)
+            .and_then(|path| load_snapshot_frames(path))
             .unwrap_or(0);
 
         if restored_frames > 0 {
             eprintln!("engine: INFO restored state snapshot (frames_presented={restored_frames})");
         }
-
-        let preview_pixels = CLEAR_RGBA
-            .iter()
-            .copied()
-            .cycle()
-            .take((PREVIEW_WIDTH * PREVIEW_HEIGHT) as usize * 4)
-            .collect();
 
         Ok(Self {
             server,
@@ -101,57 +95,50 @@ impl EngineSupervisor {
             last_heartbeat: Instant::now(),
             last_preview: None,
             preview: None,
-            preview_pixels,
+            preview_unavailable: false,
             shutdown_requested: false,
+            reset_requested: false,
             unknown_dispatches_warned: HashSet::new(),
         })
     }
 
-    // Read by tests and part of the snapshot-facing API; not used on the hot path yet.
-    #[allow(dead_code)]
-    pub fn frames_presented(&self) -> u64 {
-        self.frames_presented
-    }
-
+    /// Whether `engine/shutdown` has been received.
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown_requested
     }
 
+    /// Take the "GPU state must be reset" flag set by `engine/restore`.
+    pub fn take_reset_request(&mut self) -> bool {
+        std::mem::take(&mut self.reset_requested)
+    }
+
     /// Record a presented frame; checkpoints the snapshot periodically.
-    pub fn note_frame_presented(&mut self) {
+    pub fn note_frame_presented(&mut self, store: &Store) {
         self.frames_presented += 1;
         self.frames_since_save += 1;
 
         if self.frames_since_save >= SNAPSHOT_SAVE_EVERY_FRAMES {
-            if let Err(error) = self.save_snapshot() {
+            if let Err(error) = self.save_snapshot(store) {
                 eprintln!("engine: WARN could not save snapshot: {error}");
             }
         }
     }
 
     /// Persist the snapshot atomically (tmp file + rename).
-    pub fn save_snapshot(&mut self) -> io::Result<()> {
+    pub fn save_snapshot(&mut self, store: &Store) -> io::Result<()> {
         self.frames_since_save = 0;
         let Some(path) = &self.state_path else {
             return Ok(());
         };
-
-        let snapshot = Snapshot {
-            version: 1,
-            saved_at_epoch_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            frames_presented: self.frames_presented,
-        };
-        let payload = serde_json::to_vec_pretty(&snapshot).map_err(io::Error::other)?;
-        let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-        fs::write(&tmp, payload)?;
-        fs::rename(&tmp, path)
+        store.save_snapshot(path, self.frames_presented)
     }
 
-    /// Poll the socket and publish scheduled heartbeat/preview events.
-    pub fn poll(&mut self) {
+    /// Poll the socket and publish scheduled heartbeat events.
+    ///
+    /// Requests are applied to `store`; every mutation they queue is
+    /// broadcast as a `state/delta` event before the next request is handled,
+    /// so the mirror sees the records in issue order.
+    pub fn poll(&mut self, store: &mut Store) {
         let poll = match self.server.poll() {
             Ok(poll) => poll,
             Err(error) => {
@@ -175,7 +162,11 @@ impl EngineSupervisor {
             }
             match from_frame(frame.kind, &frame.payload) {
                 Ok(Incoming::Request(request)) => {
-                    let response = self.handle_request(request);
+                    let response = self.handle_request(request, store);
+                    // Deltas first: the caller then observes every mutation
+                    // this request produced before its own acknowledgement, so
+                    // the mirror never applies an ack it cannot explain.
+                    self.broadcast_deltas(store);
                     if let Err(error) = self.server.send_response(frame.client, &response) {
                         eprintln!("engine: WARN could not send response: {error}");
                     }
@@ -187,101 +178,102 @@ impl EngineSupervisor {
         }
 
         self.maybe_heartbeat();
-        self.maybe_publish_preview();
     }
 
-    fn handle_request(&mut self, request: Request) -> Response {
+    /// Broadcast every queued `{ type, payload }` record as `state/delta`.
+    fn broadcast_deltas(&mut self, store: &mut Store) {
+        for mutation in store.drain_deltas() {
+            let event = Event::new(
+                "state/delta",
+                json!({ "type": mutation.r#type, "payload": mutation.payload }),
+            );
+            if let Err(error) = self.server.broadcast_event(&event) {
+                eprintln!("engine: WARN state/delta broadcast failed: {error}");
+            }
+        }
+    }
+
+    fn handle_request(&mut self, request: Request, store: &mut Store) -> Response {
         match request.method.as_str() {
             "engine/shutdown" => {
                 eprintln!("engine: INFO shutdown requested; flushing state");
-                if let Err(error) = self.save_snapshot() {
+                if let Err(error) = self.save_snapshot(store) {
                     eprintln!("engine: WARN shutdown snapshot failed: {error}");
                 }
                 self.shutdown_requested = true;
                 Response::ok(request.id, json!({ "saved": true }))
             }
 
-            "state/snapshot" => Response::ok(
-                request.id,
-                json!({
-                    "version": 1,
-                    "framesPresented": self.frames_presented,
-                    "restoredFrames": self.restored_frames,
-                    "uptimeSeconds": self.started.elapsed().as_secs_f64(),
-                }),
-            ),
-
-            "state/commit" => {
-                // M1: no store yet. Log the intent; the payload is ignored.
-                if let Some(commit_type) = request.params.get("type").and_then(Value::as_str) {
-                    eprintln!(
-                        "engine: INFO commit {commit_type} (accepted; engine has no store yet)"
+            "state/snapshot" => {
+                let mut snapshot = store.snapshot();
+                if let Value::Object(map) = &mut snapshot {
+                    map.insert("framesPresented".to_string(), json!(self.frames_presented));
+                    map.insert("restoredFrames".to_string(), json!(self.restored_frames));
+                    map.insert(
+                        "uptimeSeconds".to_string(),
+                        json!(self.started.elapsed().as_secs_f64()),
                     );
                 }
-                Response::ok(request.id, Value::Null)
+                Response::ok(request.id, snapshot)
             }
 
-            "state/dispatch" => {
-                let dispatch_type = request
-                    .params
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<missing>")
-                    .to_string();
-                match dispatch_type.as_str() {
-                    // M1: the engine has no store yet, but the caller's
-                    // result contract is "the created Group" — return a
-                    // plausible synthetic one until WS-1 lands.
-                    "groups/createGroup" => {
-                        let name = request
-                            .params
-                            .get("payload")
-                            .and_then(|p| p.get("name"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("New Group")
-                            .to_string();
-                        eprintln!(
-                            "engine: INFO dispatch groups/createGroup (synthetic result for M1)"
-                        );
-                        return Response::ok(
+            // `state/commit` and `state/dispatch` are the same path in M2: the
+            // renderer sends both over the same channels and there is no
+            // action layer to distinguish them yet.
+            "state/commit" | "state/dispatch" => {
+                let action = match request.params.get("type").and_then(Value::as_str) {
+                    Some(action) => action.to_string(),
+                    None => {
+                        self.warn_unknown("<missing type>");
+                        return Response::err(
                             request.id,
-                            json!({
-                                "id": uuid_v4(),
-                                "name": name,
-                                "modules": [],
-                                "enabled": 1,
-                                "alpha": 1,
-                                "hidden": false,
-                            }),
+                            "invalid_params",
+                            "state/commit and state/dispatch need a string \"type\"",
                         );
                     }
-                    "scenes/hydrateScenes"
-                    | "scenes/ensureDefaultScenes"
-                    | "osc/createServer"
-                    | "metrics/SET_FPS_MEASURE" => {
-                        eprintln!("engine: INFO dispatch {dispatch_type} (accepted; no-op in M1)");
-                    }
-                    other => {
-                        if self.unknown_dispatches_warned.insert(other.to_string()) {
-                            eprintln!("engine: WARN dispatch {other} not implemented yet (M2+)");
-                        }
+                };
+                let payload = request
+                    .params
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+
+                match store.dispatch(&action, payload) {
+                    Ok(result) => Response::ok(request.id, result),
+                    Err(error) => {
+                        eprintln!("engine: WARN dispatch {action} failed: {error}");
+                        Response::err(request.id, "dispatch_failed", error.to_string())
                     }
                 }
-                Response::ok(request.id, Value::Null)
             }
 
             "engine/restore" => {
-                let restored = self
-                    .state_path
-                    .as_ref()
-                    .and_then(|path| load_snapshot(path))
-                    .map(|s| {
-                        self.restored_frames = s.frames_presented;
-                        self.frames_presented = s.frames_presented;
-                        true
-                    })
-                    .unwrap_or(false);
-                Response::ok(request.id, json!({ "restored": restored }))
+                let preset = request
+                    .params
+                    .get("preset")
+                    .cloned()
+                    .or_else(|| self.load_snapshot_file());
+
+                match preset {
+                    Some(preset) => match store.restore(&preset) {
+                        Ok(()) => {
+                            if let Some(frames) = frames_presented_in(&preset) {
+                                self.restored_frames = frames;
+                                self.frames_presented = frames;
+                            }
+                            // Group ids and module ids can change completely;
+                            // the compositor must not keep the old textures or
+                            // pipeline slots.
+                            self.reset_requested = true;
+                            Response::ok(request.id, json!({ "restored": true }))
+                        }
+                        Err(error) => {
+                            eprintln!("engine: WARN engine/restore failed: {error}");
+                            Response::err(request.id, "restore_failed", error.to_string())
+                        }
+                    },
+                    None => Response::ok(request.id, json!({ "restored": false })),
+                }
             }
 
             other => Response::err(
@@ -289,6 +281,18 @@ impl EngineSupervisor {
                 "unknown_method",
                 format!("no such method: {other}"),
             ),
+        }
+    }
+
+    fn load_snapshot_file(&self) -> Option<Value> {
+        let path = self.state_path.as_ref()?;
+        let bytes = fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn warn_unknown(&mut self, action: &str) {
+        if self.unknown_dispatches_warned.insert(action.to_string()) {
+            eprintln!("engine: WARN dispatch {action} missing its type (M2)");
         }
     }
 
@@ -313,6 +317,9 @@ impl EngineSupervisor {
 
     fn ensure_preview(&mut self) -> Option<&PreviewRing> {
         if self.preview.is_none() {
+            if self.preview_unavailable {
+                return None;
+            }
             match PreviewRing::create(None, 3, PREVIEW_WIDTH, PREVIEW_HEIGHT) {
                 Ok(ring) => {
                     eprintln!(
@@ -325,6 +332,7 @@ impl EngineSupervisor {
                 }
                 Err(error) => {
                     eprintln!("engine: WARN could not create preview ring: {error}");
+                    self.preview_unavailable = true;
                     return None;
                 }
             }
@@ -340,38 +348,24 @@ impl EngineSupervisor {
         Ok(Event::new("preview/ready", ring.handshake()))
     }
 
-    fn maybe_publish_preview(&mut self) {
-        let now = Instant::now();
-        if let Some(last) = self.last_preview {
-            if now.duration_since(last) < PREVIEW_INTERVAL {
-                return;
-            }
+    /// Whether a preview frame is due (≤ 30 fps cadence).
+    pub fn preview_due(&self) -> bool {
+        match self.last_preview {
+            Some(last) => last.elapsed() >= PREVIEW_INTERVAL,
+            None => true,
         }
+    }
 
-        if self.ensure_preview().is_none() {
-            return;
-        }
+    /// The preview ring to write the next frame into, creating it on demand.
+    pub fn preview_ring_mut(&mut self) -> Option<&mut PreviewRing> {
+        self.ensure_preview();
+        self.preview.as_mut()
+    }
 
-        // Move the pixel buffer out to sidestep the borrow conflict with the
-        // ring; it is moved back in before returning.
-        let pixels = std::mem::take(&mut self.preview_pixels);
-        let frame = match self.preview.as_mut() {
-            Some(ring) => match ring.write_frame(&pixels) {
-                Ok(frame) => Some(frame),
-                Err(error) => {
-                    eprintln!("engine: WARN preview write failed: {error}");
-                    None
-                }
-            },
-            None => None,
-        };
-        self.preview_pixels = pixels;
-
-        let Some(frame) = frame else {
-            return;
-        };
-        self.last_preview = Some(now);
-
+    /// Publish the frame the compositor just wrote: broadcast `preview/frame`
+    /// and start the next cadence window.
+    pub fn publish_preview(&mut self, frame: PreviewFrame) {
+        self.last_preview = Some(Instant::now());
         let event = Event::new("preview/frame", frame.to_event());
         if let Err(error) = self.server.broadcast_event(&event) {
             eprintln!("engine: WARN preview broadcast failed: {error}");
@@ -379,54 +373,11 @@ impl EngineSupervisor {
     }
 }
 
-fn load_snapshot(path: &Path) -> Option<Snapshot> {
+/// `framesPresented` from the on-disk snapshot's `_engine` sidecar.
+fn load_snapshot_frames(path: &Path) -> Option<u64> {
     let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// Minimal UUID v4 from /dev/urandom (the M1 engine has no uuid dependency).
-fn uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    match fs::File::open("/dev/urandom").and_then(|mut f| {
-        use std::io::Read;
-        f.read_exact(&mut bytes)
-    }) {
-        Ok(()) => {
-            bytes[6] = (bytes[6] & 0x0f) | 0x40;
-            bytes[8] = (bytes[8] & 0x3f) | 0x80;
-            format!(
-                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                bytes[0],
-                bytes[1],
-                bytes[2],
-                bytes[3],
-                bytes[4],
-                bytes[5],
-                bytes[6],
-                bytes[7],
-                bytes[8],
-                bytes[9],
-                bytes[10],
-                bytes[11],
-                bytes[12],
-                bytes[13],
-                bytes[14],
-                bytes[15]
-            )
-        }
-        Err(_) => {
-            // Fallback: time + pid entropy, hex-only. Fine for M1.
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            format!(
-                "{:08x}-0000-4000-8000-{:012x}",
-                std::process::id(),
-                nanos & 0xffffffffffff
-            )
-        }
-    }
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    frames_presented_in(&value)
 }
 
 #[cfg(test)]
@@ -434,25 +385,34 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use modv_ipc::frame::{FrameReader, KIND_RESPONSE};
 
     /// Poll the supervisor until a KIND_RESPONSE frame arrives from the
-    /// stream; returns its payload bytes.
-    fn read_response(supervisor: &mut EngineSupervisor, stream: &mut UnixStream) -> Vec<u8> {
+    /// stream; returns its payload bytes and any events seen on the way.
+    fn read_response(
+        supervisor: &mut EngineSupervisor,
+        store: &mut Store,
+        stream: &mut UnixStream,
+    ) -> (Vec<u8>, Vec<Event>) {
         let mut reader = FrameReader::new();
+        let mut events = Vec::new();
         for _ in 0..100 {
-            supervisor.poll();
+            supervisor.poll(store);
             let mut scratch = [0u8; 8192];
             match stream.read(&mut scratch) {
                 Ok(n) if n > 0 => {
                     for frame in reader.push(&scratch[..n]) {
                         let (kind, payload) = frame.expect("frame decodes");
                         if kind == KIND_RESPONSE {
-                            return payload;
+                            return (payload, events);
                         }
-                        // preview/ready and heartbeat events are expected too;
-                        // skip them.
+                        if kind == KIND_EVENT {
+                            if let Ok(event) = serde_json::from_slice::<Event>(&payload) {
+                                events.push(event);
+                            }
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -469,6 +429,31 @@ mod tests {
         panic!("timed out waiting for a response frame");
     }
 
+    fn request(
+        supervisor: &mut EngineSupervisor,
+        store: &mut Store,
+        stream: &mut UnixStream,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> (Response, Vec<Event>) {
+        stream
+            .write_all(
+                &Request {
+                    id,
+                    method: method.into(),
+                    params,
+                }
+                .into_frame(),
+            )
+            .expect("write request");
+        let (payload, events) = read_response(supervisor, store, stream);
+        (
+            serde_json::from_slice(&payload).expect("response parses"),
+            events,
+        )
+    }
+
     fn temp_paths(label: &str) -> (PathBuf, PathBuf) {
         let unique = format!(
             "modv-app-test-{label}-{}-{}",
@@ -483,107 +468,236 @@ mod tests {
         (socket, state)
     }
 
+    fn connect(socket_path: &Path) -> UnixStream {
+        let stream = UnixStream::connect(socket_path).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        stream
+    }
+
     #[test]
     fn snapshot_roundtrip_restores_frame_count() {
         let (socket_path, state_path) = temp_paths("roundtrip");
+        let mut store = Store::new();
 
         {
             let mut supervisor =
                 EngineSupervisor::new(socket_path.clone(), Some(state_path.clone()))
                     .expect("supervisor binds");
             for _ in 0..7 {
-                supervisor.note_frame_presented();
+                supervisor.note_frame_presented(&store);
             }
-            supervisor.save_snapshot().expect("snapshot saved");
-            assert_eq!(supervisor.frames_presented(), 7);
+            supervisor.save_snapshot(&store).expect("snapshot saved");
+            assert_eq!(supervisor.frames_presented, 7);
         }
 
         let restored = EngineSupervisor::new(socket_path, Some(state_path.clone()))
             .expect("supervisor rebinds");
-        assert_eq!(restored.frames_presented(), 7);
+        assert_eq!(restored.frames_presented, 7);
+
+        // The snapshot file also loads into a fresh store.
+        store
+            .restore_from_file(&state_path)
+            .expect("snapshot loads into the store");
+        assert_eq!(store.snapshot()["version"], json!(1));
 
         let _ = fs::remove_file(&state_path);
     }
 
     #[test]
-    fn snapshot_request_roundtrip() {
-        let (socket_path, state_path) = temp_paths("roundtrip-ipc");
+    fn snapshot_request_returns_state_and_frame_count() {
+        let (socket_path, state_path) = temp_paths("snapshot-ipc");
+        let mut store = Store::new();
         let mut supervisor =
             EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
         for _ in 0..3 {
-            supervisor.note_frame_presented();
+            supervisor.note_frame_presented(&store);
         }
+        store
+            .dispatch("groups/createGroup", json!({"id": "g1", "name": "Effects"}))
+            .expect("createGroup dispatches");
+        store.drain_deltas();
 
-        let mut stream = UnixStream::connect(&socket_path).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let request = Request {
-            id: 42,
-            method: "state/snapshot".into(),
-            params: Value::Null,
-        };
-        stream
-            .write_all(&request.into_frame())
-            .expect("write request");
+        let mut stream = connect(&socket_path);
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            42,
+            "state/snapshot",
+            Value::Null,
+        );
 
-        let payload = read_response(&mut supervisor, &mut stream);
-        let response: Response = serde_json::from_slice(&payload).expect("response parses");
         assert_eq!(response.id, 42);
         assert!(response.ok);
-        assert_eq!(response.result.unwrap()["framesPresented"], 3);
+        let result = response.result.expect("result present");
+        assert_eq!(result["framesPresented"], json!(3));
+        assert_eq!(result["version"], json!(1));
+        assert_eq!(result["groups"][0]["id"], json!("g1"));
     }
 
     #[test]
-    fn create_group_dispatch_returns_synthetic_group() {
+    fn create_group_dispatch_creates_a_group_and_emits_a_delta() {
         let (socket_path, state_path) = temp_paths("create-group");
+        let mut store = Store::new();
         let mut supervisor =
             EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
 
-        let mut stream = UnixStream::connect(&socket_path).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let request = Request {
-            id: 11,
-            method: "state/dispatch".into(),
-            params: json!({ "type": "groups/createGroup", "payload": { "name": "Gallery" } }),
-        };
-        stream
-            .write_all(&request.into_frame())
-            .expect("write request");
+        let mut stream = connect(&socket_path);
+        let (response, events) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            11,
+            "state/dispatch",
+            json!({ "type": "groups/createGroup", "payload": { "name": "Gallery" } }),
+        );
 
-        let payload = read_response(&mut supervisor, &mut stream);
-        let response: Response = serde_json::from_slice(&payload).expect("response parses");
         assert!(response.ok);
         let result = response.result.expect("result present");
-        assert_eq!(result["name"], "Gallery");
-        assert!(result["id"].as_str().map(|s| s.len()).unwrap_or(0) >= 32);
+        assert_eq!(result["name"], json!("Gallery"));
         assert_eq!(result["modules"], json!([]));
+        assert_eq!(store.state().groups.len(), 1);
+
+        let delta = events
+            .iter()
+            .find(|event| event.event == "state/delta")
+            .expect("state/delta is broadcast");
+        assert_eq!(delta.data["type"], json!("groups/ADD_GROUP"));
+        assert_eq!(delta.data["payload"]["group"]["name"], json!("Gallery"));
+    }
+
+    #[test]
+    fn state_commit_is_dispatched_and_emits_a_delta() {
+        let (socket_path, state_path) = temp_paths("commit");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        store
+            .dispatch("groups/createGroup", json!({"id": "g1", "name": "Effects"}))
+            .expect("createGroup dispatches");
+        store.drain_deltas();
+
+        let mut stream = connect(&socket_path);
+        let (response, events) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            12,
+            "state/commit",
+            json!({
+                "type": "groups/UPDATE_GROUP_BY_KEY",
+                "payload": {"groupId": "g1", "key": "alpha", "value": 0.5}
+            }),
+        );
+
+        assert!(response.ok);
+        assert_eq!(store.state().groups[0].alpha, 0.5);
+        let delta = events
+            .iter()
+            .find(|event| event.event == "state/delta")
+            .expect("state/delta is broadcast");
+        assert_eq!(delta.data["type"], json!("groups/UPDATE_GROUP_BY_KEY"));
+        assert_eq!(delta.data["payload"]["data"], json!(0.5));
+    }
+
+    #[test]
+    fn engine_restore_loads_the_snapshot_file_and_requests_a_gpu_reset() {
+        let (socket_path, state_path) = temp_paths("restore");
+        let mut store = Store::new();
+        let mut supervisor = EngineSupervisor::new(socket_path.clone(), Some(state_path.clone()))
+            .expect("supervisor binds");
+
+        // Persist a state with one group, then replace the live state.
+        store
+            .dispatch("groups/createGroup", json!({"id": "g1", "name": "Saved"}))
+            .expect("createGroup dispatches");
+        supervisor.save_snapshot(&store).expect("snapshot saved");
+        store
+            .restore(&json!({"groups": []}))
+            .expect("state cleared");
+
+        let mut stream = connect(&socket_path);
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            13,
+            "engine/restore",
+            Value::Null,
+        );
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["restored"], json!(true));
+        assert_eq!(store.state().groups.len(), 1);
+        assert_eq!(store.state().groups[0].name, "Saved");
+        assert!(supervisor.take_reset_request());
+
+        let _ = fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn engine_shutdown_flushes_the_snapshot_and_requests_exit() {
+        let (socket_path, state_path) = temp_paths("shutdown");
+        let mut store = Store::new();
+        let mut supervisor = EngineSupervisor::new(socket_path.clone(), Some(state_path.clone()))
+            .expect("supervisor binds");
+
+        let mut stream = connect(&socket_path);
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            14,
+            "engine/shutdown",
+            Value::Null,
+        );
+        assert!(response.ok);
+        assert!(supervisor.shutdown_requested());
+
+        let saved: Value = serde_json::from_slice(&fs::read(&state_path).expect("state file"))
+            .expect("state parses");
+        assert_eq!(saved["version"], json!(1));
+        assert_eq!(saved["_engine"]["framesPresented"], json!(0));
+
+        let _ = fs::remove_file(&state_path);
     }
 
     #[test]
     fn unknown_method_gets_unknown_method_error() {
         let (socket_path, state_path) = temp_paths("unknown-method");
+        let mut store = Store::new();
         let mut supervisor =
             EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
 
-        let mut stream = UnixStream::connect(&socket_path).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let request = Request {
-            id: 9,
-            method: "definitely/not-a-method".into(),
-            params: Value::Null,
-        };
-        stream
-            .write_all(&request.into_frame())
-            .expect("write request");
+        let mut stream = connect(&socket_path);
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            9,
+            "definitely/not-a-method",
+            Value::Null,
+        );
 
-        let payload = read_response(&mut supervisor, &mut stream);
-        let response: Response = serde_json::from_slice(&payload).expect("response parses");
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, "unknown_method");
+    }
+
+    #[test]
+    fn preview_cadence_starts_due_and_waits_after_publishing() {
+        let (socket_path, state_path) = temp_paths("preview");
+        let mut supervisor =
+            EngineSupervisor::new(socket_path, Some(state_path)).expect("supervisor binds");
+
+        assert!(supervisor.preview_due());
+        let ring = supervisor.preview_ring_mut().expect("ring is created");
+        let pixels = vec![0u8; (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4) as usize];
+        let frame = ring.write_frame(&pixels).expect("frame writes");
+        supervisor.publish_preview(frame);
+        assert!(
+            !supervisor.preview_due(),
+            "publishing starts the cadence window"
+        );
     }
 }

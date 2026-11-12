@@ -1,11 +1,20 @@
 //! The windowed code path, implemented as a winit 0.30 `ApplicationHandler`.
 //!
-//! Frame pacing relies on `wgpu::PresentMode::Fifo` (blocking present). The
-//! window requests a redraw at the end of each `RedrawRequested` handler, so
-//! frames are produced back-to-back at the display's refresh rate.
+//! Each frame: poll the control socket (mutations into the [`Store`]), render
+//! the state through the [`Compositor`], present the main texture, and publish
+//! a preview frame at ≤ 30 fps. Frame pacing relies on
+//! `wgpu::PresentMode::Fifo` (blocking present); the window requests a redraw
+//! at the end of each `RedrawRequested` handler, so frames are produced
+//! back-to-back at the display's refresh rate.
+//!
+//! M2 removed the M0 `ChromaticLine`/`SyntheticSine` demo from this path: the
+//! window now renders whatever the store describes (an empty state presents
+//! the near-black clear). The demo scene remains in `modv-renderers` for M4.
+//! `--audio-fixture` is still parsed for the M0 headless/report path but has no
+//! effect here — M2 has no audio analysis, so modules receive zeroed bands.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use modv_render::surface::{SurfaceTarget, create_surface};
 use modv_render::wgpu;
@@ -15,10 +24,10 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
-use modv_renderers::point10::chromatic_line::{ChromaticLine, SyntheticSine};
-
 use crate::cli::Cli;
+use crate::compositor::{Compositor, FrameInfo};
 use crate::report::{AdapterSummary, report_json};
+use crate::store_ops::Store;
 use crate::supervisor::EngineSupervisor;
 
 /// Run the windowed event loop. Returns an error string on fatal failures
@@ -30,10 +39,10 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))?;
     // Flush the snapshot on any exit path (window close, bench deadline,
-    // engine/shutdown) so a supervisor restart restores the last frame count.
+    // engine/shutdown) so a supervisor restart restores the last state.
     if let Some(mut supervisor) = app.supervisor.take() {
         eprintln!("engine: INFO flushing state snapshot to disk");
-        match supervisor.save_snapshot() {
+        match supervisor.save_snapshot(&app.store) {
             Ok(()) => eprintln!("engine: INFO state snapshot flushed"),
             Err(error) => eprintln!("engine: WARN final snapshot failed: {error}"),
         }
@@ -51,8 +60,8 @@ struct WindowedApp {
     cli: Cli,
     engine: Option<Engine>,
     surface: Option<SurfaceTarget>,
-    scene: Option<ChromaticLine>,
-    fixture: Option<SyntheticSine>,
+    compositor: Option<Compositor>,
+    store: Store,
     stats: Option<FrameStats>,
     adapter: AdapterSummary,
     window: Option<Arc<Window>>,
@@ -64,6 +73,7 @@ struct WindowedApp {
     failed: bool,
     supervisor: Option<EngineSupervisor>,
     consecutive_timeouts: u32,
+    preview_error_logged: bool,
 }
 
 // `FrameStats` contains no public Clone; store it in an Option so `finish()`
@@ -72,6 +82,29 @@ struct WindowedApp {
 impl WindowedApp {
     fn new(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Self {
         let start = Instant::now();
+        let mut store = Store::new();
+        if let Some(path) = &cli.state {
+            match store.restore_from_file(path) {
+                Ok(true) => eprintln!(
+                    "engine: INFO restored engine state from {} ({} groups, {} modules)",
+                    path.display(),
+                    store.state().groups.len(),
+                    store.state().modules.len()
+                ),
+                Ok(false) => {
+                    eprintln!(
+                        "engine: INFO no state snapshot at {}; starting empty",
+                        path.display()
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "engine: WARN could not load state snapshot {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+        }
         let supervisor = cli.socket.as_ref().and_then(|socket_path| {
             match EngineSupervisor::new(socket_path.clone(), cli.state.clone()) {
                 Ok(supervisor) => {
@@ -96,8 +129,8 @@ impl WindowedApp {
             cli,
             engine: Some(engine),
             surface: None,
-            scene: None,
-            fixture: None,
+            compositor: None,
+            store,
             stats: None,
             adapter,
             window: None,
@@ -108,6 +141,7 @@ impl WindowedApp {
             failed: false,
             supervisor,
             consecutive_timeouts: 0,
+            preview_error_logged: false,
         }
         .with_socket_failure(socket_failed)
     }
@@ -119,7 +153,7 @@ impl WindowedApp {
         self
     }
 
-    /// Build the window, surface, scene and audio fixture (first `resumed`).
+    /// Build the window, surface and compositor (first `resumed`).
     fn init(&mut self, event_loop: &ActiveEventLoop) {
         let Some(engine) = self.engine.as_ref() else {
             eprintln!("error: engine missing during window initialisation");
@@ -160,13 +194,13 @@ impl WindowedApp {
                 return;
             }
         };
-        let mut scene = ChromaticLine::new(&engine.device, &engine.queue, surface.format());
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
         let (width, height) = surface.dimensions();
-        scene.resize(width, height);
-        self.fixture = (self.cli.audio_fixture > 0.0)
-            .then(|| SyntheticSine::new(self.cli.audio_fixture as f32));
+        compositor.resize(width, height);
+
         self.surface = Some(surface);
-        self.scene = Some(scene);
+        self.compositor = Some(compositor);
         self.window = Some(window);
         self.stats = Some(FrameStats::start());
         self.last_frame = Instant::now();
@@ -189,13 +223,37 @@ impl WindowedApp {
             now.saturating_duration_since(self.last_frame)
         };
         self.last_frame = now;
-        let dt_seconds = dt_duration.as_secs_f32();
 
         let Some(engine) = self.engine.as_ref() else {
             return;
         };
-        if let Some(scene) = &mut self.scene {
-            scene.update(&engine.queue, dt_seconds, &mut self.fixture);
+
+        // 1. Apply control-socket mutations before rendering the frame.
+        if let Some(supervisor) = &mut self.supervisor {
+            supervisor.poll(&mut self.store);
+            if supervisor.take_reset_request() {
+                if let Some(compositor) = &mut self.compositor {
+                    compositor.reset();
+                }
+            }
+        }
+
+        let frame_info = FrameInfo {
+            time_seconds: self.start.elapsed().as_secs_f32(),
+            frame_index: self.frames_done,
+            date: wall_clock_date(self.start.elapsed().as_secs_f32()),
+            // M2 has no audio analysis yet; modules receive silence.
+            audio: Default::default(),
+        };
+
+        // 2. Render the state into the compositor's main texture.
+        if let Some(compositor) = &mut self.compositor {
+            if let Err(error) = compositor.render_frame(self.store.state(), &frame_info) {
+                eprintln!("error: compositor frame failed: {error}");
+                self.failed = true;
+                event_loop.exit();
+                return;
+            }
         }
 
         let Some(surface) = &mut self.surface else {
@@ -249,40 +307,36 @@ impl WindowedApp {
         let mut encoder = engine
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("spike-frame"),
+                label: Some("engine-frame"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("spike-frame"),
-                // Near-black (#0b0b0f). The legacy output clears to transparent;
-                // the spike window is opaque dark instead.
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.043,
-                            g: 0.043,
-                            b: 0.059,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if let Some(scene) = self.scene.as_ref() {
-                scene.render(&mut pass);
-            }
+        if let Some(compositor) = &mut self.compositor {
+            compositor.present(&mut encoder, &view, surface.format());
         }
         engine.queue.submit(Some(encoder.finish()));
         engine.queue.present(frame);
         if suboptimal {
             surface.reconfigure(&engine.device);
+        }
+
+        // 3. Publish a preview frame at the supervisor's cadence (≤ 30 fps).
+        if let Some(supervisor) = &mut self.supervisor {
+            if supervisor.preview_due() && self.compositor.is_some() {
+                let mut preview = None;
+                if let Some(ring) = supervisor.preview_ring_mut() {
+                    if let Some(compositor) = &mut self.compositor {
+                        preview = compositor.read_preview(ring).unwrap_or_else(|error| {
+                            if !self.preview_error_logged {
+                                self.preview_error_logged = true;
+                                eprintln!("engine: WARN preview read-back failed: {error}");
+                            }
+                            None
+                        });
+                    }
+                }
+                if let Some(frame) = preview {
+                    supervisor.publish_preview(frame);
+                }
+            }
         }
 
         if let Some(stats) = &mut self.stats {
@@ -291,8 +345,7 @@ impl WindowedApp {
         self.frames_done += 1;
 
         if let Some(supervisor) = &mut self.supervisor {
-            supervisor.note_frame_presented();
-            supervisor.poll();
+            supervisor.note_frame_presented(&self.store);
             if supervisor.shutdown_requested() {
                 self.finish_and_exit(event_loop);
                 return;
@@ -373,13 +426,67 @@ impl ApplicationHandler for WindowedApp {
                     surface.resize(&engine.device, size.width, size.height);
                 }
                 if size.width > 0 && size.height > 0 {
-                    if let Some(scene) = &mut self.scene {
-                        scene.resize(size.width, size.height);
+                    if let Some(compositor) = &mut self.compositor {
+                        compositor.resize(size.width, size.height);
                     }
                 }
             }
             WindowEvent::RedrawRequested => self.draw_frame(event_loop),
             _ => {}
         }
+    }
+}
+
+/// `iDate`: `[year, month (0-based), weekday (0 = Sunday), monotonic seconds]`,
+/// built from the system clock exactly like the JS `Date` getters
+/// (`renderers/shader/index.js:98-121`). Calendar conversion is Howard
+/// Hinnant's `civil_from_days` over Unix days, so it works without a
+/// chrono/time dependency.
+fn wall_clock_date(monotonic_seconds: f32) -> [f32; 4] {
+    let unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let days = unix_seconds.div_euclid(86_400);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+
+    // 1970-01-01 was a Thursday; JS `getDay()` is 0 = Sunday.
+    let weekday = (days + 4).rem_euclid(7);
+
+    [
+        year as f32,
+        (month - 1) as f32,
+        weekday as f32,
+        monotonic_seconds,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_clock_date_has_the_shader_uniform_shape() {
+        let date = wall_clock_date(12.5);
+        // Year is sane for this project's lifetime, month is 0-based.
+        assert!(date[0] >= 2024.0 && date[0] < 2100.0, "year {}", date[0]);
+        assert!((0.0..12.0).contains(&date[1]), "month {}", date[1]);
+        assert!((0.0..7.0).contains(&date[2]), "weekday {}", date[2]);
+        assert!(date[2].fract() == 0.0, "weekday is an integer");
+        assert_eq!(date[3], 12.5);
     }
 }
