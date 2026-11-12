@@ -2190,6 +2190,12 @@ Verified on the packaged AppImage (`MODV_ENGINE=1`), 2026-11-12.
   deltas before `ADD_ACTIVE_MODULE`. Previously only Scene snapshots did this,
   so a Gallery drop produced a Module whose Inspector was empty. Fixtures
   regenerated; the mirror-parity test now compares 17 input records.
+- **Checkbox 1/0 flags (P1) — fixed.** The shared Checkbox emits numbers;
+  Module Enable stored `1`, which the strict compositor boolean check skipped
+  (a fresh group appeared black), and Group Clearing/Pipeline failed the typed
+  decode and snapped back. `updateMeta` coerces `enabled` with JS truthiness;
+  `groups/UPDATE_GROUP` coerces the known flag keys before the schema
+  round-trip and echoes booleans to the mirror.
 - **Texture-free ISF generators (P1 visual) — fixed.** Legacy ISF gives
   `isf_FragNormCoord` a bottom-left origin (WebGL); the engine used top-left,
   which is correct for sampling wgpu textures but rendered coordinate-built
