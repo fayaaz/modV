@@ -1,7 +1,8 @@
 // WS-14 — IPC surface between the renderer and the engine supervisor.
 //
 // Renderer → engine: commit (fire-and-forget), dispatch (request/response,
-//   resolves with the action's return value), snapshot, preview fetch
+//   resolves with the action's return value), snapshot, sync (the late-joiner
+//   pull that replaces a missed `state/sync` event), preview fetch
 //   (main output ring slot + off-graph module thumbnails for the Gallery).
 // Engine → renderer: `engine/delta` (the commitQueue-compatible {type,payload}
 //   records from `state/delta` events), `engine/state` (lifecycle transitions),
@@ -12,10 +13,10 @@
 // the singleton to exist at import time.
 
 import { ipcMain } from "electron";
-import fs from "node:fs";
 
 import { createLogger } from "./logger";
 import { windows } from "./windows";
+import { readPreviewSlot } from "./engine-preview-read";
 
 const logger = createLogger("engine-ipc");
 
@@ -55,6 +56,18 @@ function mainWebContents() {
   return windows.mainWindow?.webContents || null;
 }
 
+/**
+ * R-25 — the engine API belongs to the main window. The preload only exposes
+ * it there, but output windows inherit the same preload and run with
+ * `nodeIntegration`, so the main process validates the sender as well instead
+ * of relying on the exposed surface alone.
+ */
+function isMainWindowSender(event) {
+  const contents = mainWebContents();
+  if (!contents || contents.isDestroyed()) return false;
+  return event?.sender === contents;
+}
+
 function sendToMainWindow(channel, payload) {
   const contents = mainWebContents();
   if (contents && !contents.isDestroyed()) {
@@ -70,10 +83,14 @@ export function registerEngineIpc(getSupervisor) {
   // -- renderer → engine ---------------------------------------------------
 
   ipcMain.on("engine/enabled-sync", (event) => {
-    event.returnValue = process.env.MODV_ENGINE === "1" && !!getSupervisor();
+    event.returnValue =
+      isMainWindowSender(event) &&
+      process.env.MODV_ENGINE === "1" &&
+      !!getSupervisor();
   });
 
-  ipcMain.on("engine/commit", (_event, message) => {
+  ipcMain.on("engine/commit", (event, message) => {
+    if (!isMainWindowSender(event)) return;
     const sup = getSupervisor();
     if (!sup?.isRunning()) return;
     const { type, payload } = message || {};
@@ -84,7 +101,10 @@ export function registerEngineIpc(getSupervisor) {
     });
   });
 
-  ipcMain.handle("engine/dispatch", async (_event, message) => {
+  ipcMain.handle("engine/dispatch", async (event, message) => {
+    if (!isMainWindowSender(event)) {
+      throw new Error("engine/dispatch is only available to the main window");
+    }
     const sup = getSupervisor();
     if (!sup?.isRunning()) {
       throw new Error("the engine is not running (MODV_ENGINE=1 required)");
@@ -101,36 +121,59 @@ export function registerEngineIpc(getSupervisor) {
     return { state: sup ? sup.getState() : "stopped" };
   });
 
-  ipcMain.handle("engine/snapshot", async () => {
+  // Late-joiner fallback for `state/sync` (review R-4). The engine emits sync
+  // once on accept and Electron does not queue IPC events, so a renderer that
+  // subscribes after the socket connected would permanently miss the Groups,
+  // Modules, `registered` map, seeded Scenes and restored tweens. The renderer
+  // pulls this after subscribing and replays it idempotently.
+  ipcMain.handle("engine/get-sync", async (event) => {
+    if (!isMainWindowSender(event)) {
+      throw new Error("engine/get-sync is only available to the main window");
+    }
+    const sup = getSupervisor();
+    if (!sup?.isRunning()) {
+      throw new Error(
+        "the engine is not running, so it has no state to sync (MODV_ENGINE=1 required)",
+      );
+    }
+    return sup.client.request("engine/get-sync", null, 5000);
+  });
+
+  ipcMain.handle("engine/snapshot", async (event) => {
+    if (!isMainWindowSender(event)) return null;
     const sup = getSupervisor();
     if (!sup?.isRunning()) return null;
     return sup.client.request("state/snapshot");
   });
 
-  ipcMain.handle("engine/preview", async () => {
+  // Main-window preview frame. `readPreviewSlot` mirrors the Rust ring's
+  // seqlock: it bounds the slot/geometry from the `preview/ready` handshake,
+  // copies exactly `stride × height` bytes and retries while the sequence
+  // changes, so a mid-publish slot read is dropped instead of handing the
+  // renderer a torn frame (or, on a short read, uninitialised memory).
+  ipcMain.handle("engine/preview", async (event) => {
+    if (!isMainWindowSender(event)) return null;
     const sup = getSupervisor();
     if (!sup?.isRunning()) return null;
 
     const info = sup.client?.previewInfo;
     const frame = sup.lastPreviewFrame;
     if (!info || !frame) {
-      return { info: info || null, frame: null };
+      return { info: info || null, frame: null, pixels: null };
     }
 
-    const offset = frame.slot * info.slotBytes;
-    const length = Math.min(frame.height * frame.stride, info.slotBytes - 32);
-    const pixels = Buffer.allocUnsafe(length);
-
+    let pixels = null;
     try {
-      const fd = fs.openSync(info.path, "r");
-      try {
-        fs.readSync(fd, pixels, 0, length, offset + 32);
-      } finally {
-        fs.closeSync(fd);
-      }
+      pixels = readPreviewSlot(info, frame);
     } catch (error) {
       logger.warn(`could not read preview slot: ${error.message}`);
       return { info, frame, pixels: null, error: error.message };
+    }
+
+    if (!pixels) {
+      // No consistent frame this poll: the renderer keeps the last frame and
+      // asks again on its next cadence.
+      return { info, frame, pixels: null };
     }
 
     return { info, frame, pixels };
@@ -142,7 +185,8 @@ export function registerEngineIpc(getSupervisor) {
   // tightly packed width × height frame. Errors (module not implemented by the
   // engine yet, renderer busy, …) reject the invoke; the renderer treats that
   // as "no preview yet" and retries on its own cadence.
-  ipcMain.handle("engine/preview-module", async (_event, message) => {
+  ipcMain.handle("engine/preview-module", async (event, message) => {
+    if (!isMainWindowSender(event)) return null;
     const sup = getSupervisor();
     if (!sup?.isRunning()) return null;
 
@@ -167,7 +211,8 @@ export function registerEngineIpc(getSupervisor) {
   // `{ width, height, pixels }` shape as `preview/module` (base64 RGBA8).
   // Unknown Scenes/empty rows reject the invoke; the renderer keeps the cell's
   // last frame and retries on its backoff cadence.
-  ipcMain.handle("engine/preview-scene", async (_event, message) => {
+  ipcMain.handle("engine/preview-scene", async (event, message) => {
+    if (!isMainWindowSender(event)) return null;
     const sup = getSupervisor();
     if (!sup?.isRunning()) return null;
 
@@ -223,16 +268,3 @@ export function registerEngineIpc(getSupervisor) {
     });
   });
 }
-
-/** Channels registered by registerEngineIpc; exported for destroy() symmetry. */
-export const ENGINE_IPC_CHANNELS = {
-  on: ["engine/enabled-sync", "engine/commit"],
-  handle: [
-    "engine/dispatch",
-    "engine/snapshot",
-    "engine/preview",
-    "engine/preview-module",
-    "engine/preview-scene",
-    "engine/get-state",
-  ],
-};

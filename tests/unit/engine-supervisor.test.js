@@ -3,10 +3,11 @@
 // process speaking the protocol, so lifecycle behaviour (restart budget,
 // heartbeat watchdog, graceful shutdown) is exercised for real.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 
 import { EngineSupervisor } from "../../src/main/engine-supervisor";
@@ -160,6 +161,85 @@ describe("EngineSupervisor", () => {
     await supervisor.start();
     expect(supervisor.getState()).toBe("fatal");
   });
+
+  it("routes a spawn error through the restart budget instead of waiting for connect retries", async () => {
+    // A file that exists but is not executable: spawn() succeeds synchronously
+    // and then emits 'error' (EACCES) without an 'exit' event. Before R-24 the
+    // supervisor only logged it and sat in "starting" for the full connect
+    // retry window (100 × 50 ms here).
+    const binaryPath = path.join(tmpDir, `not-executable-${process.pid}`);
+    fs.writeFileSync(binaryPath, "not an executable", { mode: 0o644 });
+    const { socketPath, statePath } = tempPaths();
+    const supervisor = new EngineSupervisor({
+      binaryPath,
+      socketPath,
+      statePath,
+      logger: silentLogger,
+      restartDelayMs: 20,
+      restartBudget: 1,
+      connectRetryLimit: 100,
+      connectRetryMs: 50,
+    });
+    cleanup.push(() => supervisor.shutdown());
+
+    const started = Date.now();
+    await supervisor.start();
+    await waitForState(supervisor, "fatal", 3_000);
+
+    expect(supervisor.getState()).toBe("fatal");
+    // Far below the 5 s the old connect-retry path would have taken.
+    expect(Date.now() - started).toBeLessThan(3_000);
+  }, 10_000);
+
+  it("resets the restart budget on start() and on a clean shutdown()", async () => {
+    const { supervisor } = makeTestSupervisor({ mode: "ok" });
+    cleanup.push(() => supervisor.shutdown());
+
+    supervisor.restartTimestamps = [1, 1, 1, 1, 1];
+    const starting = supervisor.start();
+    expect(supervisor.restartTimestamps).toEqual([]);
+    await starting;
+    await waitForState(supervisor, "running");
+
+    // Simulate a crash history accumulated while running; the next clean stop
+    // must not leave it in place for the following start().
+    supervisor.restartTimestamps = [1, 1, 1, 1, 1];
+    await supervisor.shutdown();
+
+    expect(supervisor.getState()).toBe("stopped");
+    expect(supervisor.restartTimestamps).toEqual([]);
+  }, 15_000);
+
+  it("waits for the previous engine to exit before rescheduling after a connect timeout", async () => {
+    // Never connects, so _spawn() takes the connect-timeout path. The wait is
+    // spied on to prove the respawn is gated on it (the real wait is covered
+    // by the SIGTERM shutdown paths above).
+    const client = new EventEmitter();
+    client.connect = async () => {
+      throw new Error("no socket");
+    };
+    client.disconnect = vi.fn();
+    client.request = async () => null;
+
+    const { supervisor } = makeTestSupervisor({
+      mode: "ok",
+      restartDelayMs: 1_000,
+      restartBudget: 3,
+      connectRetryLimit: 2,
+      connectRetryMs: 5,
+      clientFactory: () => client,
+    });
+    cleanup.push(() => supervisor.shutdown());
+    const waitForExit = vi.spyOn(supervisor, "_awaitChildExit");
+
+    void supervisor.start();
+    await waitForState(supervisor, "restarting", 5_000);
+
+    expect(waitForExit).toHaveBeenCalled();
+    const [child, timeoutMs] = waitForExit.mock.calls[0];
+    expect(child).toBeTruthy();
+    expect(timeoutMs).toBe(supervisor.shutdownWaitMs);
+  }, 15_000);
 });
 
 describe("EngineSupervisor state transitions", () => {

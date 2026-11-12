@@ -58,7 +58,7 @@
 //!   `nextSceneId` field is still tracked so the selection is made once.
 //! * Scene hover previews — M5d.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
@@ -256,7 +256,7 @@ pub struct PerformanceRuntime {
     /// Deterministic RNG for dwell/order/transition picks.
     pub rng: Rng,
     /// Accumulated seconds since the last throttled progress delta.
-    progress_emit_elapsed: f64,
+    pub(crate) progress_emit_elapsed: f64,
 }
 
 impl Default for PerformanceRuntime {
@@ -323,12 +323,32 @@ impl Store {
 
     /// Live performance rows: every non-Gallery, non-ghost Group in draw
     /// order (`getLiveRowGroups`, `scenes.js:1088-1094`).
+    ///
+    /// While a whole-scene crossfade runs, the outgoing (`transition.from`)
+    /// Groups are still in the layer stack — sorted *before* the incoming ones
+    /// so the incoming Scene draws on top — but they are no longer live rows.
+    /// Row lookups must resolve to the incoming Groups, so they are excluded
+    /// here (R-29).
     fn live_row_groups(&self) -> Vec<Group> {
+        let outgoing: HashSet<&str> = self
+            .performance
+            .transition
+            .as_ref()
+            .map(|transition| {
+                transition
+                    .from
+                    .iter()
+                    .map(|(group_id, _)| group_id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
         self.state
             .groups
             .iter()
             .filter(|group| {
-                group.name != GALLERY_GROUP_NAME && group.transition_ghost != Some(true)
+                group.name != GALLERY_GROUP_NAME
+                    && group.transition_ghost != Some(true)
+                    && !outgoing.contains(group.id.as_str())
             })
             .cloned()
             .collect()
@@ -347,12 +367,19 @@ impl Store {
 
     /// The live row count (`getters["scenes/rowCount"]`).
     pub(crate) fn performance_row_count(&self) -> usize {
+        self.row_count_for(&self.row_names())
+    }
+
+    /// [`Self::performance_row_count`] against already-normalised row names, so
+    /// the per-frame tick does not re-normalise (and re-clone) them for every
+    /// call.
+    fn row_count_for(&self, row_names: &[String]) -> usize {
         let live: Vec<Value> = self
             .live_row_groups()
             .iter()
             .map(|group| serde_json::to_value(group).unwrap_or(Value::Null))
             .collect();
-        get_row_count(&self.scenes.scenes, &live, &self.row_names())
+        get_row_count(&self.scenes.scenes, &live, row_names)
     }
 
     /// Row names from the performance config.
@@ -361,10 +388,14 @@ impl Store {
     }
 
     /// Pick the next Scene for one row (`pickNextRowScene`).
+    ///
+    /// `row_names` is passed in so a caller that already normalised them (the
+    /// per-frame tick, which asks for every row) does not rebuild the list.
     fn pick_next_scene_for_row(
         &mut self,
         row: usize,
         current_scene_id: Option<&str>,
+        row_names: &[String],
     ) -> Option<String> {
         let order = self
             .scenes
@@ -373,7 +404,6 @@ impl Store {
             .and_then(Value::as_str)
             .unwrap_or("in-order")
             .to_string();
-        let row_names = self.row_names();
         let scenes = &self.scenes.scenes;
         let picked = pick_next_row_scene(
             &PickNextRowScene {
@@ -381,7 +411,7 @@ impl Store {
                 row_index: row,
                 current_scene_id,
                 order: &order,
-                row_names: &row_names,
+                row_names,
             },
             || self.performance.rng.next_f64(),
         );
@@ -495,12 +525,12 @@ impl Store {
         self.performance.enabled = true;
         self.set_performance_value("enabled", json!(true));
 
-        let row_count = self.performance_row_count();
+        let row_names = self.row_names();
+        let row_count = self.row_count_for(&row_names);
         if row_count == 0 {
             return Ok(json!({ "enabled": true, "rows": 0 }));
         }
 
-        let row_names = self.row_names();
         let has_row_candidates = (0..row_count).any(|row| {
             self.scenes
                 .scenes
@@ -551,7 +581,7 @@ impl Store {
 
             if !valid {
                 if let Some(scene_id) =
-                    self.pick_next_scene_for_row(row, active_scene_id.as_deref())
+                    self.pick_next_scene_for_row(row, active_scene_id.as_deref(), &row_names)
                 {
                     self.apply_scene_row_transition(&scene_id, row)?;
                 }
@@ -660,8 +690,8 @@ impl Store {
         }
 
         // 3. Per-row dwell (`scenes.js:3900-4105`).
-        let row_count = self.performance_row_count();
         let row_names = self.row_names();
+        let row_count = self.row_count_for(&row_names);
         let order = self
             .scenes
             .performance
@@ -703,9 +733,11 @@ impl Store {
             };
 
             if !valid {
-                if let Some(scene_id) =
-                    self.pick_next_scene_for_row(row, active.current_scene_id.as_deref())
-                {
+                if let Some(scene_id) = self.pick_next_scene_for_row(
+                    row,
+                    active.current_scene_id.as_deref(),
+                    &row_names,
+                ) {
                     self.apply_scene_row_transition(&scene_id, row)?;
                     advanced += 1;
                 }
@@ -743,7 +775,8 @@ impl Store {
             }
             if !runtime.pick_pending && runtime.dwell_elapsed >= ROW_PREWARM_AFTER_SECONDS {
                 runtime.pick_pending = true;
-                runtime.next_scene_id = self.pick_next_scene_for_row(row, scene_id.as_deref());
+                runtime.next_scene_id =
+                    self.pick_next_scene_for_row(row, scene_id.as_deref(), &row_names);
             }
 
             runtime.dwell_elapsed += dt;
@@ -1000,6 +1033,7 @@ mod tests {
     //! is covered in `compositor.rs` (lavapipe).
     use super::*;
     use crate::store_ops::Store;
+    use modv_engine::delta::Mutation;
     use serde_json::json;
 
     fn scene(id: &str, name: &str) -> Value {
@@ -1309,6 +1343,333 @@ mod tests {
             types
                 .iter()
                 .any(|type_| type_ == "scenes/UPDATE_PERFORMANCE")
+        );
+    }
+
+    #[test]
+    fn stopping_mid_whole_scene_shader_transition_drops_the_capture_and_ghosts() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({
+                    "config": {
+                        "allowedTransitions": ["Three Crossfade"],
+                        "transitionSeconds": 1,
+                    }
+                }),
+            )
+            .expect("config");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+            .expect("apply b");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-c" }))
+            .expect("apply c");
+
+        let transition = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("a shader transition is running");
+        assert_eq!(transition.kind, "Three Crossfade");
+        assert!(
+            store.take_pending_transition_capture().is_some(),
+            "the shader transition asked for the outgoing frame"
+        );
+        tick(&mut store, 0.4);
+
+        store
+            .dispatch("scenes/stopPerformance", json!({}))
+            .expect("stop");
+
+        assert!(!store.performance_runtime().enabled);
+        assert!(
+            store.whole_scene_transition().is_none(),
+            "the in-flight whole-scene transition is finished, not left behind"
+        );
+        assert!(
+            store.take_pending_transition_capture().is_none(),
+            "no capture request survives the stop"
+        );
+        for (group_id, _) in &transition.from {
+            assert!(
+                store.state().find_group(group_id).is_none(),
+                "the outgoing Scene is removed"
+            );
+        }
+        for (group_id, alpha) in &transition.to {
+            assert_eq!(
+                store.state().find_group(group_id).unwrap().alpha,
+                *alpha,
+                "the incoming Scene lands at its target alpha"
+            );
+        }
+        assert!(
+            !store
+                .state()
+                .groups
+                .iter()
+                .any(|group| group.transition_ghost == Some(true)),
+            "no ghost Group survives the stop"
+        );
+    }
+
+    /// A preset document with one plain Group and no Modules: restoring it
+    /// removes every Scene Group the performance runtime was pointing at.
+    fn restored_preset() -> Value {
+        json!({
+            "groups": [{
+                "id": "restored-group",
+                "name": "Restored",
+                "hidden": false,
+                "modules": [],
+                "enabled": 1,
+                "alpha": 1,
+                "inherit": false,
+                "inheritFrom": -1,
+                "pipeline": false,
+                "clearing": false,
+                "compositeOperation": "normal",
+            }],
+            "modules": {},
+        })
+    }
+
+    /// Every Group/Module id in the live state.
+    fn live_ids(store: &Store) -> Vec<String> {
+        store
+            .state()
+            .groups
+            .iter()
+            .flat_map(|group| {
+                std::iter::once(group.id.clone()).chain(group.modules.iter().cloned())
+            })
+            .collect()
+    }
+
+    /// No post-restore delta may mention an object the restore deleted.
+    fn assert_no_stale_ids(deltas: &[Mutation], stale: &[String]) {
+        for mutation in deltas {
+            let payload = mutation.payload.to_string();
+            for id in stale {
+                assert!(
+                    !payload.contains(id.as_str()),
+                    "stale id {id} in {}: {payload}",
+                    mutation.r#type
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn restore_clears_row_transitions_and_republishes_active_rows() {
+        let mut store = store_with_scenes();
+        // A Scene is applied (so `applied_scene_id` is stamped), performance
+        // mode starts, and a row crossfade is left in flight: three pieces of
+        // runtime bookkeeping that reference live Group ids.
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-a" }))
+            .expect("apply a");
+        store
+            .dispatch("scenes/startPerformance", json!({}))
+            .expect("start");
+        store.performance.rows.get_mut(&0).unwrap().dwell_target = 0.0;
+        advance(&mut store, 0.05);
+        assert!(
+            store.row_transition(0).is_some(),
+            "a row crossfade is in flight"
+        );
+        assert!(!store.performance_runtime().rows.is_empty());
+        assert!(store.applied_scene_id.is_some());
+
+        let stale = live_ids(&store);
+        assert!(!stale.is_empty());
+        store.drain_deltas();
+
+        store.restore(&restored_preset()).expect("restore loads");
+
+        // Nothing that referenced the deleted Groups survives (R-29).
+        assert!(store.performance_runtime().rows.is_empty());
+        assert!(store.performance_runtime().row_transitions.is_empty());
+        assert!(store.whole_scene_transition().is_none());
+        assert!(store.applied_scene_id.is_none());
+        assert!(store.pending_transition_capture.is_none());
+
+        let deltas = store.drain_deltas();
+        let types: Vec<&str> = deltas.iter().map(|m| m.r#type.as_str()).collect();
+        assert!(
+            types.contains(&"scenes/CLEAR_ALL_ROW_PROGRESS"),
+            "the mirror's row-progress meters are cleared: {types:?}"
+        );
+        let active_rows = deltas
+            .iter()
+            .find(|m| m.r#type == "scenes/SET_ACTIVE_ROWS")
+            .expect("the active rows are re-emitted from the restored state");
+        assert_eq!(
+            active_rows.payload,
+            json!({}),
+            "the restored preset has no Scene-stamped Groups, so no row is active"
+        );
+        assert_no_stale_ids(&deltas, &stale);
+    }
+
+    #[test]
+    fn restore_clears_a_whole_scene_transition_and_its_capture_request() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({
+                    "config": {
+                        "allowedTransitions": ["Three Crossfade"],
+                        "transitionSeconds": 1,
+                    }
+                }),
+            )
+            .expect("config");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-a" }))
+            .expect("apply a");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+            .expect("apply b");
+
+        let transition = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("a shader transition is running");
+        assert!(
+            store.pending_transition_capture.is_some(),
+            "the shader transition asked for the outgoing frame"
+        );
+        assert_eq!(store.applied_scene_id.as_deref(), Some("scene-b"));
+
+        let stale = live_ids(&store);
+        store.drain_deltas();
+
+        store.restore(&restored_preset()).expect("restore loads");
+
+        assert!(
+            store.whole_scene_transition().is_none(),
+            "the in-flight whole-scene transition is dropped, not left on dead ids"
+        );
+        assert!(store.performance_runtime().row_transitions.is_empty());
+        assert!(store.performance_runtime().rows.is_empty());
+        assert!(
+            store.pending_transition_capture.is_none(),
+            "no capture request survives the restore"
+        );
+        assert!(store.applied_scene_id.is_none());
+
+        let deltas = store.drain_deltas();
+        assert!(
+            deltas
+                .iter()
+                .any(|m| m.r#type == "scenes/SET_TRANSITIONING" && m.payload == json!(false)),
+            "the mirror's transitioning flag is cleared"
+        );
+        assert!(
+            deltas.iter().any(|m| m.r#type == "scenes/SET_ACTIVE_ROWS"),
+            "the active rows are re-emitted"
+        );
+        assert_no_stale_ids(&deltas, &stale);
+        for (group_id, _) in &transition.from {
+            assert!(
+                store.state().find_group(group_id).is_none(),
+                "the outgoing Group is gone with the restored state"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_scene_fade_draws_the_incoming_scene_above_the_outgoing_one() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch(
+                "scenes/updatePerformance",
+                json!({ "config": { "allowedTransitions": ["Fade"], "transitionSeconds": 1 } }),
+            )
+            .expect("config");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-a" }))
+            .expect("apply a");
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-b" }))
+            .expect("apply b");
+
+        let transition = store
+            .whole_scene_transition()
+            .cloned()
+            .expect("a Fade is running");
+        assert_eq!(transition.kind, FADE_TRANSITION);
+        assert_eq!(transition.from.len(), transition.to.len());
+
+        let order = store.state().group_index_render_order();
+        let position = |group_id: &str| {
+            order
+                .iter()
+                .position(|&index| store.state().groups[index].id == group_id)
+                .unwrap_or_else(|| panic!("{group_id} is in the layer stack"))
+        };
+
+        // Later entries draw on top, so the incoming Group of each row must come
+        // after that row's outgoing Group (R-29: the outgoing Scene used to be
+        // on top because the created Groups were inserted first).
+        for ((outgoing, _), (incoming, _)) in transition.from.iter().zip(&transition.to) {
+            assert!(
+                position(incoming) > position(outgoing),
+                "the incoming Group {incoming} draws above the outgoing one {outgoing}"
+            );
+            assert_eq!(
+                store.state().find_group(outgoing).and_then(|g| g.scene_row),
+                store.state().find_group(incoming).and_then(|g| g.scene_row),
+                "the pair belongs to the same row"
+            );
+        }
+
+        // Row lookups during the fade resolve to the incoming Groups: the
+        // outgoing ones are only still in the layer stack for the crossfade.
+        for (row, (incoming, _)) in transition.to.iter().enumerate() {
+            let live = store.find_live_row_group(row).expect("a live row Group");
+            assert_eq!(live.id, *incoming);
+        }
+
+        // `emit_group_order` always keeps the render order row-sorted, so rows
+        // ascend and each row's incoming Group follows that row's outgoing one
+        // (the `orderRowGroups` shape in `scenes.js:1300-1316`; the created
+        // Group's `inheritFrom` is remapped to the new ids, so the rows stay
+        // connected across the change).
+        let rows: Vec<usize> = order
+            .iter()
+            .filter_map(|&index| store.state().groups[index].scene_row)
+            .collect();
+        assert!(
+            rows.windows(2).all(|pair| pair[0] <= pair[1]),
+            "render order is row-sorted: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn row_crossfade_draws_the_incoming_group_above_its_ghost() {
+        let mut store = store_with_scenes();
+        store
+            .dispatch("scenes/startPerformance", json!({}))
+            .expect("start");
+        store.performance.rows.get_mut(&0).unwrap().dwell_target = 0.0;
+        advance(&mut store, 0.05);
+
+        let transition = store.row_transition(0).cloned().expect("row crossfade");
+        let order = store.state().group_index_render_order();
+        let position = |group_id: &str| {
+            order
+                .iter()
+                .position(|&index| store.state().groups[index].id == group_id)
+                .unwrap_or_else(|| panic!("{group_id} is in the layer stack"))
+        };
+
+        assert!(
+            position(&transition.group_id) > position(&transition.ghost_group_id),
+            "the incoming Group draws above the outgoing ghost (`orderRowGroups`, scenes.js:1300)"
         );
     }
 

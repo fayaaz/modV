@@ -41,10 +41,10 @@
 //! re-materialising the isolated state. Each slot also stores the Scene-list
 //! revision it was built from ([`Store::scene_list_revision`]); a Scene edit,
 //! import, removal or row rename bumps that revision, so the next request
-//! rebuilds instead of showing a stale frame. Evicted slots drop their
-//! isolated state; the private compositor's GPU instances are released by
-//! [`ScenePreviews::reset`] (or the next render's prune, since every
-//! materialisation uses fresh module ids).
+//! rebuilds instead of showing a stale frame. Evicted slots dispose exactly
+//! their own compositor instances (their ids are fresh per materialisation);
+//! every other cached cell's shader/2D/Point10/ISF instances stay alive, and a
+//! render keeps them out of the private compositor's prune (R-10).
 //!
 //! ## Cost
 //!
@@ -65,7 +65,7 @@ use modv_engine::props::coerce_prop_value;
 use modv_engine::scene_preview_data::get_scene_row_preview;
 use modv_render::wgpu;
 
-use crate::compositor::{Compositor, FrameInfo};
+use crate::compositor::{Compositor, FrameInfo, RetainedInstances};
 use crate::module_preview::PreviewError;
 use crate::module_registry::ModuleRegistry;
 use crate::store_ops::Store;
@@ -120,6 +120,20 @@ impl ScenePreviewSlot {
             && self.row_index == row_index
             && self.width == width
             && self.height == height
+    }
+
+    /// Add this slot's fresh Group/Module ids to `retained`.
+    ///
+    /// Every materialisation uses a fresh serial, so a slot's ids name exactly
+    /// its own compositor instances; the preview keeps them alive while
+    /// another cell renders.
+    fn retain_instances(&self, retained: &mut RetainedInstances) {
+        for group in &self.state.groups {
+            retained.retain_group(group.id.clone());
+        }
+        for id in self.state.modules.keys() {
+            retained.retain_module(id.clone());
+        }
     }
 }
 
@@ -178,6 +192,20 @@ impl ScenePreviews {
         self.materialisations
     }
 
+    /// Module instances the private compositor currently holds, across every
+    /// cached cell (test/diagnostic use).
+    ///
+    /// Rendering one cell must not change this beyond that cell's own
+    /// instances: the cached cells' shader/2D/Point10/ISF instances survive a
+    /// hover move (R-10).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn live_instances(&self) -> usize {
+        self.compositor
+            .as_ref()
+            .map(|compositor| compositor.live_module_instances())
+            .unwrap_or(0)
+    }
+
     /// Render one frame of the Scene cell `(scene_id, row_index)` at
     /// `width × height` and return tightly packed RGBA8 pixels.
     ///
@@ -217,12 +245,19 @@ impl ScenePreviews {
         let device = self.device.clone();
         let queue = self.queue.clone();
         let registry = Arc::clone(&self.registry);
+        // Keep every cached cell's instances: `prune` would otherwise dispose
+        // the ones the state being rendered does not reference, i.e. all the
+        // other cached cells (R-10a).
+        let mut retained = RetainedInstances::new();
+        for slot in &self.slots {
+            slot.retain_instances(&mut retained);
+        }
         let compositor = self
             .compositor
             .get_or_insert_with(|| Box::new(Compositor::with_registry(&device, &queue, registry)));
         compositor.resize(width, height);
         compositor
-            .render_frame(&self.slots[index].state, frame)
+            .render_frame_retaining(&self.slots[index].state, frame, &retained)
             .map_err(|error| PreviewError::Render(error.to_string()))?;
         compositor
             .read_main_rgba8()
@@ -263,17 +298,21 @@ impl ScenePreviews {
         self.materialisations = self.materialisations.wrapping_add(1);
 
         let evicted = if self.slots.len() >= MAX_CACHED_SCENE_PREVIEWS {
-            self.slots.pop().is_some()
+            self.slots.pop()
         } else {
-            false
+            None
         };
-        // The evicted slot's GPU instances are keyed by its fresh module ids;
-        // resetting the private compositor releases them (and its textures)
-        // immediately instead of waiting for a later render to prune them.
-        if evicted {
-            if let Some(compositor) = &mut self.compositor {
-                compositor.reset();
-            }
+        // Dispose exactly the evicted cell's instances (they are keyed by its
+        // fresh materialisation ids). Resetting the private compositor here
+        // would invalidate every still-cached cell's shader/2D/Point10/ISF
+        // instances and make an alternating hover re-init modules on each poll
+        // (R-10b).
+        if let Some(evicted) = evicted
+            && let Some(compositor) = &mut self.compositor
+        {
+            let mut ids = RetainedInstances::new();
+            evicted.retain_instances(&mut ids);
+            compositor.dispose_instances(&ids);
         }
 
         self.slots.insert(
@@ -878,6 +917,82 @@ mod tests {
         previews.reset();
         assert_eq!(previews.cached_slots(), 0);
         assert!(previews.compositor.is_none());
+    }
+
+    #[test]
+    fn cache_keeps_the_other_cells_instances_while_a_hover_moves() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = Arc::new(ModuleRegistry::builtin());
+        let device = engine.device.clone();
+        let queue = engine.queue.clone();
+        let mut previews = ScenePreviews::new(&device, &queue, registry);
+
+        previews
+            .render(&ball_scene(), &[], "scene-a", 0, 16, 16, 0, &frame_info())
+            .expect("cell A renders");
+        let one_cell = previews.live_instances();
+        assert!(one_cell > 0, "cell A allocated a module instance");
+
+        // Rendering cell B must not dispose A's instance (the old prune keyed
+        // off the rendered state only, so it did exactly that).
+        previews
+            .render(&ball_scene(), &[], "scene-b", 0, 16, 16, 0, &frame_info())
+            .expect("cell B renders");
+        assert_eq!(
+            previews.live_instances(),
+            one_cell * 2,
+            "cell A's instance survives cell B's render"
+        );
+
+        // Hovering back is a cache hit that reuses A's instance.
+        previews
+            .render(&ball_scene(), &[], "scene-a", 0, 16, 16, 0, &frame_info())
+            .expect("cell A renders warm");
+        assert_eq!(previews.materialisations(), 2, "A is not re-materialised");
+        assert_eq!(
+            previews.live_instances(),
+            one_cell * 2,
+            "A reuses the instance it materialised"
+        );
+    }
+
+    #[test]
+    fn eviction_disposes_only_the_evicted_cells_instances() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = Arc::new(ModuleRegistry::builtin());
+        let device = engine.device.clone();
+        let queue = engine.queue.clone();
+        let mut previews = ScenePreviews::new(&device, &queue, registry);
+
+        for index in 0..(MAX_CACHED_SCENE_PREVIEWS + 1) {
+            let mut scene = ball_scene();
+            scene["id"] = json!(format!("scene-{index}"));
+            previews
+                .render(
+                    &scene,
+                    &[],
+                    &format!("scene-{index}"),
+                    0,
+                    16,
+                    16,
+                    0,
+                    &frame_info(),
+                )
+                .expect("preview renders");
+        }
+
+        assert_eq!(previews.cached_slots(), MAX_CACHED_SCENE_PREVIEWS);
+        // One instance per cached cell: eviction disposed the evicted cell's
+        // instance, not the whole private compositor's set.
+        assert_eq!(
+            previews.live_instances(),
+            MAX_CACHED_SCENE_PREVIEWS,
+            "evicting one slot must keep the other cached cells' instances"
+        );
     }
 
     #[test]

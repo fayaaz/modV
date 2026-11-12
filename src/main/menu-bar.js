@@ -8,6 +8,12 @@ import { projectNames, setCurrentProject, currentProject } from "./projects";
 
 const isMac = process.platform === "darwin";
 
+// MODV_ENGINE=1 runs the Rust engine. Its command surface does not implement
+// Output Windows, MIDI or OSC yet (review R-23), so the menu must not pretend
+// that it does. The renderer double-checks `engineMode` before dispatching.
+const engineMode = process.env.MODV_ENGINE === "1";
+const ENGINE_UNSUPPORTED_TITLE = "Not available with the Rust engine yet";
+
 let lastFileSavedPath = null;
 
 async function save(filePath) {
@@ -199,7 +205,11 @@ export function generateMenuTemplate() {
       label: "View",
       submenu: [
         {
-          label: "New Output Window",
+          label: engineMode
+            ? `New Output Window (${ENGINE_UNSUPPORTED_TITLE})`
+            : "New Output Window",
+          enabled: !engineMode,
+          toolTip: engineMode ? ENGINE_UNSUPPORTED_TITLE : undefined,
           click: () => {
             windows["mainWindow"].webContents.send("create-output-window");
           },

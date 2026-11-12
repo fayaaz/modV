@@ -726,6 +726,24 @@ impl Store {
         let shader = effect.is_some() && has_old_groups;
         let fade = transition_name == FADE_TRANSITION && has_old_groups;
         if fade || shader {
+            // The outgoing Groups stay in the layer stack for the crossfade.
+            // They are inserted *before* the created Groups, so after
+            // `emit_group_order`'s stable row sort each row draws its outgoing
+            // Group first and its incoming Group on top of it — the same shape
+            // as the JS `orderRowGroups` order (outgoing below, incoming above
+            // within a row). R-29: the outgoing Scene used to stay on top
+            // because the created Groups were inserted first.
+            let anchor = created_alphas
+                .first()
+                .map(|(group_id, _)| group_id.as_str())
+                .and_then(|group_id| {
+                    self.state
+                        .groups
+                        .iter()
+                        .position(|group| group.id == group_id)
+                })
+                .unwrap_or(self.state.groups.len());
+            let mut insert_at = anchor;
             let mut from = Vec::new();
             for mut group in old_groups {
                 // The ghost reuses the outgoing Modules but not the Group
@@ -737,7 +755,8 @@ impl Store {
                     set_group_input_id(&mut group, *key, None);
                 }
                 from.push((group.id.clone(), group.alpha));
-                self.state.groups.push(group);
+                self.state.groups.insert(insert_at, group);
+                insert_at += 1;
             }
             if !shader {
                 for (group_id, _) in &created_alphas {
@@ -947,8 +966,8 @@ impl Store {
         self.restore_scene_inputs(&scene, &input_map);
 
         // `groups/orderByIds` (`scenes.js:2515-2520`): the mirror's layer
-        // stack follows the live row order, with a fading ghost after its
-        // incoming Group.
+        // stack follows the live row order, with the fading ghost before its
+        // incoming Group so the incoming Group draws on top.
         self.emit_group_order();
 
         self.deltas.push(
@@ -1259,6 +1278,14 @@ impl Store {
             .ok_or_else(|| invalid(action, "missing string \"sceneId\""))?
             .to_string();
 
+        // Finish in-flight transitions before deleting their Groups
+        // (`scenes.js:2818-2819`): a row crossfade's ghost and a whole-scene
+        // transition's outgoing Scene are stamped with this `sceneId`, so
+        // removing them first would leave `row_transitions`/`transition`
+        // pointing at dead ids that `scenes/tick` keeps writing to (R-13).
+        self.complete_all_row_transitions();
+        self.complete_whole_scene_transition();
+
         let group_ids: Vec<String> = self
             .state
             .groups
@@ -1438,9 +1465,13 @@ impl Store {
         ordered.sort_by(|a, b| {
             let row_a = a.scene_row.unwrap_or(usize::MAX);
             let row_b = b.scene_row.unwrap_or(usize::MAX);
+            // Within a row the outgoing (ghost) half draws first, so the
+            // incoming Group renders on top (`orderRowGroups` in
+            // `scenes.js:1300-1316` sorts `transitionGhost` before everything
+            // else; the later entry wins in the compositor's draw order).
             let ghost_a = a.transition_ghost == Some(true);
             let ghost_b = b.transition_ghost == Some(true);
-            row_a.cmp(&row_b).then_with(|| ghost_a.cmp(&ghost_b))
+            row_a.cmp(&row_b).then_with(|| ghost_b.cmp(&ghost_a))
         });
 
         let gallery: Vec<Group> = self
@@ -1886,9 +1917,12 @@ impl Store {
                 .push("inputs/ADD_INPUT_LINK", json!({ "inputLink": value }));
         }
 
-        // Keep the tween runtime in step with the document (collapses any
-        // stale entries and preserves descriptor order).
-        self.reload_tweens();
+        // No binding rebuild here: `register_tween` already upserted each of
+        // the document's tweens, and a reload would reset the playhead of every
+        // surviving tween to frame 0 on each Scene advance — including tweens
+        // on rows that stay (`scenes.js` never rebuilds them, R-8). Only ids
+        // that left the authoritative list are dropped.
+        self.prune_tweens();
     }
 
     /// Active rows implied by the live Group stamps for one Scene
@@ -3468,6 +3502,115 @@ mod tests {
             .values()
             .any(|link| link.source.as_deref() == Some("tween"));
         assert!(has_tween, "the automatic BPM tween link is created");
+    }
+
+    #[test]
+    fn re_applying_a_scene_keeps_tween_playheads_and_prunes_unknown_ids() {
+        let mut store = Store::new();
+        let definition = modv_engine::default_scenes::get_default_definition("Polygon Grid")
+            .expect("default definition");
+        let mut skipped = 0usize;
+        let document =
+            build_default_scene_document(&store.registry, definition, &json!({}), &mut skipped);
+
+        seed_scene(&mut store, document.clone());
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": document["id"] }))
+            .expect("first apply");
+
+        // The apply materialised the document's scenes' tweens in the runtime.
+        let tween_id = store
+            .state()
+            .tweens
+            .as_array()
+            .and_then(|tweens| tweens.first())
+            .and_then(|tween| tween.get("id"))
+            .and_then(Value::as_str)
+            .expect("the Scene carries a tween")
+            .to_string();
+        store
+            .tweens
+            .get_mut(&tween_id)
+            .expect("the tween is in the runtime")
+            .set_frame(4);
+
+        // A runtime tween that `state.tweens` no longer lists must be dropped.
+        store
+            .tweens
+            .upsert_json(
+                &json!({"id": "stale", "data": [[0], [1]], "useBpm": false}),
+                store.fps,
+                store.bpm(),
+            )
+            .expect("stale tween registers");
+        assert!(store.tweens.contains("stale"));
+
+        // A second apply re-runs `restoreSceneInputs`: the surviving tween must
+        // keep its playhead (a binding rebuild reset every tween to frame 0,
+        // so multi-row Scene advances snapped linked props back to the start).
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": document["id"] }))
+            .expect("second apply");
+
+        assert!(
+            store.tweens.contains(&tween_id),
+            "the surviving tween is still in the runtime"
+        );
+        assert_eq!(
+            store.tweens.get(&tween_id).expect("tween").frame(),
+            4,
+            "a Scene apply must not reset a surviving tween's playhead"
+        );
+        assert!(
+            !store.tweens.contains("stale"),
+            "ids that left state.tweens are pruned"
+        );
+    }
+
+    #[test]
+    fn removing_a_scene_finishes_its_in_flight_row_transition_first() {
+        let mut store = Store::new();
+        seed_scene(&mut store, two_row_scene("scene-a"));
+        seed_scene(&mut store, two_row_scene("scene-b"));
+        store
+            .dispatch("scenes/applyScene", json!({ "sceneId": "scene-a" }))
+            .expect("apply a");
+        store
+            .dispatch("scenes/startPerformance", json!({}))
+            .expect("start performance");
+
+        store
+            .apply_scene_row_transition("scene-b", 0)
+            .expect("row transition runs")
+            .expect("scene-b has a row 0");
+        assert!(
+            store.row_transition(0).is_some(),
+            "the crossfade keeps scene-a's Group alive as a ghost"
+        );
+
+        store
+            .dispatch("scenes/removeScene", json!({ "sceneId": "scene-a" }))
+            .expect("remove");
+
+        // Deleting the Scene deleted the Groups its ghost referenced; the
+        // transition must be finished (not left pointing at dead ids), and no
+        // ghost may survive (`scenes.js:2818-2819`).
+        assert!(
+            store.row_transition(0).is_none(),
+            "no transition references the removed Scene any more"
+        );
+        assert!(
+            !store
+                .state()
+                .groups
+                .iter()
+                .any(|group| group.transition_ghost == Some(true)),
+            "no ghost Group survives the removal"
+        );
+        // A tick after the removal must run without touching dead ids.
+        store
+            .dispatch("scenes/tick", json!({ "delta": 16.0 }))
+            .expect("tick after removal");
     }
 
     // ————————————————— default seeding —————————————————

@@ -1,6 +1,7 @@
 import { contextBridge } from "electron";
 import { electronAPI } from "@electron-toolkit/preload";
 import * as remote from "@electron/remote";
+import { engineApiScope } from "./engine-api-scope";
 const { vibrate } = require("hapticjs");
 const { ipcRenderer } = require("electron");
 
@@ -8,6 +9,11 @@ const { ipcRenderer } = require("electron");
 // (docs/rust-hybrid.md, Protocol specification). Commit is fire-and-forget;
 // dispatch resolves with the action's return value; subscribe wires engine
 // deltas ({type, payload}, commitQueue-compatible) to the caller.
+//
+// R-25: only the main window gets this surface. Output windows inherit this
+// preload but run no script, the splash window has no preload and the color
+// picker uses `colorPicker.js`; every other path must not receive a mutating
+// engine API.
 const engineApi = {
   commit(type, payload) {
     ipcRenderer.send("engine/commit", { type, payload });
@@ -62,6 +68,13 @@ const engineApi = {
   getState() {
     return ipcRenderer.invoke("engine/get-state");
   },
+  // Late-joiner state sync: resolves with the same payload the `state/sync`
+  // event carries (preset document + `registered` + Scenes/performance). The
+  // renderer pulls it after subscribing because IPC events are not queued, so
+  // a sync emitted before the subscription would be lost.
+  getSync() {
+    return ipcRenderer.invoke("engine/get-sync");
+  },
   snapshot() {
     return ipcRenderer.invoke("engine/snapshot");
   },
@@ -69,6 +82,12 @@ const engineApi = {
     return ipcRenderer.sendSync("engine/enabled-sync");
   },
 };
+
+// `window.location.pathname` is `/index.html` in development and the packaged
+// file URL path in production. Any other window (output window, splash, color
+// picker, unknown page) gets `window.engine === undefined`.
+const engineSurface =
+  engineApiScope(window.location?.pathname) === "main" ? engineApi : undefined;
 
 // Custom APIs for renderer
 const api = {
@@ -83,7 +102,9 @@ if (process.contextIsolated) {
     contextBridge.exposeInMainWorld("electron", electronAPI);
     contextBridge.exposeInMainWorld("api", api);
     contextBridge.exposeInMainWorld("remote", remote);
-    contextBridge.exposeInMainWorld("engine", engineApi);
+    if (engineSurface) {
+      contextBridge.exposeInMainWorld("engine", engineSurface);
+    }
   } catch (error) {
     console.error(error);
   }
@@ -91,7 +112,7 @@ if (process.contextIsolated) {
   window.electron = electronAPI;
   window.remote = remote;
   window.api = api;
-  window.engine = engineApi;
+  window.engine = engineSurface;
 }
 
 ipcRenderer.on("port:colorPickerUI", (e) => {

@@ -23,9 +23,13 @@ import { EventEmitter } from "node:events";
 import { EngineProtocolClient } from "./engine-protocol";
 import { createLogger } from "./logger";
 import { attachEngineLogForwarder } from "./engine-log-forwarder";
+import {
+  RESTART_BUDGET,
+  RESTART_WINDOW_MS,
+  recordRestartAttempt,
+  resetRestartBudget,
+} from "./engine-restart-budget";
 
-const RESTART_BUDGET = 5;
-const RESTART_WINDOW_MS = 60_000;
 const RESTART_DELAY_MS = 500;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 const HEARTBEAT_CHECK_MS = 1_000;
@@ -154,6 +158,9 @@ class EngineSupervisor extends EventEmitter {
   start() {
     if (this._startPromise) return this._startPromise;
     this.stopRequested = false;
+    // A deliberate start is a new lifecycle: never inherit the crash budget
+    // from a previous run (review R-24).
+    this.restartTimestamps = resetRestartBudget();
     this._startPromise = this._spawn().finally(() => {
       this._startPromise = null;
     });
@@ -177,6 +184,9 @@ class EngineSupervisor extends EventEmitter {
   /** Graceful stop: engine/shutdown (≤ 1 s), then SIGTERM/SIGKILL. */
   async shutdown() {
     this.stopRequested = true;
+    // A clean stop clears the crash history: the next start() gets a fresh
+    // budget instead of inheriting the crashes of a previous session.
+    this.restartTimestamps = resetRestartBudget();
     this._stopWatchdog();
 
     if (this.client) {
@@ -259,9 +269,22 @@ class EngineSupervisor extends EventEmitter {
     attachEngineLogForwarder(child, this.log);
 
     child.on("error", (error) => {
+      // A spawn failure (ENOENT/EACCES/not-executable packaged binary) arrives
+      // here without an 'exit' event. Route it through the same decision as an
+      // exit so the restart budget handles it immediately instead of leaving
+      // the supervisor in "starting" until the connect retries run out
+      // (review R-24). Once the engine is running, an 'error' means a failed
+      // signal/stdio operation: wait for the real 'exit' so a still-alive
+      // process is not orphaned by a second spawn.
+      if (this.child !== child) return;
       this.log.error(`engine process error: ${error.message}`);
+      if (this.state !== "starting") return;
+      this._onExit(null, `spawn-error: ${error.code || error.message}`);
     });
     child.on("exit", (code, signal) => {
+      // A late exit from a child we already replaced must not reset the new
+      // child's `_exitHandled`/restart accounting.
+      if (this.child !== child) return;
       this._onExit(code, signal);
     });
 
@@ -277,7 +300,31 @@ class EngineSupervisor extends EventEmitter {
     if (!connected) {
       // Treat a missing socket as an engine failure and go through the
       // restart budget rather than blocking startup forever.
-      this._terminateChild();
+      //
+      // Stop the old engine first and wait (bounded) for it to actually exit:
+      // the next `_spawn` unlinks the socket path, and doing that while the
+      // dying engine still owns it leaves a window where neither process can
+      // be connected to (review R-24).
+      const oldChild = this.child;
+      this.log.warn("engine did not connect; terminating it before restarting");
+      this._terminateChild("SIGTERM", oldChild);
+
+      let exited = await this._awaitChildExit(oldChild, this.shutdownWaitMs);
+      if (!exited) {
+        this.log.warn(
+          `engine still running ${this.shutdownWaitMs} ms after SIGTERM; sending SIGKILL`,
+        );
+        this._terminateChild("SIGKILL", oldChild);
+        exited = await this._awaitChildExit(oldChild, SIGKILL_DELAY_MS);
+      }
+      if (!exited) {
+        // Give up waiting (the process is unkillable or a zombie): restart
+        // anyway, but make the overlap explicit in the log.
+        this.log.error(
+          "engine did not exit after SIGKILL; restarting anyway (the socket may be replaced)",
+        );
+      }
+
       this._onExit(null, "connect-timeout");
     }
   }
@@ -326,13 +373,14 @@ class EngineSupervisor extends EventEmitter {
   }
 
   _scheduleRestart(reason) {
-    const now = Date.now();
-    this.restartTimestamps = [
-      ...this.restartTimestamps.filter((t) => now - t < RESTART_WINDOW_MS),
-      now,
-    ];
+    const { timestamps, exhausted } = recordRestartAttempt(
+      this.restartTimestamps,
+      Date.now(),
+      { budget: this.restartBudget, windowMs: RESTART_WINDOW_MS },
+    );
+    this.restartTimestamps = timestamps;
 
-    if (this.restartTimestamps.length > this.restartBudget) {
+    if (exhausted) {
       this.log.error(
         `engine restart budget exhausted (${this.restartBudget} in ${RESTART_WINDOW_MS / 1000}s)`,
       );
@@ -384,14 +432,36 @@ class EngineSupervisor extends EventEmitter {
     this.child = null;
   }
 
-  _terminateChild(signal = "SIGTERM") {
-    if (this.child && this.child.exitCode === null) {
+  _terminateChild(signal = "SIGTERM", child = this.child) {
+    if (child && child.exitCode === null) {
       try {
-        this.child.kill(signal);
+        child.kill(signal);
       } catch (_) {
         // already gone
       }
     }
+  }
+
+  /**
+   * Wait (bounded) for a spawned child to actually exit.
+   *
+   * `exitCode` stays null until the 'exit' event fires; a process that ignores
+   * SIGTERM would otherwise let the next `_spawn` unlink the socket it still
+   * holds. Returns true when the child is gone, false after the timeout.
+   */
+  async _awaitChildExit(child, timeoutMs) {
+    const hasExited = () =>
+      !child || child.exitCode !== null || child.signalCode !== null;
+
+    if (hasExited()) return true;
+
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (Date.now() < deadline) {
+      await sleep(20);
+      if (hasExited()) return true;
+    }
+
+    return hasExited();
   }
 
   _kill(signal = "SIGTERM") {

@@ -723,6 +723,42 @@ pub struct Compositor {
     present_pipeline: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
 }
 
+/// Instance ids a frame's prune must keep alive although they are not in the
+/// rendered [`EngineState`].
+///
+/// A Scene hover preview renders one cached cell at a time through a private
+/// [`Compositor`]: the state it passes to [`Compositor::render_frame`] holds
+/// only the cell being rendered, so an unscoped prune would dispose the shader
+/// slots, 2D instances, Point10 scenes and ISF pipelines of every other cached
+/// cell each time the hover moves (R-10). The preview retains the ids of all
+/// its cached slots here and disposes exactly the evicted cell's ids itself
+/// ([`Compositor::dispose_instances`]).
+#[derive(Debug, Default)]
+pub struct RetainedInstances {
+    /// Group ids to keep (their textures/surfaces survive the prune).
+    groups: HashSet<String>,
+    /// Module ids to keep (shader slot / 2D / Point10 / ISF instance).
+    modules: HashSet<String>,
+}
+
+impl RetainedInstances {
+    /// An empty set: [`Compositor::render_frame`]'s default (prune everything
+    /// the state does not reference).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Keep the Group `id` alive across the next frame's prune.
+    pub fn retain_group(&mut self, id: impl Into<String>) {
+        self.groups.insert(id.into());
+    }
+
+    /// Keep the Module `id` alive across the next frame's prune.
+    pub fn retain_module(&mut self, id: impl Into<String>) {
+        self.modules.insert(id.into());
+    }
+}
+
 impl Compositor {
     /// Build the compositor against the engine's device and queue with the
     /// built-in shader/2D/Point10 modules only (no ISF corpus).
@@ -932,6 +968,21 @@ impl Compositor {
         state: &EngineState,
         frame: &FrameInfo,
     ) -> Result<(), CompositorError> {
+        self.render_frame_retaining(state, frame, &RetainedInstances::default())
+    }
+
+    /// Render one frame from `state`, keeping `retained`'s instances alive.
+    ///
+    /// Used by the Scene hover previews ([`crate::scene_preview`]): their
+    /// private compositor holds several cached cells' instances while only one
+    /// cell's state is rendered per frame, so the prune must not treat the
+    /// other cells' ids as stale (R-10).
+    pub fn render_frame_retaining(
+        &mut self,
+        state: &EngineState,
+        frame: &FrameInfo,
+        retained: &RetainedInstances,
+    ) -> Result<(), CompositorError> {
         if self.size.0 == 0 || self.size.1 == 0 {
             return Ok(());
         }
@@ -939,7 +990,7 @@ impl Compositor {
         // preview request is answered between frames, after this call).
         self.preview_frame = frame.clone();
         self.ensure_output_textures();
-        self.prune(state);
+        self.prune(state, retained);
 
         // Drop blend targets for rows that stopped fading.
         let live_rows: HashSet<usize> = frame.row_fades.iter().map(|fade| fade.row).collect();
@@ -2011,77 +2062,94 @@ impl Compositor {
     }
 
     /// Drop group textures and module slots for objects that left the state.
-    fn prune(&mut self, state: &EngineState) {
+    ///
+    /// `retained` lists ids a private preview compositor still caches even
+    /// though they are not in this frame's state (see [`RetainedInstances`]).
+    fn prune(&mut self, state: &EngineState, retained: &RetainedInstances) {
         let live_groups: HashSet<&str> =
             state.groups.iter().map(|group| group.id.as_str()).collect();
         let stale_groups: Vec<String> = self
             .group_targets
             .iter()
-            .filter(|id| !live_groups.contains(id.as_str()))
+            .filter(|id| {
+                !live_groups.contains(id.as_str()) && !retained.groups.contains(id.as_str())
+            })
             .cloned()
             .collect();
-        for id in stale_groups {
-            self.group_targets.remove(&id);
-            self.surfaces.remove(&group_texture_id(&id));
-        }
+        self.dispose_group_targets(stale_groups);
 
         let live_modules: HashSet<&str> = state.modules.keys().map(String::as_str).collect();
         let stale_modules: Vec<String> = self
             .slots
             .keys()
-            .filter(|id| !live_modules.contains(id.as_str()))
+            .chain(self.two_d.keys())
+            .chain(self.point10.keys())
+            .chain(self.isf.keys())
+            .filter(|id| {
+                !live_modules.contains(id.as_str()) && !retained.modules.contains(id.as_str())
+            })
             .cloned()
             .collect();
-        for id in stale_modules {
+        self.dispose_module_instances(stale_modules);
+
+        self.failed_modules.retain(|id| {
+            live_modules.contains(id.as_str()) || retained.modules.contains(id.as_str())
+        });
+        self.failed_two_d.retain(|id| {
+            live_modules.contains(id.as_str()) || retained.modules.contains(id.as_str())
+        });
+        self.failed_point10.retain(|id| {
+            live_modules.contains(id.as_str()) || retained.modules.contains(id.as_str())
+        });
+        self.failed_isf.retain(|id| {
+            live_modules.contains(id.as_str()) || retained.modules.contains(id.as_str())
+        });
+    }
+
+    /// Release exactly the group targets/textures named in `ids`.
+    fn dispose_group_targets(&mut self, ids: Vec<String>) {
+        for id in ids {
+            self.group_targets.remove(&id);
+            self.surfaces.remove(&group_texture_id(&id));
+        }
+    }
+
+    /// Release exactly the module instances named in `ids`, whichever renderer
+    /// kind owns them (shader slot, 2D, Point10, ISF).
+    fn dispose_module_instances(&mut self, ids: Vec<String>) {
+        for id in ids {
             if let Some(slot) = self.slots.remove(&id) {
                 self.shader.remove_slot(slot);
             }
-        }
-        self.failed_modules
-            .retain(|id| live_modules.contains(id.as_str()));
-
-        let stale_two_d: Vec<String> = self
-            .two_d
-            .keys()
-            .filter(|id| !live_modules.contains(id.as_str()))
-            .cloned()
-            .collect();
-        for id in stale_two_d {
             if let Some(mut instance) = self.two_d.remove(&id) {
                 instance.module.dispose();
             }
             self.surfaces.remove(&two_d_texture_id(&id));
-        }
-        self.failed_two_d
-            .retain(|id| live_modules.contains(id.as_str()));
-
-        let stale_point10: Vec<String> = self
-            .point10
-            .keys()
-            .filter(|id| !live_modules.contains(id.as_str()))
-            .cloned()
-            .collect();
-        for id in stale_point10 {
             if let Some(mut instance) = self.point10.remove(&id) {
                 instance.scene.dispose();
             }
             self.surfaces.remove(&point10_texture_id(&id));
-        }
-        self.failed_point10
-            .retain(|id| live_modules.contains(id.as_str()));
-
-        let stale_isf: Vec<String> = self
-            .isf
-            .keys()
-            .filter(|id| !live_modules.contains(id.as_str()))
-            .cloned()
-            .collect();
-        for id in stale_isf {
             self.isf.remove(&id);
             self.surfaces.remove(&isf_texture_id(&id));
         }
-        self.failed_isf
-            .retain(|id| live_modules.contains(id.as_str()));
+    }
+
+    /// Dispose the GPU instances owned by exactly `ids` (Scene preview LRU
+    /// eviction).
+    ///
+    /// Eviction used to reset the whole private compositor, which invalidated
+    /// the instances of every still-cached cell (R-10b). The preview keys
+    /// every materialisation with fresh ids, so the evicted cell's ids name
+    /// exactly its own instances.
+    pub(crate) fn dispose_instances(&mut self, ids: &RetainedInstances) {
+        self.dispose_group_targets(ids.groups.iter().cloned().collect());
+        self.dispose_module_instances(ids.modules.iter().cloned().collect());
+    }
+
+    /// Number of live module instances (any renderer kind) — cache diagnostics.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn live_module_instances(&self) -> usize {
+        self.slots.len() + self.two_d.len() + self.point10.len() + self.isf.len()
     }
 
     /// Set up (once) and return the shader pipeline slot for a module id.
@@ -2910,12 +2978,10 @@ pub(crate) fn isf_values(document: &IsfDocument, props: &Value) -> IsfValues {
                 }
             }
             "bool" | "event" => {
-                // Events have no trigger plumbing yet; a stored truthy value
-                // still maps to `true` (JS: `!!props[NAME]`).
-                values.insert(
-                    input.name.clone(),
-                    IsfValue::Bool(value.and_then(Value::as_bool).unwrap_or(false)),
-                );
+                // Events have no trigger plumbing yet; a stored value follows
+                // JavaScript truthiness (`!!props[NAME]`), so numeric `1` is
+                // true and `[]`/`{}` are truthy too.
+                values.insert(input.name.clone(), IsfValue::coerce_bool(value));
             }
             "point2D" => {
                 if let Some([x, y]) = json_vec2(value) {
@@ -3588,8 +3654,11 @@ mod tests {
             json!(-1),
         );
         follower.scene_row = Some(1);
-        state.groups.push(incoming);
+        // The store's render order puts a row's ghost before its incoming Group
+        // (`orderRowGroups`, `scenes.js:1300`), so the compositor test models the
+        // same layout.
         state.groups.push(ghost);
+        state.groups.push(incoming);
         state.groups.push(follower);
         state.modules.insert(
             "module-ghost".to_string(),

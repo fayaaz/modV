@@ -63,6 +63,10 @@ export default function windowHandler() {
 
   this._store.subscribe(async ({ type, payload }) => {
     if (type === "windows/ADD_WINDOW") {
+      // R-23: the Rust engine has no Output Windows; never open a bare window
+      // from a replayed/unsupported mutation.
+      if (that.engineMode) return;
+
       const { width, height, backgroundColor, title, id } = payload;
 
       const win = window.open(

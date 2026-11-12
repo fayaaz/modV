@@ -50,7 +50,10 @@
           </template>
         </CollapsibleRow>
 
-        <CollapsibleRow :disabled="source && source !== 'midi'">
+        <CollapsibleRow
+          :disabled="engineMode || (source && source !== 'midi')"
+          :hint="engineMode ? engineUnsupportedTitle : ''"
+        >
           <template #label>MIDI</template>
 
           <template #body>
@@ -70,7 +73,10 @@
           </template>
         </CollapsibleRow>
 
-        <CollapsibleRow :disabled="source && source !== 'osc'">
+        <CollapsibleRow
+          :disabled="engineMode || (source && source !== 'osc')"
+          :hint="engineMode ? engineUnsupportedTitle : ''"
+        >
           <template #label>OSC</template>
 
           <template #body>
@@ -102,6 +108,7 @@ import Tween from "./InputLinkComponents/Tween.vue";
 import Expression from "./InputLinkComponents/Expression.vue";
 import CollapsibleRow from "./CollapsibleRow.vue";
 import OSC from "./InputLinkComponents/OSC.vue";
+import { ENGINE_UNSUPPORTED_TITLE } from "../application/engine-unsupported";
 
 export default {
   components: {
@@ -123,6 +130,14 @@ export default {
   },
 
   computed: {
+    engineMode() {
+      return this.$modV?.engineMode === true;
+    },
+
+    engineUnsupportedTitle() {
+      return ENGINE_UNSUPPORTED_TITLE;
+    },
+
     inputConfig() {
       const { $modV } = this;
       return (

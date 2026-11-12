@@ -37,6 +37,11 @@ import use from "./use";
 import constants, { GROUP_ENABLED } from "./constants";
 import ModVWorker from "./worker/index.worker.js?worker";
 import EngineClient from "./engine-client";
+import { applyEngineSync } from "./engine-sync-replay";
+import {
+  ENGINE_UNSUPPORTED_BOOT_MESSAGE,
+  engineUnsupportedMessage,
+} from "./engine-unsupported";
 import { createPresetData } from "./worker/preset-serializer";
 
 const logger = createLogger("renderer:app");
@@ -136,6 +141,10 @@ class ModV {
       : new PromiseWorker(this.$worker);
 
     if (this.engineMode) {
+      // R-23: the engine's catch-all accepts these commands and does nothing,
+      // so say it once, clearly, instead of letting the features vanish.
+      logger.warn(ENGINE_UNSUPPORTED_BOOT_MESSAGE);
+
       this.engineClient = new EngineClient();
       this.engineClient.bindMirror(store);
       this.engineClient.trackPreviewFrames();
@@ -284,73 +293,34 @@ class ModV {
   // Late-joiner sync: the engine seeds Scenes (and may apply documents)
   // before the renderer's socket client exists, so the delta stream alone
   // leaves the mirror stale. `state/sync` carries the snapshot; replay it
-  // into the mirror with the same mutations the deltas use.
+  // into the mirror with the same mutations the deltas use. The replay lives
+  // in `engine-sync-replay.js` so the unit tests can drive it directly; it is
+  // idempotent, so the accept event and the `engine/get-sync` pull can both
+  // land.
   _applyEngineSync(snapshot) {
-    if (!snapshot || typeof snapshot !== "object") {
+    try {
+      applyEngineSync(this._store, snapshot);
+    } catch (error) {
+      logger.warn("engine state sync failed", { message: error?.message });
+    }
+  }
+
+  // Pull the sync payload the engine emits on client accept (`engine/get-sync`,
+  // R-4). Electron does not queue IPC events, so a renderer that subscribes
+  // after the socket connected would miss `state/sync` entirely and its mirror
+  // would stay permanently stale. A failed pull only logs: deltas still apply.
+  async _pullEngineSync() {
+    const engine = this.engineClient?.engine;
+    if (typeof engine?.getSync !== "function") {
       return;
     }
 
-    const store = this._store;
-
     try {
-      if (Array.isArray(snapshot.groups)) {
-        store.commit("groups/REPLACE_GROUPS", { groups: snapshot.groups });
-      }
-
-      const active = store.state.modules.active || {};
-      for (const id of Object.keys(active)) {
-        store.commit("modules/REMOVE_ACTIVE_MODULE", { moduleId: id });
-      }
-      for (const module of Object.values(snapshot.modules || {})) {
-        store.commit("modules/ADD_ACTIVE_MODULE", { module });
-      }
-
-      // Engine mode has no worker to register module definitions, so the
-      // engine ships the registry (meta + prop descriptors) with the sync.
-      // The Gallery reads `state.modules.registered`.
-      if (snapshot.registered && typeof snapshot.registered === "object") {
-        for (const module of Object.values(snapshot.registered)) {
-          if (module && module.meta && module.meta.name) {
-            store.commit("modules/ADD_REGISTERED_MODULE", { module });
-          }
-        }
-      }
-
-      const inputState = snapshot.inputs || {};
-      for (const id of Object.keys(store.state.inputs.inputs || {})) {
-        store.commit("inputs/REMOVE_INPUT", { inputId: id });
-      }
-      for (const input of Object.values(inputState.inputs || {})) {
-        store.commit("inputs/ADD_INPUT", { input });
-      }
-      for (const id of Object.keys(store.state.inputs.inputLinks || {})) {
-        store.commit("inputs/REMOVE_INPUT_LINK", { inputId: id });
-      }
-      for (const link of Object.values(inputState.inputLinks || {})) {
-        store.commit("inputs/ADD_INPUT_LINK", { inputLink: link });
-      }
-
-      if (Array.isArray(snapshot.scenes)) {
-        store.commit("scenes/REPLACE_SCENES", snapshot.scenes);
-      }
-      if (snapshot.performance && typeof snapshot.performance === "object") {
-        store.commit("scenes/UPDATE_PERFORMANCE", snapshot.performance);
-      }
-      store.commit("scenes/SET_DEFAULTS_SEEDED", !!snapshot.defaultsSeeded);
-      if (typeof snapshot.defaultsVersion === "number") {
-        store.commit("scenes/SET_DEFAULTS_VERSION", snapshot.defaultsVersion);
-      }
-      if (Array.isArray(snapshot.seededDefaultScenes)) {
-        store.commit(
-          "scenes/SET_SEEDED_DEFAULT_SCENES",
-          snapshot.seededDefaultScenes,
-        );
-      }
-      store.commit("scenes/UPDATE_PERFORMANCE", {
-        currentSceneId: snapshot.appliedSceneId || null,
-      });
+      this._applyEngineSync(await engine.getSync());
     } catch (error) {
-      logger.warn("engine state sync failed", { message: error?.message });
+      logger.warn("engine state sync pull failed; deltas still apply", {
+        message: error?.message || String(error),
+      });
     }
   }
 
@@ -361,6 +331,14 @@ class ModV {
       return;
     }
     this._appReadySent = true;
+
+    // Engine mode: replay the late-joiner sync *before* the boot dispatches
+    // below. The payload then describes the state without this renderer's boot
+    // Group, and the `groups/createGroup` delta that follows cannot be
+    // overwritten by a stale replay.
+    if (this.engineMode) {
+      await this._pullEngineSync();
+    }
 
     // Make the default group
     try {
@@ -381,13 +359,18 @@ class ModV {
       console.error("Could not restore Scenes", error);
     }
 
-    try {
-      await this.store.dispatch("osc/createServer", {
-        host: "0.0.0.0",
-        port: 3333,
-      });
-    } catch (error) {
-      logger.error("osc/createServer failed", { message: error?.message });
+    // R-23: the engine has no OSC listener, so creating a server here would
+    // only produce an action its catch-all discards. The OSC controls are
+    // disabled in engine mode (see engine-unsupported.js).
+    if (!this.engineMode) {
+      try {
+        await this.store.dispatch("osc/createServer", {
+          host: "0.0.0.0",
+          port: 3333,
+        });
+      } catch (error) {
+        logger.error("osc/createServer failed", { message: error?.message });
+      }
     }
 
     this._signalReady();
@@ -542,7 +525,12 @@ class ModV {
       );
     }
 
-    this.store.dispatch("windows/createWindow");
+    // R-23: Output Windows are not implemented by the engine yet, so do not
+    // dispatch a command it will silently discard. The View menu item is
+    // disabled in engine mode too.
+    if (!this.engineMode) {
+      this.store.dispatch("windows/createWindow");
+    }
 
     ipcRenderer.on("media-manager-state", (event, message) => {
       this.store.dispatch("media/setState", message);
@@ -573,6 +561,11 @@ class ModV {
     });
 
     ipcRenderer.on("create-output-window", () => {
+      if (this.engineMode) {
+        logger.warn(engineUnsupportedMessage("Output Windows"));
+        return;
+      }
+
       this.store.dispatch("windows/createWindow");
     });
 

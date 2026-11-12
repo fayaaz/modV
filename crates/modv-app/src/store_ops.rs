@@ -1080,6 +1080,11 @@ impl Store {
     /// Ignored while the engine owns capture ([`Store::set_engine_audio`] is
     /// then the tempo source), preferring a silent no-op over an ever-changing
     /// tempo that would rebuild every BPM tween each frame.
+    ///
+    /// A non-positive tempo is a no-op like any other invalid parameter: a BPM
+    /// tween's duration is `(3600 / bpm) * division`, so `0` would be `Inf`
+    /// and corrupt every descriptor in `state.tweens` (R-5). The tween clock
+    /// keeps its 120 BPM fallback instead (`effective_duration`).
     fn set_bpm(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
         if self.reject_renderer_audio_write("beats/SET_BPM") {
             return Ok(Value::Null);
@@ -1088,7 +1093,7 @@ impl Store {
         let bpm = params
             .get("bpm")
             .and_then(Value::as_f64)
-            .filter(|bpm| bpm.is_finite() && *bpm >= 0.0);
+            .filter(|bpm| bpm.is_finite() && *bpm > 0.0);
         if let Some(bpm) = bpm {
             self.store_bpm(bpm);
         }
@@ -1125,11 +1130,12 @@ impl Store {
     /// Store a tempo, rebuilding BPM tween durations and echoing one delta
     /// (only when it actually moved). Returns whether the tempo changed.
     ///
-    /// Non-finite/negative values are rejected, so an analyser without a
-    /// confident estimate can pass `None`/garbage without corrupting the
-    /// tween clock.
+    /// Non-finite/non-positive values are rejected, so an analyser without a
+    /// confident estimate can pass `None`/garbage (or the BeatDetektor's `0`)
+    /// without corrupting the tween clock: `3600 / 0` is `Inf`, which no
+    /// descriptor can serialise (R-5).
     fn store_bpm(&mut self, bpm: f64) -> bool {
-        if !bpm.is_finite() || bpm < 0.0 || (self.beats.bpm - bpm).abs() <= f64::EPSILON {
+        if !bpm.is_finite() || bpm <= 0.0 || (self.beats.bpm - bpm).abs() <= f64::EPSILON {
             return false;
         }
 
@@ -1479,7 +1485,10 @@ impl Store {
     /// `fps/SET_FPS`: the tween frame rate (`store.state.fps.fps`).
     ///
     /// Rebuilds every tween so the recorded frame count matches the new rate,
-    /// preserving each tween's position fraction (`buildFrames`' `seek`).
+    /// preserving each tween's position fraction (`buildFrames`' `seek`). The
+    /// current BPM is passed through unchanged: `effective_duration` applies
+    /// the JS `store.state.beats.bpm || 120` fallback when no tempo is known,
+    /// so a `max(1.0)` here would rebuild a division-32 tween to ~57 s (R-6).
     fn set_fps(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
         let Some(fps) = params
             .get("fps")
@@ -1492,7 +1501,7 @@ impl Store {
             return Ok(Value::Null);
         }
         self.fps = fps;
-        let bpm = self.bpm().max(1.0);
+        let bpm = self.bpm();
         for (_, tween) in self.tweens.iter_mut() {
             tween.rebuild(fps, bpm);
         }
@@ -1596,20 +1605,57 @@ impl Store {
     }
 
     /// Reload the runtime from `state.tweens` (preset/scene replacement).
+    ///
+    /// Decoded **per entry**: the tween crate's `replace_from_json` fails
+    /// wholesale on one bad descriptor, which used to empty the entire runtime
+    /// while the offender stayed in `state.tweens` (R-9). A descriptor that
+    /// does not decode keeps its previous runtime, if it had one, so the other
+    /// tweens (and the bad one's playhead) survive; the failure is warned once.
     pub(crate) fn reload_tweens(&mut self) {
-        match modv_engine::tweens::TweenSet::load_from_json(
-            &self.state.tweens,
-            self.fps,
-            self.bpm(),
-        ) {
-            Ok(tweens) => self.tweens = tweens,
-            Err(error) => {
-                self.warn_once(
-                    "tween:load".to_string(),
-                    &format!("engine: WARN could not load tweens: {error}"),
-                );
-                self.tweens = modv_engine::tweens::TweenSet::new();
+        let entries = tween_state_entries(&self.state.tweens);
+        let previous = std::mem::take(&mut self.tweens);
+        let mut tweens = modv_engine::tweens::TweenSet::new();
+
+        for (key, entry) in entries {
+            let id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(key);
+            match tweens.upsert_json(&entry, self.fps, self.bpm()) {
+                Ok(_) => {}
+                Err(error) => {
+                    if let Some(runtime) = id.as_deref().and_then(|id| previous.get(id)).cloned() {
+                        tweens.upsert(runtime);
+                    }
+                    self.warn_once(
+                        "tween:load".to_string(),
+                        &format!("engine: WARN skipping an undecodable tween: {error}"),
+                    );
+                }
             }
+        }
+
+        self.tweens = tweens;
+    }
+
+    /// Drop runtime tweens `state.tweens` no longer lists (Scene apply).
+    ///
+    /// The per-entry [`Store::register_tween`] already upserts every tween a
+    /// Scene document carries, so a binding rebuild after a Scene apply would
+    /// only reset the playheads of the tweens that did not change — the JS
+    /// keeps those running (`scenes.js` never rebuilds them). Ids that left the
+    /// authoritative list are removed here instead (R-8).
+    pub(crate) fn prune_tweens(&mut self) {
+        let live = tween_state_ids(&self.state.tweens);
+        let stale: Vec<String> = self
+            .tweens
+            .ids()
+            .filter(|id| !live.contains(*id))
+            .map(str::to_string)
+            .collect();
+        for id in stale {
+            self.tweens.remove(&id);
         }
     }
 
@@ -1624,8 +1670,47 @@ impl Store {
             }
         }
         if changed {
-            self.state.tweens = self.tweens.to_json();
+            self.write_tween_state();
         }
+    }
+
+    /// Serialise the runtime's descriptors back into `state.tweens`.
+    ///
+    /// Per entry: a descriptor with a non-finite number (a duration computed
+    /// from a corrupt tempo) is skipped with one warning instead of being
+    /// written as `null` — `serde_json` turns a non-finite `f64` into `null`,
+    /// and that entry then fails to decode on the next reload, wiping the
+    /// whole runtime (R-5/R-9). The runtime keeps the descriptor, so the tween
+    /// still drives its linked props for this session.
+    fn write_tween_state(&mut self) {
+        let mut entries = Vec::with_capacity(self.tweens.len());
+        let mut failure: Option<(String, String)> = None;
+        for (id, tween) in self.tweens.iter() {
+            let descriptor = tween.descriptor();
+            let finite = descriptor.duration.is_finite()
+                && descriptor.bpm_division.is_finite()
+                && descriptor.steps.is_finite();
+            let serialized = if finite {
+                serde_json::to_value(descriptor).map_err(|error| error.to_string())
+            } else {
+                Err("a descriptor number is not finite".to_string())
+            };
+            match serialized {
+                Ok(value) => entries.push(value),
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some((
+                            format!("tween:serialize:{id}"),
+                            format!("engine: WARN skipping tween '{id}': {error}"),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((key, message)) = failure {
+            self.warn_once(key, &message);
+        }
+        self.state.tweens = Value::Array(entries);
     }
 
     /// Evaluate every Input Link against the current audio frame and apply the
@@ -1959,6 +2044,14 @@ impl Store {
     /// mirror after its state has been replaced would resurrect stale objects.
     /// There is no "replace everything" delta in the M2 protocol; the UI
     /// re-reads `state/snapshot` after a restore (documented gap).
+    ///
+    /// The performance runtime is reset with the Groups it pointed at: a
+    /// restore drops the live Groups/Modules a Scene or crossfade was using, so
+    /// row runtimes, row transitions, the whole-scene transition and the
+    /// applied-Scene stamp would all reference dead ids. They are cleared
+    /// outright (a crossfade cannot be completed — its Groups are already gone)
+    /// and the rows implied by the restored Groups are re-published, so the
+    /// mirror does not keep drawing fades for objects that no longer exist.
     pub fn restore(&mut self, preset: &Value) -> Result<(), StoreError> {
         load_preset_into_state(&mut self.state, preset)?;
         self.deltas.drain();
@@ -1967,6 +2060,30 @@ impl Store {
         self.link_deltas.clear();
         // A capture request belongs to Groups the restore just replaced.
         self.pending_transition_capture = None;
+
+        // Performance bookkeeping (R-29): drop the runtimes/crossfades rather
+        // than finalise them, and tell the mirror so it clears its row-progress
+        // meters and its transitioning flag.
+        let had_row_progress = !self.performance.row_transitions.is_empty();
+        let had_transition = self.performance.transition.is_some();
+        self.performance.rows.clear();
+        self.performance.row_transitions.clear();
+        self.performance.transition = None;
+        self.performance.progress_emit_elapsed = 0.0;
+        self.applied_scene_id = None;
+        if had_row_progress {
+            self.deltas.push("scenes/CLEAR_ALL_ROW_PROGRESS", json!({}));
+        }
+        if had_transition {
+            self.deltas.push("scenes/SET_TRANSITIONING", json!(false));
+        }
+
+        // Re-emit the active rows from the post-restore Groups: the preset may
+        // still carry `sceneId`/`sceneRow` stamps, and whatever it does not
+        // carry must not leave the mirror pointing at the deleted ids.
+        self.deltas
+            .push("scenes/SET_ACTIVE_ROWS", self.live_scene_rows());
+
         self.reload_tweens();
         Ok(())
     }
@@ -2022,6 +2139,39 @@ fn push_tween_json(tweens: &mut Value, tween: Value) {
             *tweens = Value::Array(vec![tween]);
         }
     }
+}
+
+/// Split `state.tweens` into `(fallback id, descriptor)` pairs.
+///
+/// Accepts the same shapes the tween crate does (an array of descriptors, the
+/// live id-keyed map, or the `{ tweens: ... }` worker root); the fallback id is
+/// the map key, used when an entry carries no `id` of its own.
+fn tween_state_entries(value: &Value) -> Vec<(Option<String>, Value)> {
+    match value {
+        Value::Array(entries) => entries.iter().map(|entry| (None, entry.clone())).collect(),
+        Value::Object(map) => match map.get("tweens") {
+            Some(inner) => tween_state_entries(inner),
+            None => map
+                .iter()
+                .map(|(key, entry)| (Some(key.clone()), entry.clone()))
+                .collect(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Every tween id `state.tweens` lists, in any of its accepted shapes.
+fn tween_state_ids(value: &Value) -> HashSet<String> {
+    tween_state_entries(value)
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(key)
+        })
+        .collect()
 }
 
 /// `data: [[...]]` JSON → the descriptor's rows.
@@ -3150,6 +3300,128 @@ mod tests {
     }
 
     #[test]
+    fn set_bpm_rejects_non_positive_tempos_and_leaves_the_tweens_alone() {
+        let mut store = Store::new();
+        store.state.tweens = json!([modv_engine::scene_link_defaults::default_link_tween(
+            "t1", None
+        )]);
+        store.reload_tweens();
+        let descriptors = store.state.tweens.clone();
+        let frames = store.tweens.get("t1").expect("tween").frames().len();
+
+        for bpm in [json!(0), json!(-120), json!(-0.0)] {
+            store
+                .dispatch("beats/SET_BPM", json!({ "bpm": bpm }))
+                .expect("invalid tempo is a no-op");
+        }
+
+        assert_eq!(store.bpm(), 0.0, "the engine keeps its 120 BPM fallback");
+        assert_eq!(
+            store.state.tweens, descriptors,
+            "no descriptor may be rewritten (or collapsed to {{}}) by a 0 BPM"
+        );
+        assert_eq!(
+            store.tweens.get("t1").expect("tween").frames().len(),
+            frames,
+            "the recorded frames stay as they were"
+        );
+        // A real tempo still applies.
+        store
+            .dispatch("beats/SET_BPM", json!({ "bpm": 60 }))
+            .expect("a positive tempo applies");
+        assert_eq!(store.bpm(), 60.0);
+        assert_eq!(store.state().tweens[0]["duration"], json!(3840));
+    }
+
+    #[test]
+    fn fps_rebuild_uses_the_120_bpm_fallback_when_no_tempo_is_known() {
+        let mut store = Store::new();
+        store.state.tweens = json!([modv_engine::scene_link_defaults::default_link_tween(
+            "t1", None
+        )]);
+
+        // Reference: a 30 fps rebuild at the JS fallback tempo.
+        store.beats.bpm = 120.0;
+        store.fps = 30.0;
+        store.reload_tweens();
+        let expected = store.tweens.get("t1").expect("tween").frames().len();
+
+        // No confident tempo yet (bpm 0): SET_FPS must fall back to 120 BPM
+        // instead of rebuilding at 1 BPM (`max(1.0)` -> ~57 s, ~3456 frames).
+        store.beats.bpm = 0.0;
+        store.fps = 60.0;
+        store.reload_tweens();
+        store
+            .dispatch("fps/SET_FPS", json!({ "fps": 30 }))
+            .expect("set fps");
+
+        assert_eq!(
+            store.tweens.get("t1").expect("tween").frames().len(),
+            expected,
+            "a bpm-less rebuild must match the 120 BPM fallback"
+        );
+        assert!(
+            expected < 100,
+            "the bpm-less rebuild is the ~480 ms fallback, not a 57 s one ({expected} frames)"
+        );
+    }
+
+    #[test]
+    fn reload_tweens_skips_one_bad_descriptor_and_keeps_the_rest() {
+        let mut store = Store::new();
+        let good = modv_engine::scene_link_defaults::default_link_tween("t1", None);
+        store.state.tweens = json!([good.clone(), { "id": "bad", "data": "not rows" }]);
+        store.reload_tweens();
+
+        assert!(
+            store.tweens.contains("t1"),
+            "the decodable descriptor survives one bad sibling"
+        );
+        assert!(!store.tweens.contains("bad"));
+        assert_eq!(
+            store.state.tweens.as_array().map(Vec::len),
+            Some(2),
+            "the document itself is not rewritten by a load"
+        );
+
+        // The bad entry keeps a previous runtime (and its playhead) rather
+        // than being dropped when it is known.
+        store.state.tweens = json!([good]);
+        store.reload_tweens();
+        store.tweens.get_mut("t1").expect("tween").set_frame(3);
+        store.state.tweens = json!([good, { "id": "t1", "data": 7 }]);
+        store.reload_tweens();
+        assert_eq!(
+            store.tweens.get("t1").expect("tween").frame(),
+            3,
+            "an undecodable replacement keeps the previous runtime"
+        );
+    }
+
+    #[test]
+    fn tween_state_writes_skip_an_unserialisable_entry_without_losing_the_others() {
+        let mut store = Store::new();
+        let first = modv_engine::scene_link_defaults::default_link_tween("t1", None);
+        let second = modv_engine::scene_link_defaults::default_link_tween("t2", None);
+        store.state.tweens = json!([first, second]);
+        store.reload_tweens();
+
+        // A non-finite duration cannot be serialised (serde_json refuses it);
+        // that entry must be skipped, not collapse `state.tweens` to `{}`.
+        store
+            .tweens
+            .get_mut("t2")
+            .expect("tween")
+            .descriptor_mut()
+            .duration = f64::INFINITY;
+        store.write_tween_state();
+
+        let entries = store.state.tweens.as_array().expect("still an array");
+        assert_eq!(entries.len(), 1, "only the offender is skipped");
+        assert_eq!(entries[0]["id"], json!("t1"));
+    }
+
+    #[test]
     fn bpm_and_fps_changes_rebuild_tween_frames() {
         let mut store = Store::new();
         store.state.tweens = json!([modv_engine::scene_link_defaults::default_link_tween(
@@ -4153,7 +4425,12 @@ mod tests {
             .expect("restore loads");
         assert_eq!(store.state().groups.len(), 1);
         assert_eq!(store.state().groups[0].id, "new");
-        assert_eq!(store.pending_delta_count(), 0);
+        // Every pre-restore mutation is dropped (they reference deleted
+        // objects); the only queued delta is the post-restore row re-publish.
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1, "{deltas:?}");
+        assert_eq!(deltas[0].r#type, "scenes/SET_ACTIVE_ROWS");
+        assert_eq!(deltas[0].payload, json!({}), "no Scene-stamped Group");
     }
 
     #[test]

@@ -509,6 +509,12 @@ impl EngineSupervisor {
                 Response::ok(request.id, snapshot)
             }
 
+            // The `state/sync` event a client receives on accept is not queued
+            // by Electron's IPC, so a renderer that subscribes late loses it
+            // and its mirror stays stale (R-4). This is the idempotent pull:
+            // the same payload the accept path sends, replayable at any time.
+            "engine/get-sync" => Response::ok(request.id, store.sync_state()),
+
             // `state/commit` and `state/dispatch` are the same path in M2: the
             // renderer sends both over the same channels and there is no
             // action layer to distinguish them yet.
@@ -840,6 +846,63 @@ mod tests {
         assert_eq!(result["framesPresented"], json!(3));
         assert_eq!(result["version"], json!(1));
         assert_eq!(result["groups"][0]["id"], json!("g1"));
+    }
+
+    #[test]
+    fn get_sync_returns_the_mirror_relevant_state_idempotently() {
+        let (socket_path, state_path) = temp_paths("get-sync");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        store
+            .dispatch("groups/createGroup", json!({"id": "g1", "name": "Effects"}))
+            .expect("createGroup dispatches");
+        store.drain_deltas();
+
+        let mut stream = connect(&socket_path);
+        let (first, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            61,
+            "engine/get-sync",
+            Value::Null,
+        );
+        assert_eq!(first.id, 61);
+        assert!(first.ok);
+        let sync = first.result.expect("sync payload present");
+
+        // The mirror rebuilds `registered`/`scenes` from this payload and
+        // replays groups/modules/inputs; a missing key silently blanks a
+        // surface (R-4).
+        assert!(sync.get("groups").is_some_and(Value::is_array));
+        assert!(sync.get("modules").is_some_and(Value::is_object));
+        assert!(sync.get("registered").is_some_and(Value::is_object));
+        assert!(sync.get("scenes").is_some_and(Value::is_array));
+        assert!(sync.get("inputs").is_some_and(Value::is_object));
+        assert!(sync.get("tweens").is_some());
+        assert!(sync.get("expressions").is_some());
+        assert_eq!(sync["groups"][0]["id"], json!("g1"));
+        assert!(
+            sync["registered"]
+                .as_object()
+                .is_some_and(|registered| !registered.is_empty()),
+            "the registered module map ships with every sync"
+        );
+
+        // The pull is idempotent: a renderer that already replayed the accept
+        // event can call it again without changing the payload.
+        let (second, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            62,
+            "engine/get-sync",
+            Value::Null,
+        );
+        assert!(second.ok);
+        let again = second.result.expect("second sync payload present");
+        assert_eq!(again, sync);
     }
 
     #[test]
