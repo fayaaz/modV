@@ -31,7 +31,20 @@
 //!   the deviation notes on [`dispatch_packet`].
 //! * Bundles are dispatched immediately (the JS `node-osc` server also emits
 //!   their contents); a bundle timetag in the future is **not** scheduled.
+//!   Nesting is walked at most [`MAX_BUNDLE_DEPTH`] levels deep.
+//!
+//! # Network bounds (R-18)
+//!
+//! The server binds `0.0.0.0:3333` like `node-osc` and has no authentication,
+//! so every write is treated as hostile input: array indexes are capped at
+//! [`MAX_ARRAY_INDEX`] (larger indexes become object keys), a message stores at
+//! most [`MAX_MESSAGE_ARGUMENTS`] arguments, bundles nest at most
+//! [`MAX_BUNDLE_DEPTH`] deep, and [`OscStore`] caps the store's distinct
+//! addresses ([`MAX_STORE_ADDRESSES`]) and materialised nodes
+//! ([`MAX_STORE_NODES`]). `node-osc`/lodash has none of these bounds; they are
+//! deliberate hardening deviations.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -60,8 +73,35 @@ const MAX_DATAGRAM: usize = 65_535;
 /// JSON has no holes, so materialising index `n` costs `n` `null`s. OSC arrives
 /// from the network, so a hostile address such as `/layers/1000000000` must not
 /// be able to allocate gigabytes. Indexes above this bound degrade to object
-/// keys, which is bounded and still JSON-legal.
-pub const MAX_ARRAY_INDEX: usize = 1 << 20;
+/// keys, which is bounded and still JSON-legal. The bound is 64k (R-18): a
+/// single datagram may materialise at most a 65 537-entry array (~1.5 MB of
+/// `serde_json` slots) instead of the ~25 MB a 1M index used to cost.
+pub const MAX_ARRAY_INDEX: usize = 1 << 16;
+
+/// Largest argument list stored for one address.
+///
+/// A datagram can carry ~16k OSC floats; storing them all as one array under a
+/// single key is unbounded growth driven by the network. Extra arguments are
+/// dropped (the first [`MAX_MESSAGE_ARGUMENTS`] win), matching the bounded
+/// treatment of array indexes above.
+pub const MAX_MESSAGE_ARGUMENTS: usize = 64;
+
+/// Deepest bundle nesting [`dispatch_packet`] walks.
+///
+/// `rosc` decodes nested bundles recursively, so the datagram itself only
+/// bounds the depth; a bundle nested deeper than this is dropped instead of
+/// recursing further (R-18).
+pub const MAX_BUNDLE_DEPTH: usize = 8;
+
+/// Distinct addresses an [`OscStore`] keeps by default.
+pub const MAX_STORE_ADDRESSES: usize = 4_096;
+
+/// Nodes an [`OscStore`] materialises before it refuses new writes.
+///
+/// The engine's `osc.data` is a lodash path store written straight from the
+/// network; without a budget a flood of distinct addresses grows it (and the
+/// persisted JSON) without bound.
+pub const MAX_STORE_NODES: usize = 32_768;
 
 /// A JSON-representable OSC argument ([`osc.js`'s default type mapping][osc]).
 ///
@@ -296,11 +336,20 @@ impl fmt::Debug for OscServer {
 
 /// Walks a decoded packet and calls `on_value` for each argument.
 ///
-/// Bundles are flattened recursively. Following the JS server (`node-osc`),
-/// a message with no arguments produces no callback at all; a message with
-/// several produces one callback per argument (the positional array shape is
-/// available through [`apply_osc_message`]).
+/// Bundles are flattened recursively, up to [`MAX_BUNDLE_DEPTH`] levels: a
+/// bundle nested deeper is dropped rather than walked (R-18). Following the JS
+/// server (`node-osc`), a message with no arguments produces no callback at
+/// all; a message with several produces one callback per argument (the
+/// positional array shape is available through [`apply_osc_message`]).
 pub fn dispatch_packet(packet: &rosc::OscPacket, on_value: &mut dyn FnMut(&str, OscValue)) {
+    dispatch_packet_at_depth(packet, 0, on_value);
+}
+
+fn dispatch_packet_at_depth(
+    packet: &rosc::OscPacket,
+    depth: usize,
+    on_value: &mut dyn FnMut(&str, OscValue),
+) {
     match packet {
         rosc::OscPacket::Message(message) => {
             for argument in &message.args {
@@ -310,8 +359,11 @@ pub fn dispatch_packet(packet: &rosc::OscPacket, on_value: &mut dyn FnMut(&str, 
             }
         }
         rosc::OscPacket::Bundle(bundle) => {
+            if depth >= MAX_BUNDLE_DEPTH {
+                return;
+            }
             for packet in &bundle.content {
-                dispatch_packet(packet, on_value);
+                dispatch_packet_at_depth(packet, depth + 1, on_value);
             }
         }
     }
@@ -337,7 +389,7 @@ pub fn osc_address_to_path(address: &str) -> Vec<String> {
 
 /// `lodash`'s `isIndex` (`/^(?:0|[1-9]\d*)$/` plus the `MAX_SAFE_INTEGER`
 /// bound): a canonical non-negative array index.
-fn array_index(segment: &str) -> Option<usize> {
+fn canonical_index(segment: &str) -> Option<u64> {
     if segment.is_empty() || (segment.len() > 1 && segment.starts_with('0')) {
         return None;
     }
@@ -346,7 +398,18 @@ fn array_index(segment: &str) -> Option<usize> {
     }
     let index = segment.parse::<u64>().ok()?;
     // `Number.MAX_SAFE_INTEGER` — lodash only treats safe integers as indexes.
-    if index > 9_007_199_254_740_991 || index > MAX_ARRAY_INDEX as u64 {
+    if index > 9_007_199_254_740_991 {
+        return None;
+    }
+    Some(index)
+}
+
+/// `canonical_index`, limited to `max_index` entries (R-18). Above the limit
+/// the segment is treated as an object key instead of materialising a
+/// gigantic sparse array.
+fn array_index(segment: &str, max_index: usize) -> Option<usize> {
+    let index = canonical_index(segment)?;
+    if index > max_index as u64 {
         return None;
     }
     usize::try_from(index).ok()
@@ -368,30 +431,45 @@ fn array_index(segment: &str) -> Option<usize> {
 /// * a non-numeric segment cannot be written onto a JSON array, so such a
 ///   write is dropped (in JS it would be a non-index property that
 ///   `JSON.stringify` also drops);
-/// * an index above [`MAX_ARRAY_INDEX`] is treated as an object key instead of
+/// * an index above `max_index` is treated as an object key instead of
 ///   materialising billions of `null`s.
-fn set_json_path(root: &mut serde_json::Value, path: &[String], value: serde_json::Value) {
+///
+/// Returns the number of nodes the write materialised (new object keys, array
+/// slots, containers and leaves), so [`OscStore`] can budget its size without
+/// re-walking the tree. A node is counted every time one is *created*;
+/// replacing an existing leaf creates none.
+fn set_json_path(
+    root: &mut serde_json::Value,
+    path: &[String],
+    value: serde_json::Value,
+    max_index: usize,
+) -> usize {
     use serde_json::{Map, Value};
 
     let Some((key, rest)) = path.split_first() else {
-        return;
+        return 0;
     };
+
+    let mut created = 0;
 
     // The store root is always an object, but a caller may hand us a scalar;
     // lodash would throw on `null`, we re-root it instead.
     if !root.is_object() && !root.is_array() {
-        *root = if array_index(key).is_some() {
+        *root = if array_index(key, max_index).is_some() {
             Value::Array(Vec::new())
         } else {
             Value::Object(Map::new())
         };
+        created += 1;
     }
 
     match root {
         Value::Object(map) => {
             if rest.is_empty() {
-                map.insert(key.clone(), value);
-                return;
+                if map.insert(key.clone(), value).is_none() {
+                    created += 1;
+                }
+                return created;
             }
 
             let branch_exists = map
@@ -400,7 +478,7 @@ fn set_json_path(root: &mut serde_json::Value, path: &[String], value: serde_jso
             if !branch_exists {
                 let next_is_index = rest
                     .first()
-                    .is_some_and(|segment| array_index(segment).is_some());
+                    .is_some_and(|segment| array_index(segment, max_index).is_some());
                 map.insert(
                     key.clone(),
                     if next_is_index {
@@ -409,63 +487,208 @@ fn set_json_path(root: &mut serde_json::Value, path: &[String], value: serde_jso
                         Value::Object(Map::new())
                     },
                 );
+                created += 1;
             }
 
             if let Some(branch) = map.get_mut(key) {
-                set_json_path(branch, rest, value);
+                created += set_json_path(branch, rest, value, max_index);
             }
         }
         Value::Array(items) => {
-            let Some(index) = array_index(key) else {
+            let Some(index) = array_index(key, max_index) else {
                 // JSON arrays cannot carry named properties; JS would create a
                 // non-index property that serialisation drops.
-                return;
+                return created;
             };
 
             while items.len() <= index {
                 items.push(Value::Null);
+                created += 1;
             }
 
             if rest.is_empty() {
                 items[index] = value;
-                return;
+                return created;
             }
 
             let slot = &mut items[index];
             if !slot.is_object() && !slot.is_array() {
                 let next_is_index = rest
                     .first()
-                    .is_some_and(|segment| array_index(segment).is_some());
+                    .is_some_and(|segment| array_index(segment, max_index).is_some());
                 *slot = if next_is_index {
                     Value::Array(Vec::new())
                 } else {
                     Value::Object(Map::new())
                 };
+                created += 1;
             }
 
-            set_json_path(slot, rest, value);
+            created += set_json_path(slot, rest, value, max_index);
         }
         // Unreachable: a scalar root was re-rooted above.
         _ => {}
     }
+
+    created
 }
 
 /// Applies one OSC value to `data` at `address`, the scalar form of the store's
 /// `osc/WRITE_DATA` (`store/modules/osc.js:69-71`).
 ///
 /// This sets the value itself, not the JS `msg.slice(1)` array; use
-/// [`apply_osc_message`] when parity with the legacy store matters.
+/// [`apply_osc_message`] when parity with the legacy store matters. Writes are
+/// bounded per call (array indexes above [`MAX_ARRAY_INDEX`] degrade to object
+/// keys); use [`OscStore`] when the whole store must be bounded.
 pub fn apply_osc_value(data: &mut serde_json::Value, address: &str, value: &OscValue) {
-    set_json_path(data, &osc_address_to_path(address), value.to_json());
+    set_json_path(
+        data,
+        &osc_address_to_path(address),
+        value.to_json(),
+        MAX_ARRAY_INDEX,
+    );
 }
 
 /// Applies a whole OSC message: `set(data, path, [arg0, arg1, …])`, exactly
 /// like `msg.slice(1)` (`store/modules/osc.js:69-71`).
 ///
-/// The JS always stores an array, even for a single argument.
+/// The JS always stores an array, even for a single argument. Only the first
+/// [`MAX_MESSAGE_ARGUMENTS`] arguments are stored (R-18).
 pub fn apply_osc_message(data: &mut serde_json::Value, address: &str, values: &[OscValue]) {
+    let values = &values[..values.len().min(MAX_MESSAGE_ARGUMENTS)];
     let array = serde_json::Value::Array(values.iter().map(OscValue::to_json).collect());
-    set_json_path(data, &osc_address_to_path(address), array);
+    set_json_path(data, &osc_address_to_path(address), array, MAX_ARRAY_INDEX);
+}
+
+/// Limits for [`OscStore`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OscStoreLimits {
+    /// Distinct addresses kept; new addresses beyond it are refused.
+    pub max_addresses: usize,
+    /// Nodes (object keys, array slots, containers, leaves) the store
+    /// materialises before it refuses new writes.
+    pub max_nodes: usize,
+}
+
+impl Default for OscStoreLimits {
+    fn default() -> Self {
+        Self {
+            max_addresses: MAX_STORE_ADDRESSES,
+            max_nodes: MAX_STORE_NODES,
+        }
+    }
+}
+
+/// Bounded `osc.data` store (R-18).
+///
+/// A thin wrapper over the same lodash-path writes as [`apply_osc_value`] /
+/// [`apply_osc_message`] that also tracks the store's size, because the data
+/// arrives from the network with no authentication:
+///
+/// * the first `max_addresses` distinct addresses are kept; a new address after
+///   that is dropped (updating a known address keeps working, which is what a
+///   steady-state controller does);
+/// * once `max_nodes` nodes have been materialised, new writes are refused.
+///   `node_count` is conservative — it counts every node ever created, so
+///   overwriting an existing leaf is free but replacing a subtree is charged
+///   twice — and a write may overshoot the budget by its own cost (at most
+///   [`MAX_ARRAY_INDEX`] + the path length) before subsequent writes are
+///   refused. Both bounds are documented worst cases, not amortised guesses.
+#[derive(Clone, Debug)]
+pub struct OscStore {
+    data: serde_json::Value,
+    addresses: BTreeMap<String, usize>,
+    nodes: usize,
+    limits: OscStoreLimits,
+}
+
+impl Default for OscStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OscStore {
+    /// An empty store with the default limits.
+    pub fn new() -> Self {
+        Self::with_limits(OscStoreLimits::default())
+    }
+
+    /// An empty store with explicit limits.
+    pub fn with_limits(limits: OscStoreLimits) -> Self {
+        Self {
+            data: serde_json::Value::Object(serde_json::Map::new()),
+            addresses: BTreeMap::new(),
+            nodes: 0,
+            limits,
+        }
+    }
+
+    /// The stored JSON (`osc.data`).
+    pub fn data(&self) -> &serde_json::Value {
+        &self.data
+    }
+
+    /// Consume the store and return the JSON.
+    pub fn into_value(self) -> serde_json::Value {
+        self.data
+    }
+
+    /// Distinct addresses written so far.
+    pub fn address_count(&self) -> usize {
+        self.addresses.len()
+    }
+
+    /// Number of writes accepted for `address` (0 when unknown).
+    pub fn address_writes(&self, address: &str) -> usize {
+        self.addresses.get(address).copied().unwrap_or(0)
+    }
+
+    /// Nodes materialised so far (conservative, never decreases).
+    pub fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    /// Apply one scalar value, mirroring [`apply_osc_value`].
+    ///
+    /// Returns `false` when the write was refused by a limit (or the address is
+    /// empty, which is a no-op in the JS store too).
+    pub fn apply_value(&mut self, address: &str, value: &OscValue) -> bool {
+        self.write(address, value.to_json())
+    }
+
+    /// Apply a whole message, mirroring [`apply_osc_message`].
+    ///
+    /// Returns `false` when the write was refused.
+    pub fn apply_message(&mut self, address: &str, values: &[OscValue]) -> bool {
+        let values = &values[..values.len().min(MAX_MESSAGE_ARGUMENTS)];
+        self.write(
+            address,
+            serde_json::Value::Array(values.iter().map(OscValue::to_json).collect()),
+        )
+    }
+
+    fn write(&mut self, address: &str, value: serde_json::Value) -> bool {
+        let path = osc_address_to_path(address);
+
+        if path.is_empty() {
+            return false;
+        }
+
+        if !self.addresses.contains_key(address)
+            && self.addresses.len() >= self.limits.max_addresses
+        {
+            return false;
+        }
+
+        if self.nodes >= self.limits.max_nodes {
+            return false;
+        }
+
+        self.nodes += set_json_path(&mut self.data, &path, value, MAX_ARRAY_INDEX);
+        *self.addresses.entry(address.to_string()).or_insert(0) += 1;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -562,6 +785,142 @@ mod tests {
         apply_osc_value(&mut data, "/layers/3", &OscValue::Int(9));
 
         assert_eq!(data, json!({ "layers": [1, null, null, 9] }));
+    }
+
+    // R-18: the cap is 64k entries; a single datagram must not be able to
+    // materialise a million-element array.
+    #[test]
+    fn array_growth_is_capped_at_64k_entries() {
+        assert_eq!(MAX_ARRAY_INDEX, 1 << 16);
+
+        let mut data = json!({});
+        let at_cap = format!("/layers/{MAX_ARRAY_INDEX}");
+        apply_osc_value(&mut data, &at_cap, &OscValue::Int(1));
+        assert_eq!(
+            data["layers"].as_array().map(Vec::len),
+            Some(MAX_ARRAY_INDEX + 1),
+            "the cap itself is still an index"
+        );
+
+        let above = format!("/other/{}", MAX_ARRAY_INDEX + 1);
+        apply_osc_value(&mut data, &above, &OscValue::Int(1));
+        assert_eq!(
+            data["other"],
+            json!({ (MAX_ARRAY_INDEX + 1).to_string(): 1 }),
+            "above the cap the index degrades to an object key"
+        );
+    }
+
+    // R-18: a message's argument array is capped, so one datagram cannot
+    // store an unbounded list under one key.
+    #[test]
+    fn message_argument_arrays_are_capped() {
+        let values: Vec<OscValue> = (0..(MAX_MESSAGE_ARGUMENTS + 32))
+            .map(|index| OscValue::Int(index as i32))
+            .collect();
+        let mut data = json!({});
+
+        apply_osc_message(&mut data, "/modv/bands", &values);
+
+        assert_eq!(
+            data["modv"]["bands"].as_array().map(Vec::len),
+            Some(MAX_MESSAGE_ARGUMENTS),
+            "arguments beyond the cap are dropped"
+        );
+        assert_eq!(data["modv"]["bands"][0], json!(0));
+        assert_eq!(
+            data["modv"]["bands"][MAX_MESSAGE_ARGUMENTS - 1],
+            json!((MAX_MESSAGE_ARGUMENTS - 1) as i32)
+        );
+    }
+
+    // R-18: bundle recursion is capped, so a small deeply-nested datagram
+    // cannot blow the stack or flood the callback.
+    #[test]
+    fn bundle_nesting_is_capped() {
+        use rosc::{OscBundle, OscMessage, OscPacket, OscTime, OscType};
+
+        fn nest(depth: usize) -> OscPacket {
+            let mut packet = OscPacket::Message(OscMessage {
+                addr: "/deep".into(),
+                args: vec![OscType::Int(1)],
+            });
+
+            for _ in 0..depth {
+                packet = OscPacket::Bundle(OscBundle {
+                    timetag: OscTime {
+                        seconds: 0,
+                        fractional: 0,
+                    },
+                    content: vec![packet],
+                });
+            }
+
+            packet
+        }
+
+        fn deliveries(depth: usize) -> usize {
+            let mut count = 0;
+            dispatch_packet(&nest(depth), &mut |_, _| count += 1);
+            count
+        }
+
+        assert_eq!(deliveries(1), 1);
+        assert_eq!(deliveries(MAX_BUNDLE_DEPTH), 1);
+        assert_eq!(
+            deliveries(MAX_BUNDLE_DEPTH + 1),
+            0,
+            "bundles nested deeper than the cap are dropped"
+        );
+    }
+
+    // R-18: the store caps its own size, so a flood of distinct addresses (or
+    // of growing arrays) cannot grow the persisted JSON without bound.
+    #[test]
+    fn osc_store_caps_its_node_and_address_counts() {
+        let mut store = OscStore::with_limits(OscStoreLimits {
+            max_addresses: 3,
+            max_nodes: 8,
+        });
+
+        assert!(store.apply_value("/a/x", &OscValue::Int(1)));
+        assert!(store.apply_value("/b/x", &OscValue::Int(2)));
+        assert!(store.apply_value("/c/x", &OscValue::Int(3)));
+        assert_eq!(store.address_count(), 3);
+
+        // A fourth distinct address is refused…
+        assert!(!store.apply_value("/d/x", &OscValue::Int(4)));
+        // …but updating a known address still works (steady-state OSC).
+        assert!(store.apply_value("/a/x", &OscValue::Int(5)));
+        assert_eq!(store.data()["a"]["x"], json!(5));
+        assert_eq!(store.address_writes("/a/x"), 2);
+
+        // Node growth stops at the budget: padding a large array is refused.
+        let mut store = OscStore::with_limits(OscStoreLimits {
+            max_addresses: MAX_STORE_ADDRESSES,
+            max_nodes: MAX_STORE_NODES,
+        });
+        let huge = format!("/layers/{}", MAX_ARRAY_INDEX);
+        assert!(store.apply_value(&huge, &OscValue::Int(1)));
+        assert!(store.node_count() > MAX_STORE_NODES);
+        assert!(
+            !store.apply_value("/modv/bass", &OscValue::Float(0.5)),
+            "once the node budget is spent new writes are refused"
+        );
+    }
+
+    #[test]
+    fn osc_store_tracks_created_nodes_conservatively() {
+        let mut store = OscStore::new();
+        assert_eq!(store.node_count(), 0);
+
+        assert!(store.apply_value("/a", &OscValue::Int(1)));
+        assert_eq!(store.node_count(), 1, "one new object key");
+
+        // Overwriting an existing leaf creates no new nodes.
+        let before = store.node_count();
+        assert!(store.apply_value("/a", &OscValue::Int(2)));
+        assert_eq!(store.node_count(), before);
     }
 
     // setup-midi-style addresses keep working without a leading slash.

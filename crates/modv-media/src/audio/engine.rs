@@ -70,8 +70,13 @@ impl AudioFeed {
         })
     }
 
-    /// Start capturing the system audio monitor and analyse at the PipeWire
-    /// stream rate (48 kHz).
+    /// Start capturing the system audio monitor and analyse at the
+    /// **negotiated** PipeWire stream rate.
+    ///
+    /// [`PipeWireMonitor::start`] returns only after the server negotiated a
+    /// decodable format, so the analyser is built for the rate the monitor
+    /// actually emits (44.1 kHz / S16 monitors are converted and analysed at
+    /// their own rate) instead of assuming the requested 48 kHz.
     #[cfg(target_os = "linux")]
     pub fn with_monitor(config: CaptureConfig) -> Result<Self, CaptureError> {
         let monitor = PipeWireMonitor::start(config)?;

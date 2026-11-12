@@ -182,6 +182,9 @@ impl ChunkQueue {
     }
 
     /// Record a stream error for [`AudioCapture::last_error`].
+    ///
+    /// The error is *latched*: [`Self::error`] keeps returning it until
+    /// [`Self::clear_error`] or [`Self::take_error`] is called.
     pub(crate) fn set_error(&self, message: String) {
         let (lock, _) = &*self.inner;
         let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -189,6 +192,32 @@ impl ChunkQueue {
         state.error = Some(message);
     }
 
+    /// The latched error, readable repeatedly without consuming it.
+    ///
+    /// Used by the PipeWire monitor, where an unsupported format must keep
+    /// being reported every frame instead of being logged once and forgotten
+    /// (the stream never recovers by itself; only a successful renegotiation
+    /// clears it through [`Self::clear_error`]).
+    pub(crate) fn error(&self) -> Option<String> {
+        let (lock, _) = &*self.inner;
+        let state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+
+        state.error.clone()
+    }
+
+    /// Drop the latched error (a successful format renegotiation).
+    pub(crate) fn clear_error(&self) {
+        let (lock, _) = &*self.inner;
+        let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+
+        state.error = None;
+    }
+
+    /// Take the error once.
+    ///
+    /// One-shot is what the cpal path wants: a device error is reported once
+    /// and the caller stops the capture. Use [`Self::error`] when the error
+    /// must stay visible until the condition is fixed.
     pub(crate) fn take_error(&self) -> Option<String> {
         let (lock, _) = &*self.inner;
         let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -451,19 +480,60 @@ impl SampleToF32 for cpal::U24 {
     }
 }
 
-/// Convert a raw cpal buffer to interleaved f32. Returns `None` for formats
-/// this port does not handle (24-bit packed samples); callers then skip the
-/// block rather than guessing at the layout.
-fn convert_buffer(data: &cpal::Data) -> Option<Vec<f32>> {
+/// Clear `out` and make room for `len` samples, reusing its allocation.
+///
+/// In the cpal capture path this is the only place that may grow a scratch
+/// buffer, and it only does so when the device hands over a bigger buffer than
+/// the previous one (R-22).
+fn prepare_scratch(out: &mut Vec<f32>, len: usize) {
+    out.clear();
+
+    if out.capacity() < len {
+        out.reserve(len);
+    }
+}
+
+/// Convert one raw sample slice into `out`, reusing its allocation.
+///
+/// **Real-time constraint:** this runs inside the cpal data callback, i.e. on
+/// the audio thread. `out` is owned by the stream closure and only reserved
+/// when the incoming device buffer is larger than its current capacity, so a
+/// steady-state callback performs no heap allocation (an allocation failure on
+/// the audio thread aborts the process, R-22). The capacity is deliberately
+/// kept across calls instead of shrinking, so the next buffer of the same size
+/// reuses it.
+fn convert_samples_into<T: SampleToF32 + Copy>(samples: &[T], out: &mut Vec<f32>) {
+    prepare_scratch(out, samples.len());
+
+    for sample in samples {
+        out.push(sample.to_f32());
+    }
+}
+
+/// Convert a raw cpal buffer to interleaved f32 in `out`.
+///
+/// Returns `false` for formats this port does not handle (24-bit packed
+/// samples); callers then skip the block rather than guessing at the layout.
+/// `out` keeps its allocation between calls (see [`convert_samples_into`]).
+fn convert_buffer_into(data: &cpal::Data, out: &mut Vec<f32>) -> bool {
     macro_rules! convert {
         ($ty:ty) => {
             data.as_slice::<$ty>()
-                .map(|samples| samples.iter().map(|sample| sample.to_f32()).collect())
+                .map(|samples| convert_samples_into(samples, out))
+                .is_some()
         };
     }
 
     match data.sample_format() {
-        SampleFormat::F32 => convert!(f32),
+        // f32 is the fully supported device format: copy the samples verbatim
+        // instead of running the per-sample conversion.
+        SampleFormat::F32 => data
+            .as_slice::<f32>()
+            .map(|samples| {
+                prepare_scratch(out, samples.len());
+                out.extend_from_slice(samples);
+            })
+            .is_some(),
         SampleFormat::F64 => convert!(f64),
         SampleFormat::I8 => convert!(i8),
         SampleFormat::I16 => convert!(i16),
@@ -475,7 +545,7 @@ fn convert_buffer(data: &cpal::Data) -> Option<Vec<f32>> {
         SampleFormat::U64 => convert!(u64),
         SampleFormat::I24 => convert!(cpal::I24),
         SampleFormat::U24 => convert!(cpal::U24),
-        _ => None,
+        _ => false,
     }
 }
 
@@ -557,17 +627,20 @@ impl AudioCapture {
         let callback_queue = queue.clone();
         let error_queue = queue.clone();
         let mut assembler = assembler;
+        // Owned by the callback so the real-time path does not allocate; only
+        // a larger device buffer (a format/buffer-size change) grows it.
+        let mut scratch: Vec<f32> = Vec::new();
 
         let stream = device
             .build_input_stream_raw(
                 &stream_config,
                 sample_format,
                 move |data, _info| {
-                    let Some(samples) = convert_buffer(data) else {
+                    if !convert_buffer_into(data, &mut scratch) {
                         return;
-                    };
+                    }
 
-                    assembler.push(&samples, |chunk| callback_queue.push(chunk));
+                    assembler.push(&scratch, |chunk| callback_queue.push(chunk));
                 },
                 move |error| {
                     error_queue.set_error(error.to_string());
@@ -737,6 +810,36 @@ mod tests {
     }
 
     #[test]
+    fn chunk_queue_errors_stay_latched_until_cleared() {
+        let queue = ChunkQueue::new(1);
+
+        assert!(queue.error().is_none());
+        queue.set_error("unsupported PipeWire format".into());
+        assert_eq!(
+            queue.error().as_deref(),
+            Some("unsupported PipeWire format"),
+            "readable once"
+        );
+        assert_eq!(
+            queue.error().as_deref(),
+            Some("unsupported PipeWire format"),
+            "and still readable after the first read (not one-shot)"
+        );
+
+        queue.clear_error();
+        assert!(queue.error().is_none());
+    }
+
+    #[test]
+    fn chunk_queue_take_error_consumes_the_error_once() {
+        let queue = ChunkQueue::new(1);
+
+        queue.set_error("device lost".into());
+        assert_eq!(queue.take_error().as_deref(), Some("device lost"));
+        assert!(queue.take_error().is_none());
+    }
+
+    #[test]
     fn choose_config_prefers_f32_at_the_requested_rate_and_channels() {
         let ranges = [
             ConfigRange {
@@ -786,6 +889,66 @@ mod tests {
         assert_eq!(255u8.to_f32(), (255.0 - 128.0) / 128.0);
         assert_eq!(32_768u16.to_f32(), 0.0);
         assert!(f32::NAN.to_f32().is_nan());
+    }
+
+    #[test]
+    fn conversion_reuses_the_scratch_buffer_without_reallocating() {
+        let mut out = Vec::new();
+
+        convert_samples_into(&[0i16, 16_384, -32_768], &mut out);
+        assert_eq!(out, vec![0.0, 0.5, -1.0]);
+
+        // A device-sized block allocates once (the first callback)...
+        let block = vec![0i16; 96];
+        convert_samples_into(&block, &mut out);
+        let capacity = out.capacity();
+        assert!(capacity >= 96);
+
+        // ...and every following callback reuses that allocation: the audio
+        // thread must not touch the heap in steady state (R-22).
+        for _ in 0..16 {
+            convert_samples_into(&block[..48], &mut out);
+        }
+
+        assert_eq!(
+            out.capacity(),
+            capacity,
+            "steady-state conversions must not reallocate"
+        );
+        assert_eq!(out.len(), 48);
+
+        // A bigger device buffer grows once (a format/buffer-size change) and
+        // the bigger allocation is then kept, including for smaller blocks.
+        convert_samples_into(&vec![0i16; 256], &mut out);
+        let grown = out.capacity();
+        assert!(grown >= 256);
+
+        convert_samples_into(&block[..32], &mut out);
+        assert_eq!(out.capacity(), grown, "the grown buffer is kept");
+        assert_eq!(out.len(), 32);
+    }
+
+    #[test]
+    fn conversion_matches_the_previous_per_sample_mapping() {
+        // f32 passthrough, f64/i16/u16 conversion and channel-agnostic
+        // interleaving are unchanged by the scratch-buffer rewrite.
+        let mut out = Vec::new();
+
+        convert_samples_into(&[0.25f32, -0.5], &mut out);
+        assert_eq!(out, vec![0.25, -0.5]);
+
+        convert_samples_into(&[0.5f64, -0.25], &mut out);
+        assert_eq!(out, vec![0.5, -0.25]);
+
+        convert_samples_into(&[i16::MIN, 0, i16::MAX], &mut out);
+        assert_eq!(
+            out,
+            vec![-1.0, 0.0, i16::MAX.to_f32()],
+            "interleaved stereo frames stay in order"
+        );
+
+        convert_samples_into(&[32_768u16, 0], &mut out);
+        assert_eq!(out, vec![0.0, -1.0]);
     }
 
     /// The live smoke test only runs when the host actually has an input

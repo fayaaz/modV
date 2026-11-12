@@ -34,6 +34,24 @@
 pub const MIN_BPM: f64 = 70.0; // tempo-detector.js:12
 pub const MAX_BPM: f64 = 200.0; // tempo-detector.js:13
 
+/// Lowest analysis-envelope rate [`TempoDetector::new`] accepts.
+///
+/// Defence-in-depth deviation from the JS (which stores `analysisRate`
+/// verbatim): `frame_duration = 1 / rate`, so a zero/negative rate produced
+/// `inf`/`NaN` frame times and an unusable envelope.
+pub const MIN_ANALYSIS_RATE: f64 = 1.0;
+/// Highest analysis-envelope rate [`TempoDetector::new`] accepts.
+///
+/// Caps `history_frames` (`history_seconds * analysis_rate`), which is
+/// allocated as a `Vec` on every analysis.
+pub const MAX_ANALYSIS_RATE: f64 = 1_000.0;
+/// Most envelope history (seconds) a detector keeps.
+pub const MAX_HISTORY_SECONDS: f64 = 60.0;
+/// Largest `history_frames` a detector can reach
+/// (`MAX_HISTORY_SECONDS * MAX_ANALYSIS_RATE`), i.e. the biggest envelope
+/// [`TempoDetector`] will allocate.
+pub const MAX_HISTORY_FRAMES: usize = 60_000;
+
 /// Options for [`TempoDetector`]. Defaults match `DEFAULT_OPTIONS`
 /// (tempo-detector.js:15-26).
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +108,17 @@ impl Default for TempoDetectorOptions {
 // tempo-detector.js:28-30 — clamp
 fn clamp(value: f64, min: f64, max: f64) -> f64 {
     value.min(max).max(min)
+}
+
+/// `clamp`, but a `NaN` value falls back to `fallback` instead of being pushed
+/// to one end of the range (`f64::min`/`max` ignore `NaN`, so `clamp(NaN, …)`
+/// silently returns `max`).
+fn clamp_or(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
+    if value.is_nan() {
+        fallback
+    } else {
+        clamp(value, min, max)
+    }
 }
 
 // tempo-detector.js:32-41 — median (NaN handling differs: the JS comparator
@@ -155,20 +184,42 @@ pub struct TempoDetector {
 impl TempoDetector {
     /// Creates a detector from `config`, clamping the values exactly as the JS
     /// constructor does (tempo-detector.js:44-70).
+    ///
+    /// Two values the JS stores verbatim are clamped here (R-19 deviation):
+    /// `analysis_rate` to `[MIN_ANALYSIS_RATE, MAX_ANALYSIS_RATE]` and
+    /// `history_seconds` to `[0, MAX_HISTORY_SECONDS]`. `frame_duration` is
+    /// `1 / analysis_rate` and `history_frames` is
+    /// `history_seconds * analysis_rate`, so a degenerate rate produced
+    /// infinite frame times and an absurd history an unbounded envelope
+    /// allocation. Non-finite (`NaN`) values fall back to the default.
     pub fn new(config: TempoDetectorOptions) -> Self {
         let min_bpm = clamp(config.min_bpm, 1.0, 400.0); // tempo-detector.js:47
         let max_bpm = clamp(config.max_bpm, min_bpm + 1.0, 400.0); // tempo-detector.js:48
 
-        let frame_duration = 1.0 / config.analysis_rate; // tempo-detector.js:58
+        let defaults = TempoDetectorOptions::default();
+        let analysis_rate = clamp_or(
+            config.analysis_rate,
+            MIN_ANALYSIS_RATE,
+            MAX_ANALYSIS_RATE,
+            defaults.analysis_rate,
+        );
+        let history_seconds = clamp_or(
+            config.history_seconds,
+            0.0,
+            MAX_HISTORY_SECONDS,
+            defaults.history_seconds,
+        );
+
+        let frame_duration = 1.0 / analysis_rate; // tempo-detector.js:58
         // tempo-detector.js:59-62 — Math.max(2, Math.round(historySeconds * analysisRate))
-        let history_frames =
-            ((config.history_seconds * config.analysis_rate).round() as i64).max(2) as usize;
+        let history_frames = ((history_seconds * analysis_rate).round() as i64).max(2) as usize;
+        debug_assert!(history_frames <= MAX_HISTORY_FRAMES);
 
         Self {
             min_bpm,
             max_bpm,
-            history_seconds: config.history_seconds,
-            analysis_rate: config.analysis_rate,
+            history_seconds,
+            analysis_rate,
             analysis_interval: config.analysis_interval,
             min_history_seconds: config.min_history_seconds,
             smoothing_window: config.smoothing_window.max(1.0), // tempo-detector.js:53
@@ -719,6 +770,69 @@ mod tests {
         for (index, &value) in signal.iter().enumerate() {
             detector.process(index as f64 / FPS as f64, value);
         }
+    }
+
+    // R-19 regression: the public constructor used to store `analysis_rate` and
+    // `history_seconds` verbatim, so `analysis_rate: 0.0` made
+    // `frame_duration` infinite (`1/0`) and an infinite/absurd
+    // `history_seconds` allocated an unbounded envelope (`vec![0.0; i64::MAX]`
+    // → capacity overflow). Both are clamped now.
+    #[test]
+    fn degenerate_analysis_rate_and_history_are_clamped() {
+        let detector = TempoDetector::new(TempoDetectorOptions {
+            analysis_rate: 0.0,
+            history_seconds: f64::INFINITY,
+            ..Default::default()
+        });
+
+        assert!(
+            detector.frame_duration.is_finite() && detector.frame_duration > 0.0,
+            "frame_duration must be finite, got {}",
+            detector.frame_duration
+        );
+        assert!(detector.analysis_rate >= MIN_ANALYSIS_RATE);
+        assert!(detector.analysis_rate <= MAX_ANALYSIS_RATE);
+        assert!(detector.history_seconds <= MAX_HISTORY_SECONDS);
+        assert!(
+            detector.history_frames <= MAX_HISTORY_FRAMES,
+            "history_frames = {}",
+            detector.history_frames
+        );
+    }
+
+    #[test]
+    fn absurd_analysis_rate_and_history_stay_bounded() {
+        let mut detector = TempoDetector::new(TempoDetectorOptions {
+            analysis_rate: 1e9,
+            history_seconds: 1e9,
+            ..Default::default()
+        });
+
+        assert_eq!(detector.analysis_rate, MAX_ANALYSIS_RATE);
+        assert_eq!(detector.history_seconds, MAX_HISTORY_SECONDS);
+        assert_eq!(detector.history_frames, MAX_HISTORY_FRAMES);
+
+        // Feeding a signal must stay responsive and finite (no giant envelope,
+        // no NaN frame times).
+        for index in 0..480 {
+            detector.process(index as f64 / 60.0, 1.0);
+        }
+        assert!(detector.bpm.is_finite());
+        assert!(detector.confidence.is_finite());
+    }
+
+    #[test]
+    fn non_finite_options_fall_back_to_the_defaults() {
+        let detector = TempoDetector::new(TempoDetectorOptions {
+            analysis_rate: f64::NAN,
+            history_seconds: f64::NAN,
+            ..Default::default()
+        });
+        let defaults = TempoDetectorOptions::default();
+
+        assert_eq!(detector.analysis_rate, defaults.analysis_rate);
+        assert_eq!(detector.history_seconds, defaults.history_seconds);
+        assert!(detector.frame_duration.is_finite());
     }
 
     // tempo-detector.test.js:44-52 — "exposes a pure detector API with empty defaults"
