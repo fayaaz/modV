@@ -38,3 +38,6 @@ tmp
 # Crash dumps
 core
 core.*
+
+# Rust engine target dir
+crates/target

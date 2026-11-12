@@ -2,6 +2,11 @@ appId: gl.vcync.vmodv
 productName: VmodV
 directories:
   buildResources: resources
+# The Rust engine ships outside the asar so its executable bit survives (see
+# docs/rust-hybrid.md, WS-14). Built by the `engine-build` Docker stage.
+extraResources:
+  - from: crates/target/release/modv-engine
+    to: modv-engine
 files:
   - '!**/.vscode/*'
   - '!src/*'

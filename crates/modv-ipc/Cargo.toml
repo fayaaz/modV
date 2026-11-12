@@ -1,0 +1,8 @@
+[package]
+name = "modv-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "modV engine — see docs/rust-hybrid.md"
+
+[dependencies]

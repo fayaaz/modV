@@ -19,3 +19,5 @@ README.md
 AGENTS.md
 tmp
 tmp/
+crates/target
+target

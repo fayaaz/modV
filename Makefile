@@ -57,7 +57,11 @@ X11_GUI_AUDIO := $(if $(wildcard $(PULSE_SOCKET)),-e PULSE_SERVER=unix:/tmp/puls
 GUI_RUN_ARGS_X11 := --net=host --shm-size=1g --ulimit core=0 $(DRI_ARGS) $(X11_GUI_ENV) $(X11_GUI_MOUNTS) $(X11_GUI_AUDIO)
 
 .DEFAULT_GOAL := build
-.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-e2e-all test-unit yarn shell rave-reencode
+RUST_IMAGE ?= modv-rust:local
+CARGO_VOLUME ?= modv-cargo
+
+.DEFAULT_GOAL := build
+.PHONY: build appimage clean docker-deps docker-node-modules docker-reset install dev lint format test-e2e test-e2e-all test-unit yarn shell rave-reencode docker-rust docker-cargo-volume engine engine-test engine-lint engine-run
 
 build:
 	mkdir -p "$(DIST_DIR)"
@@ -149,6 +153,42 @@ rave-reencode: docker-node-modules
 
 yarn: docker-node-modules
 	$(call run-yarn,$(ARGS))
+
+docker-rust:
+	$(DOCKER) build --target rust -t "$(RUST_IMAGE)" .
+
+docker-cargo-volume: docker-rust
+	@$(DOCKER) volume inspect "$(CARGO_VOLUME)" >/dev/null 2>&1 || $(DOCKER) volume create "$(CARGO_VOLUME)" >/dev/null
+	$(DOCKER) run --rm -v "$(CARGO_VOLUME)":/cargo "$(RUST_IMAGE)" chown -R "$(HOST_UID):$(HOST_GID)" /cargo
+
+define run-cargo
+	$(DOCKER) run --rm \
+		--user "$(HOST_UID):$(HOST_GID)" \
+		-e HOME=/tmp \
+		-e CARGO_HOME=/cargo \
+		-v "$(CURDIR)":/app \
+		-v "$(CARGO_VOLUME)":/cargo \
+		-w /app/crates \
+		$(DOCKER_RUN_ARGS) \
+		"$(RUST_IMAGE)" \
+		cargo $(1)
+endef
+
+engine: docker-cargo-volume
+	$(call run-cargo,build --release)
+
+engine-test: docker-cargo-volume
+	$(call run-cargo,test)
+
+engine-lint: docker-cargo-volume
+	$(call run-cargo,clippy --all-targets -- -D warnings)
+	$(call run-cargo,fmt --check)
+
+# Run the engine's native window against the host session (Wayland preferred,
+# X11 fallback) with GPU forwarding, mirroring `make dev`.
+engine-run: DOCKER_RUN_ARGS += $(GUI_RUN_ARGS)
+engine-run: docker-cargo-volume
+	$(call run-cargo,run --release -p modv-app -- $(ARGS))
 
 shell: docker-node-modules
 	@mkdir -p "$(CURDIR)/node_modules"

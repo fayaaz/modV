@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "modv-app",
+    "modv-engine",
+    "modv-ipc",
+    "modv-media",
+    "modv-render",
+    "modv-renderers",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+lto = "thin"

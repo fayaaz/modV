@@ -82,9 +82,44 @@ RUN apt-get update \
 RUN --mount=type=cache,target=/root/.cache/electron \
     node node_modules/electron/install.js
 
+# --- Rust engine (docs/rust-hybrid.md) -------------------------------------
+# Host has no Rust toolchain, so the engine is built entirely in Docker,
+# like every other yarn step in this file. The `rust` stage is also what
+# `make engine*` uses for day-to-day iteration with the repo bind-mounted.
+FROM base AS rust
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      libvulkan-dev \
+      libasound2-dev \
+      libudev-dev \
+      libpipewire-0.3-dev \
+      libxkbcommon-dev \
+      libgl1-mesa-dev \
+      libwayland-dev \
+      libx11-dev \
+      pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && rustup component add rustfmt clippy
+
+# Produces the engine binary copied into the packaging stages below. Kept as a
+# separate stage so the layer is cached until crates/ actually changes.
+FROM rust AS engine-build
+WORKDIR /engine
+COPY crates/ crates/
+RUN cargo build --release --manifest-path crates/Cargo.toml
+
 FROM deps AS build
 ARG APP_VERSION
 COPY . .
+# electron-builder's extraResources picks the engine up from this path (see
+# electron-builder.yml). Built in engine-build so the local yarn build does
+# not need a host Rust toolchain.
+COPY --from=engine-build /engine/crates/target/release/modv-engine ./crates/target/release/modv-engine
 RUN if [ -n "$APP_VERSION" ]; then \
       yarn version --new-version "$APP_VERSION" --no-git-tag-version; \
     fi
