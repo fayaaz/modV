@@ -106,6 +106,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
     && rustup component add rustfmt clippy
 
+# lavapipe (Mesa's software Vulkan) lets headless GPU tests and benchmarks
+# run without a display or a real adapter.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+
 # Produces the engine binary copied into the packaging stages below. Kept as a
 # separate stage so the layer is cached until crates/ actually changes.
 FROM rust AS engine-build
