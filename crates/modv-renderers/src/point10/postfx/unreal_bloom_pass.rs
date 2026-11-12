@@ -86,7 +86,10 @@ struct BlurUniforms {
 struct CompositeUniforms {
     bloom_strength: f32,
     bloom_radius: f32,
-    _pad: [f32; 2],
+    /// Classic UnrealBloomPass composites `3 * strength`; the TSL `bloom()`
+    /// node composites `strength` alone. See [`UnrealBloomPass::set_bloom_scale`].
+    bloom_scale: f32,
+    _pad: f32,
     taps: [[f32; 4]; MIP_COUNT],
 }
 
@@ -170,6 +173,9 @@ pub struct UnrealBloomPass {
     strength: f32,
     /// `this.radius`.
     radius: f32,
+    /// The global composite multiplier (3.0 for the classic pass, 1.0 for the
+    /// TSL `bloom()` node).
+    bloom_scale: f32,
     /// `this.threshold`.
     threshold: f32,
     width: u32,
@@ -317,6 +323,7 @@ impl UnrealBloomPass {
             queue: queue.clone(),
             strength: 1.0,
             radius: 0.0,
+            bloom_scale: 3.0,
             threshold: 0.0,
             width: width.max(1),
             height: height.max(1),
@@ -360,6 +367,19 @@ impl UnrealBloomPass {
     pub fn set_radius(&mut self, radius: f32) {
         self.radius = radius.clamp(0.0, 1.0);
         self.upload_composite_uniforms();
+    }
+
+    /// Set the composite multiplier: 3.0 reproduces three's classic
+    /// `UnrealBloomPass`, 1.0 the TSL `bloom()` node (`BloomNode` composites
+    /// `sum * strength` with no multiplier, and the WebGPU scenes use it).
+    pub fn set_bloom_scale(&mut self, scale: f32) {
+        self.bloom_scale = scale;
+        self.upload_composite_uniforms();
+    }
+
+    /// The composite multiplier.
+    pub fn bloom_scale(&self) -> f32 {
+        self.bloom_scale
     }
 
     /// `this.threshold`.
@@ -629,7 +649,8 @@ impl UnrealBloomPass {
         let mut uniforms = CompositeUniforms {
             bloom_strength: self.strength,
             bloom_radius: self.radius,
-            _pad: [0.0; 2],
+            bloom_scale: self.bloom_scale,
+            _pad: 0.0,
             taps: [[0.0; 4]; MIP_COUNT],
         };
         for (index, factor) in BLOOM_FACTORS.iter().enumerate() {
@@ -817,6 +838,15 @@ mod tests {
         assert_eq!(std::mem::size_of::<BrightUniforms>(), 16);
         assert_eq!(std::mem::size_of::<BlurUniforms>(), 208);
         assert_eq!(std::mem::size_of::<CompositeUniforms>(), 96);
+    }
+
+    #[test]
+    fn the_composite_scale_keeps_both_bloom_calibrations_available() {
+        // The classic UnrealBloomPass shader is `3.0 * strength * sum`; the TSL
+        // `bloom()` node (the WebGPU scenes) is `strength * sum`.
+        let shader = include_str!("bloom_composite.wgsl");
+        assert!(shader.contains("bloom = u.bloom_scale * u.bloom_strength * bloom;"));
+        assert!(!shader.contains("3.0 * u.bloom_strength"));
     }
 
     #[test]

@@ -31,6 +31,11 @@
 //! [`crate::point10::chromatic`] ([`crate::point10::chromatic::line`]) and is
 //! registered from there by [`crate::point10::all_scenes`].
 //!
+//! [`dvd_logo`] is not a scene either: it builds the DVD wordmark mesh from the
+//! inlined SVG path for [`dvd_room`], which — like [`smoke_room`] — renders
+//! through [`crate::point10::volume`] rather than the earlier puff
+//! substitutes.
+//!
 //! [`particle_quad`] is not a scene: it is the instanced billboard pipeline
 //! ParticleField and SpiralParticles share. [`cube_mesh`] is the batch-4
 //! counterpart — `BoxGeometry`, the matrix helpers and the depth attachment the
@@ -42,6 +47,7 @@ pub mod boxy;
 pub mod chromatic_wave;
 pub mod color_cube;
 pub mod cube_mesh;
+pub mod dvd_logo;
 pub mod dvd_room;
 pub mod fire_common;
 pub mod geometric_tunnel;

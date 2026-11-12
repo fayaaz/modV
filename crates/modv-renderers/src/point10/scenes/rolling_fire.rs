@@ -97,11 +97,11 @@ use crate::point10::scenes::cube_mesh::{
     Mat4, Mesh, MeshGpu, Vertex, create_depth, depth_state, look_at, mat4_mul, normalise,
     perspective,
 };
-use crate::point10::scenes::dvd_room::{SPHERE_RADIUS, band, fire_colour, treble_band};
 use crate::point10::scenes::fire_common::build_sphere;
 use crate::point10::shared::assets::{ColourSpace, Wrap, load_texture};
 use crate::point10::shared::phrase_color::{DropColorState, drop_color_pulse, ease_phrase_hue};
 use crate::point10::shared::random::seeded_rand;
+use crate::point10::volume::room::{SPHERE_RADIUS, band, fire_colour, treble_band};
 use crate::point10::{
     FULLSCREEN_TRIANGLE_WGSL, HDR_FORMAT, Point10Scene, SceneContext, SceneMeta, SceneProp,
     UnitQuad, frame_dt, read_scene_props, scene_props_with_levers,

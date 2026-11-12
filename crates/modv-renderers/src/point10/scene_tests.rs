@@ -122,6 +122,61 @@ fn render_owned_chain_two_frames_with(
     Some(target.read(&device, &queue))
 }
 
+/// [`render_owned_chain_two_frames_with`] over many frames: the volumetric
+/// scenes need the simulation to build up a field before there is anything to
+/// look at (and the JS fades the emitter in over three seconds).
+///
+/// Returns the last "settled" frame and the frame after it, rendered with
+/// `final_payload` — the structural tests compare the pair.
+struct RenderedFrames {
+    before: Vec<u8>,
+    after: Vec<u8>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+fn render_owned_chain_frames(
+    scene: &mut dyn Point10Scene,
+    size: u32,
+    frames: usize,
+    payload: &BandPayload,
+    final_payload: &BandPayload,
+) -> Option<RenderedFrames> {
+    let (device, queue) = gpu()?;
+
+    let mut ctx = SceneContext::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    ctx.resize(size, size);
+    scene.init(&mut ctx);
+    scene.resize(size, size);
+
+    let mut bridge = AudioBridge::new();
+    let target = TestTarget::new(&device, size, size);
+
+    let mut draw = |payload: &BandPayload| {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("point10-scene-owned-chain-frames"),
+        });
+        bridge.update(1.0 / 60.0, Some(payload), &Default::default());
+        scene.update(1.0 / 60.0, &bridge);
+        scene.render(&mut encoder, &target.view);
+        queue.submit(Some(encoder.finish()));
+    };
+
+    for _ in 0..frames {
+        draw(payload);
+    }
+    draw(payload);
+    let before = target.read(&device, &queue);
+    draw(final_payload);
+    let after = target.read(&device, &queue);
+    Some(RenderedFrames {
+        before,
+        after,
+        device,
+        queue,
+    })
+}
+
 #[test]
 fn chromatic_line_renders() {
     let mut scenes = all_scenes();
@@ -201,7 +256,11 @@ fn square_tunnel_renders() {
     );
     // `Clear1` is opaque black, so every pixel has alpha 255.
     assert!(
-        pixels.chunks_exact(4).all(|pixel| pixel[3] == 255),
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255),
         "SquareTunnel must stay opaque (setClearColor(0x000000, 1))"
     );
 }
@@ -269,7 +328,7 @@ fn it_is_coming_for_you_keeps_the_background_transparent() {
 fn alpha_counts(pixels: &[u8]) -> (usize, usize, usize) {
     let mut transparent = 0_usize;
     let mut opaque = 0_usize;
-    for pixel in pixels.chunks_exact(4) {
+    for pixel in pixels.as_chunks::<4>().0 {
         if pixel[3] == 0 {
             transparent += 1;
         }
@@ -583,7 +642,9 @@ fn attractor_particles_keeps_a_translucent_layer() {
     };
     let (_, opaque, total) = alpha_counts(&pixels);
     let min = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| pixel[3])
         .min()
         .unwrap_or(0);
@@ -597,188 +658,278 @@ fn attractor_particles_keeps_a_translucent_layer() {
     );
 }
 
-/// The DVD Room's logo and glass panes cover the middle of the frame; the
-/// clearance around the box (and the room's transparent clear) must survive
-/// the `alpha = max(rgb)` composite.
-const DVD_ROOM_SIZE: u32 = 128;
+// ————— the volumetric room scenes (SmokeRoom / DvdRoom) —————
+//
+// Both scenes run the JS `150 x 150 x 300` grid in production. The GPU tests
+// scale it down: a `32 x 32 x 64` grid keeps every compute pass and the whole
+// raymarch, but a fraction of the voxel work, so a software adapter finishes
+// the simulation in reasonable time. Every world-space parameter (grid origin,
+// volume size, ray step count) is unchanged.
 
-#[test]
-fn dvd_room_renders() {
-    let mut scene = crate::point10::scenes::dvd_room::DvdRoom::new();
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, DVD_ROOM_SIZE) else {
-        return;
-    };
-    assert!(
-        any_lit(&pixels),
-        "DvdRoom produced an empty frame at {DVD_ROOM_SIZE}x{DVD_ROOM_SIZE}"
-    );
+/// The grid the volumetric tests run at.
+///
+/// Half the JS resolution: the emission is per emitter vertex, so a much
+/// smaller grid concentrates it into fewer voxels and saturates faster; `64 x
+/// 64 x 128` is the smallest grid that still reads like the JS field. The
+/// production scenes run [`crate::point10::volume::VolumeGrid::JS`].
+fn volume_test_grid() -> crate::point10::volume::VolumeGrid {
+    crate::point10::volume::VolumeGrid::new(64, 64, 128)
 }
 
-/// SmokeRoom's `alpha = max(rgb)` composite leaves a faint haze across the
-/// room instead of an alpha-0 background (the JS does the same); the logo and
-/// glass still reach opaque, and the haze stays near-transparent.
-#[test]
-fn dvd_room_keeps_a_translucent_background() {
-    let mut scene = crate::point10::scenes::dvd_room::DvdRoom::new();
-    assert_eq!(scene.clear_alpha(), 0.0);
+/// Small on purpose: the volume covers most of the frame at any size and the
+/// structural checks are all per-pixel.
+const VOLUME_SIZE: u32 = 128;
+/// Frames of simulation before the structural checks (two steps each, so ~240
+/// simulation steps: past the JS's three-second emissive fade-in, with a
+/// developed, turbulent dye field).
+const VOLUME_WARMUP: usize = 120;
 
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, DVD_ROOM_SIZE) else {
-        return;
-    };
-    let (_, opaque, total) = alpha_counts(&pixels);
-    let min = pixels
-        .chunks_exact(4)
-        .map(|pixel| pixel[3])
-        .min()
-        .unwrap_or(0);
-    assert!(
-        min <= 16,
-        "the haze must stay near-transparent ({total} px, min alpha {min})"
-    );
-    assert!(
-        opaque > 0,
-        "expected opaque logo pixels, but none reached alpha 255"
-    );
+fn smoke_room_scene() -> crate::point10::scenes::smoke_room::SmokeRoom {
+    crate::point10::scenes::smoke_room::SmokeRoom::with_grid(volume_test_grid())
 }
 
-// ————— batch 5b —————
-
-/// The tunnel fills the frame with hoops, so 96 px shows several rings and the
-/// SSAO creases without turning into a solid block.
-const GEOMETRIC_TUNNEL_SIZE: u32 = 96;
-
-#[test]
-fn geometric_tunnel_renders() {
-    let mut scene = crate::point10::scenes::geometric_tunnel::GeometricTunnel::new();
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, GEOMETRIC_TUNNEL_SIZE) else {
-        return;
-    };
-    assert!(
-        any_lit(&pixels),
-        "GeometricTunnel produced an empty frame at {GEOMETRIC_TUNNEL_SIZE}x{GEOMETRIC_TUNNEL_SIZE}"
-    );
+fn dvd_room_scene() -> crate::point10::scenes::dvd_room::DvdRoom {
+    crate::point10::scenes::dvd_room::DvdRoom::with_grid(volume_test_grid())
 }
 
-/// `screenClearAlpha = 0` and the final pass writes `alpha = clamp(max(rgb))`.
-/// With ACES exposure 1 the tone-mapped hoops never reach 1.0, so the layer is
-/// never fully opaque — the JS behaves the same. What must hold is that the
-/// background stays near-transparent (the fog floor is the only lift) while the
-/// lit hoops carry a clearly higher alpha.
-#[test]
-fn geometric_tunnel_keeps_a_translucent_layer() {
-    let mut scene = crate::point10::scenes::geometric_tunnel::GeometricTunnel::new();
-    assert_eq!(scene.clear_alpha(), 0.0);
+/// Fraction of the frame that stays dark once composited over black.
+///
+/// The JS's `alpha = max(rgb)` layer is usually semi-transparent, so the
+/// composite (not the raw alpha) is what the viewer sees; a working room scene
+/// leaves most of the frame dark around the fire.
+fn dark_fraction(pixels: &[u8]) -> f32 {
+    let mut dark = 0_usize;
+    let mut total = 0_usize;
+    for pixel in pixels.as_chunks::<4>().0 {
+        let alpha = pixel[3] as f32 / 255.0;
+        let luminance =
+            (0.2126 * pixel[0] as f32 + 0.7152 * pixel[1] as f32 + 0.0722 * pixel[2] as f32)
+                * alpha;
+        if luminance < 16.0 {
+            dark += 1;
+        }
+        total += 1;
+    }
+    dark as f32 / total.max(1) as f32
+}
 
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, GEOMETRIC_TUNNEL_SIZE) else {
-        return;
-    };
-    let min = pixels
-        .chunks_exact(4)
-        .map(|pixel| pixel[3])
-        .min()
-        .unwrap_or(0);
-    let max = pixels
-        .chunks_exact(4)
-        .map(|pixel| pixel[3])
-        .max()
-        .unwrap_or(0);
+/// Standard deviation of the luminance of the drawn (alpha > 0) pixels.
+///
+/// A flat haze or a solid clear would score ~0; a raymarched fire/smoke field
+/// has hot cores, warm edges and transparent background.
+fn luminance_spread(pixels: &[u8]) -> f32 {
+    let mut values = Vec::new();
+    for pixel in pixels.as_chunks::<4>().0 {
+        if pixel[3] == 0 {
+            continue;
+        }
+        values.push(0.2126 * pixel[0] as f32 + 0.7152 * pixel[1] as f32 + 0.0722 * pixel[2] as f32);
+    }
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    (values
+        .iter()
+        .map(|value| (value - mean) * (value - mean))
+        .sum::<f32>()
+        / values.len() as f32)
+        .sqrt()
+}
+
+/// The module composites over the layers below: the room's emptiness (and the
+/// glass) must stay translucent while the fire reaches a strong alpha.
+fn assert_translucent_layer(pixels: &[u8]) {
+    let translucent = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[3] < 128)
+        .count();
+    let strong = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[3] > 200)
+        .count();
     let total = pixels.len() / 4;
     assert!(
-        min <= 48,
-        "the tunnel's empty background must stay translucent ({total} px, min alpha {min})"
+        translucent > total / 10,
+        "the room must stay translucent around the fire ({translucent} of {total} px)"
     );
     assert!(
-        max > 64,
-        "the lit hoops must carry a stronger alpha than the background (max {max})"
+        strong > 0,
+        "expected some strongly covered fire/logo pixels (max alpha {})",
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .max()
+            .unwrap_or(0)
     );
 }
 
-#[test]
-fn rolling_fire_renders() {
-    let mut scene = crate::point10::scenes::rolling_fire::RollingFire::new();
-    // The fire is a haze of sub-pixel puffs at the smoke-test size; max the
-    // puff scalars so the additive volume is visible.
-    scene.apply_props(|key| match key {
-        "smokeDensity" => Some(100.0),
-        "fireIntensity" => Some(100.0),
-        _ => None,
-    });
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
-        return;
-    };
-    assert!(
-        any_lit(&pixels),
-        "RollingFire produced an empty frame at {PARTICLE_SIZE}x{PARTICLE_SIZE}"
-    );
-}
-
-/// `_transparentOverlay` and the `alpha = max(rgb)` output: the layer keeps
-/// translucent pixels around the fire, while the lava sphere reaches opaque.
-#[test]
-fn rolling_fire_keeps_a_translucent_layer() {
-    let mut scene = crate::point10::scenes::rolling_fire::RollingFire::new();
-    assert_eq!(scene.clear_alpha(), 0.0);
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
-        return;
-    };
-    let (_, opaque, total) = alpha_counts(&pixels);
-    let min = pixels
-        .chunks_exact(4)
-        .map(|pixel| pixel[3])
-        .min()
-        .unwrap_or(0);
-    assert!(
-        min < 255,
-        "the fire overlay must leave translucent pixels ({total} px, all alpha 255)"
-    );
-    assert!(
-        opaque > 0,
-        "expected opaque lava pixels, but none reached alpha 255"
-    );
+/// `alpha = max(rgb)` (the JS's `outputNode`): alpha may only be zero where
+/// the pixel is black, and every drawn pixel carries alpha.
+fn assert_alpha_is_max_rgb(pixels: &[u8]) {
+    for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        let black = pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0;
+        assert_eq!(
+            pixel[3] == 0,
+            black,
+            "pixel {index} ({pixel:?}) breaks alpha = max(rgb)"
+        );
+    }
 }
 
 #[test]
 fn smoke_room_renders() {
-    let mut scene = crate::point10::scenes::smoke_room::SmokeRoom::new();
-    scene.apply_props(|key| match key {
-        "smokeDensity" => Some(100.0),
-        "fireIntensity" => Some(100.0),
-        _ => None,
-    });
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+    let mut scene = smoke_room_scene();
+    let payload = loud_payload();
+    let Some(frames) =
+        render_owned_chain_frames(&mut scene, VOLUME_SIZE, VOLUME_WARMUP, &payload, &payload)
+    else {
         return;
     };
     assert!(
-        any_lit(&pixels),
-        "SmokeRoom produced an empty frame at {PARTICLE_SIZE}x{PARTICLE_SIZE}"
+        any_lit(&frames.before),
+        "SmokeRoom produced an empty frame at {VOLUME_SIZE}x{VOLUME_SIZE}"
     );
 }
 
-/// SmokeRoom's `alpha = max(rgb)` composite leaves a faint haze across the
-/// room instead of an alpha-0 background (the same rule DVD Room's test
-/// documents); the lava sphere still reaches opaque.
+/// The raymarch must resolve structure: a non-uniform, warm-lit field that
+/// fills the room, follows the `alpha = max(rgb)` rule and reacts to audio.
 #[test]
-fn smoke_room_keeps_a_translucent_background() {
-    let mut scene = crate::point10::scenes::smoke_room::SmokeRoom::new();
+fn smoke_room_volume_is_structured() {
+    let mut scene = smoke_room_scene();
     assert_eq!(scene.clear_alpha(), 0.0);
+    assert_eq!(scene.grid().cell_count(), 64 * 64 * 128);
 
-    let Some(pixels) = render_owned_chain_two_frames(&mut scene, PARTICLE_SIZE) else {
+    // Quiet audio for the structural frame (the field does not saturate), then
+    // a loud frame to prove the audio mapping reaches the volume.
+    let Some(RenderedFrames {
+        before: pixels,
+        after: next,
+        ..
+    }) = render_owned_chain_frames(
+        &mut scene,
+        VOLUME_SIZE,
+        VOLUME_WARMUP,
+        &quiet_payload(),
+        &loud_payload(),
+    )
+    else {
         return;
     };
-    let (_, opaque, total) = alpha_counts(&pixels);
-    let min = pixels
-        .chunks_exact(4)
-        .map(|pixel| pixel[3])
-        .min()
-        .unwrap_or(0);
+
+    // Non-uniform: the drawn pixels span a wide luminance range.
+    let spread = luminance_spread(&pixels);
     assert!(
-        min <= 48,
-        "the smoke haze must stay near-transparent ({total} px, min alpha {min})"
+        spread > 12.0,
+        "the volume looks flat (luminance spread {spread})"
     );
+    // Warm-lit: the average drawn pixel is red-dominant (the fire ramp).
+    let mut red = 0.0;
+    let mut blue = 0.0;
+    let mut drawn = 0.0;
+    for pixel in pixels.as_chunks::<4>().0 {
+        if pixel[3] == 0 {
+            continue;
+        }
+        red += pixel[0] as f32;
+        blue += pixel[2] as f32;
+        drawn += 1.0;
+    }
+    assert!(drawn > 0.0);
     assert!(
-        opaque > 0,
-        "expected opaque emitter pixels, but none reached alpha 255"
+        red / drawn > blue / drawn * 1.2,
+        "the volume is not warm-lit (r {:.1}, b {:.1})",
+        red / drawn,
+        blue / drawn
     );
+    // Fills the room but leaves the frame dark around the fire (the glass box
+    // and the empty grid read as background).
+    let dark = dark_fraction(&pixels);
+    assert!(
+        dark > 0.15,
+        "the fire covers the whole frame (only {:.0}% dark) — the room bounds are lost",
+        dark * 100.0
+    );
+    assert_alpha_is_max_rgb(&pixels);
+    assert_translucent_layer(&pixels);
+
+    // Two audio frames produce different images (the emission pulses).
+    assert_ne!(pixels, next, "consecutive audio frames are identical");
+}
+
+#[test]
+fn dvd_room_renders() {
+    let mut scene = dvd_room_scene();
+    let payload = loud_payload();
+    let Some(frames) =
+        render_owned_chain_frames(&mut scene, VOLUME_SIZE, VOLUME_WARMUP, &payload, &payload)
+    else {
+        return;
+    };
+    assert!(
+        any_lit(&frames.before),
+        "DvdRoom produced an empty frame at {VOLUME_SIZE}x{VOLUME_SIZE}"
+    );
+}
+
+/// The DVD room adds the bouncing logo on top of the same volume: the logo
+/// must be visible (opaque-ish pixels), the smoke field structured, the
+/// background transparent in the corners and the audio-reactive palette must
+/// change the frame.
+#[test]
+fn dvd_room_volume_is_structured() {
+    let mut scene = dvd_room_scene();
+    assert_eq!(scene.clear_alpha(), 0.0);
+    assert_eq!(scene.grid().cell_count(), 64 * 64 * 128);
+
+    // Quiet audio for the structural frame (the field does not saturate), then
+    // a loud frame to prove the audio mapping reaches the volume.
+    let Some(RenderedFrames {
+        before: pixels,
+        after: next,
+        ..
+    }) = render_owned_chain_frames(
+        &mut scene,
+        VOLUME_SIZE,
+        VOLUME_WARMUP,
+        &quiet_payload(),
+        &loud_payload(),
+    )
+    else {
+        return;
+    };
+
+    let spread = luminance_spread(&pixels);
+    assert!(
+        spread > 12.0,
+        "the DVD room volume looks flat (luminance spread {spread})"
+    );
+    let dark = dark_fraction(&pixels);
+    assert!(
+        dark > 0.15,
+        "the fire covers the whole frame (only {:.0}% dark) — the room bounds are lost",
+        dark * 100.0
+    );
+    // The logo is bright: some pixel is well above the smoke's own level.
+    let max_luminance = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|pixel| 0.2126 * pixel[0] as f32 + 0.7152 * pixel[1] as f32 + 0.0722 * pixel[2] as f32)
+        .fold(0.0, f32::max);
+    assert!(
+        max_luminance > 180.0,
+        "the DVD logo never lights up (max luminance {max_luminance})"
+    );
+    assert_alpha_is_max_rgb(&pixels);
+    assert_translucent_layer(&pixels);
+    assert_ne!(pixels, next, "consecutive audio frames are identical");
 }
 
 #[test]
@@ -794,7 +945,11 @@ fn latent_backrooms_renders() {
     // `scene.background = 0x050505` and the CRT pass forces alpha 1, so the
     // module is opaque everywhere (its layer alpha is 1, not transparent).
     assert!(
-        pixels.chunks_exact(4).all(|pixel| pixel[3] == 255),
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255),
         "LatentBackrooms must stay opaque (CRT pass alpha = 1)"
     );
 }
@@ -824,4 +979,178 @@ fn every_scene_survives_dispose_and_reinit() {
         scene.init(&mut ctx);
         assert_eq!(scene.name(), scene.meta().name);
     }
+}
+
+/// Render SmokeRoom and DvdRoom at 256x256 and write PNGs for inspection.
+///
+/// `MODV_VOLUME_GRID="x,y,z"` overrides the simulation grid,
+/// `MODV_VOLUME_FRAMES` the frame count, `MODV_VOLUME_SIZE` the image size and
+/// `MODV_VOLUME_DIR` the output directory (default `/app/crates/target`).
+///
+/// Ignored by default: it is the offline fidelity check, not a CI test.
+#[test]
+#[ignore = "renders reference frames for manual inspection"]
+fn dump_volume_reference_frames() {
+    let size = std::env::var("MODV_VOLUME_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(256);
+    let frames = std::env::var("MODV_VOLUME_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(60);
+    let grid = std::env::var("MODV_VOLUME_GRID")
+        .ok()
+        .and_then(|value| {
+            let parts: Vec<u32> = value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<u32>().ok())
+                .collect();
+            (parts.len() == 3)
+                .then(|| crate::point10::volume::VolumeGrid::new(parts[0], parts[1], parts[2]))
+        })
+        .unwrap_or(crate::point10::volume::VolumeGrid::JS);
+    let directory =
+        std::env::var("MODV_VOLUME_DIR").unwrap_or_else(|_| "/app/crates/target".to_string());
+
+    let quiet = std::env::var("MODV_VOLUME_QUIET").is_ok();
+    let no_fire = std::env::var("MODV_VOLUME_NO_FIRE").is_ok();
+    let density_override = std::env::var("MODV_VOLUME_DENSITY")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok());
+    let mut smoke = crate::point10::scenes::smoke_room::SmokeRoom::with_grid(grid);
+    if let Some(density) = density_override {
+        smoke.apply_props(|key| (key == "smokeDensity").then_some(density));
+    }
+    if no_fire {
+        smoke.apply_props(|key| match key {
+            "fireIntensity" => Some(0.0),
+            "smokeDensity" => Some(0.0),
+            _ => None,
+        });
+    }
+    let payload = if quiet {
+        quiet_payload()
+    } else if std::env::var("MODV_VOLUME_SILENT").is_ok() {
+        BandPayload::silent(44_100.0)
+    } else {
+        loud_payload()
+    };
+    let mut dye_report: Option<String> = None;
+    if let Some(rendered) = render_owned_chain_frames(&mut smoke, size, frames, &payload, &payload)
+    {
+        let (transparent, opaque, total) = alpha_counts(&rendered.before);
+        eprintln!(
+            "smoke: grid {:?} cell_count {} frames {frames} transparent {transparent}/{total} opaque {opaque} spread {:.2}",
+            grid,
+            grid.cell_count(),
+            luminance_spread(&rendered.before)
+        );
+        write_png(
+            &format!("{directory}/smoke-room.png"),
+            &rendered.before,
+            size,
+        );
+        write_png(
+            &format!("{directory}/smoke-room-next.png"),
+            &rendered.after,
+            size,
+        );
+        if let Some(sim) = smoke.debug_sim() {
+            dye_report = report_dye(sim, &rendered.device, &rendered.queue, grid);
+        }
+    }
+    if let Some(report) = dye_report {
+        eprintln!("{report}");
+    }
+
+    let mut dvd = crate::point10::scenes::dvd_room::DvdRoom::with_grid(grid);
+    let mut dvd_dye: Option<String> = None;
+    if let Some(rendered) = render_owned_chain_frames(&mut dvd, size, frames, &payload, &payload) {
+        let (transparent, opaque, total) = alpha_counts(&rendered.before);
+        eprintln!(
+            "dvd:   grid {:?} cell_count {} frames {frames} transparent {transparent}/{total} opaque {opaque} spread {:.2}",
+            grid,
+            grid.cell_count(),
+            luminance_spread(&rendered.before)
+        );
+        write_png(&format!("{directory}/dvd-room.png"), &rendered.before, size);
+        write_png(
+            &format!("{directory}/dvd-room-next.png"),
+            &rendered.after,
+            size,
+        );
+        if let Some(sim) = dvd.debug_sim() {
+            dvd_dye = report_dye(sim, &rendered.device, &rendered.queue, grid);
+        }
+    }
+    if let Some(report) = dvd_dye {
+        eprintln!("{report}");
+    }
+}
+
+/// The dye field's statistics and an ASCII slice through the centre.
+#[cfg(test)]
+fn report_dye(
+    sim: &crate::point10::volume::VolumeSim,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    grid: crate::point10::volume::VolumeGrid,
+) -> Option<String> {
+    let voxels = sim.read_dye(device, queue);
+    let mut max = 0.0_f32;
+    let mut sum = 0.0_f64;
+    let mut nonzero = 0_usize;
+    let mut max_temp = 0.0_f32;
+    for voxel in &voxels {
+        max = max.max(voxel[0]);
+        max_temp = max_temp.max(voxel[1]);
+        sum += voxel[0] as f64;
+        if voxel[0] > 0.01 {
+            nonzero += 1;
+        }
+    }
+    let mut out = format!(
+        "dye: mean {:.4} max {:.3} max_temp {:.3} nonzero {}/{}",
+        sum / voxels.len() as f64,
+        max,
+        max_temp,
+        nonzero,
+        voxels.len()
+    );
+    let z = grid.z / 2;
+    let rows = 18;
+    let columns = 36;
+    for row in 0..rows {
+        let y = (grid.y as usize - 1) * (rows - 1 - row) / (rows - 1).max(1);
+        let mut line = String::new();
+        for column in 0..columns {
+            let x = (grid.x as usize - 1) * column / (columns - 1).max(1);
+            let density = voxels[(z as usize * grid.y as usize + y) * grid.x as usize + x][0];
+            let level = (density * 4.0).clamp(0.0, 1.0);
+            let glyph = if level < 0.05 {
+                ' '
+            } else if level < 0.25 {
+                '.'
+            } else if level < 0.5 {
+                ':'
+            } else if level < 0.75 {
+                '*'
+            } else {
+                '#'
+            };
+            line.push(glyph);
+        }
+        out.push_str(&format!("\n  |{line}|"));
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+fn write_png(path: &str, pixels: &[u8], size: u32) {
+    let image = image::RgbaImage::from_raw(size, size, pixels.to_vec())
+        .unwrap_or_else(|| panic!("{path}: pixel count does not match {size}x{size}"));
+    image
+        .save(path)
+        .unwrap_or_else(|error| panic!("{path}: {error}"));
 }

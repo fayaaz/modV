@@ -7,7 +7,12 @@
 struct CompositeUniforms {
   bloom_strength: f32,
   bloom_radius: f32,
-  _pad: vec2<f32>,
+  // Global multiplier. three's classic UnrealBloomPass applies 3.0 "for
+  // backwards compatibility with the previous alpha-based intensity"; the
+  // TSL `bloom()` node (BloomNode, used by the WebGPU scenes) composites with
+  // no multiplier. Keeping it a uniform lets both effects share this pass.
+  bloom_scale: f32,
+  _pad: f32,
   taps: array<vec4<f32>, 5>,
 }
 @group(0) @binding(0) var<uniform> u: CompositeUniforms;
@@ -23,8 +28,6 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   // The composite target and blur1 are both the first mip's size.
   let uv = position.xy / vec2<f32>(textureDimensions(blur1));
 
-  // 3.0 for backwards compatibility with the previous alpha-based intensity
-  // (UnrealBloomPass.js:664).
   var bloom = vec3<f32>(0.0);
   let t1 = u.taps[0];
   let t2 = u.taps[1];
@@ -36,7 +39,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   bloom = bloom + t3.x * t3.yzw * textureSample(blur3, blur_sampler, uv).rgb;
   bloom = bloom + t4.x * t4.yzw * textureSample(blur4, blur_sampler, uv).rgb;
   bloom = bloom + t5.x * t5.yzw * textureSample(blur5, blur_sampler, uv).rgb;
-  bloom = 3.0 * u.bloom_strength * bloom;
+  bloom = u.bloom_scale * u.bloom_strength * bloom;
 
   let bloom_alpha = max(bloom.r, max(bloom.g, bloom.b));
   return vec4<f32>(bloom, bloom_alpha);

@@ -15,6 +15,9 @@
 //!   chromatic/             shared ring-buffer sim + the ChromaticLine/ChromaticWave scenes
 //!   chromatic_line.rs      compatibility re-export of chromatic/line.rs
 //!   postfx/                RenderPass, UnrealBloomPass, ShaderPass, OutputPass, Composer
+//!   volume/                the GPU fire/smoke simulation (compute passes + raymarch),
+//!                          the room/audio maths and the shared HDR stage that
+//!                          SmokeRoom and DVD Room configure
 //!   scenes/                ParticleField, SpiralParticles, Waveform, SquareTunnel,
 //!                          LightTunnel, Wormhole, ItIsComingForYou, WaterRipple,
 //!                          GlassLens, Mycelium, AroundPlus, UltraHdr, MirrorCube,
@@ -38,8 +41,8 @@
 //! | 2 | **SquareTunnel**, LightTunnel, Wormhole, ItIsComingForYou | needs `plane9/P9Glsl` + `shared/textures` + `shared/random` |
 //! | 3 | WaterRipple, GlassLens, Mycelium, AroundPlus | needs `shared/waterWave`, `shared/phraseColor`, `shared/assets` |
 //! | 4 | **UltraHDR**, MirrorCube, ColorCube, Boxy, SoundCube | `P9Glsl` lighting (`shared/p9_shading`), `BoxGeometry`, `preserveBloomAlpha` |
-//! | 5a | HollowCube, AttractorParticles, DvdRoom | first of the WebGPU/TSL group; the TSL compute passes become fragment/CPU substitutes |
-//! | 5b | GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | adds the SSAO/Afterimage passes and the last two TSL volume substitutes |
+//! | 5a | HollowCube, AttractorParticles, DvdRoom | first of the WebGPU/TSL group; DvdRoom runs the ported volume simulation |
+//! | 5b | GeometricTunnel, RollingFire, SmokeRoom, LatentBackrooms | adds the SSAO/Afterimage passes; SmokeRoom runs the ported volume simulation, RollingFire keeps its puff substitute |
 //!
 //! ChromaticLine was ported ahead of this batch (`chromatic_line.rs`, a
 //! fixture-driven port with its own `SyntheticSine`); it now shares its
@@ -107,6 +110,7 @@ pub mod chromatic_line;
 pub mod postfx;
 pub mod scenes;
 pub mod shared;
+pub mod volume;
 
 #[cfg(test)]
 mod scene_tests;

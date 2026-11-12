@@ -2,9 +2,10 @@
 //!
 //! Both JS scenes are WebGPU/TSL volumetric fire simulations built from the
 //! same parts: a UV sphere emitter, a `VolumeNodeMaterial` raymarch of a 3D
-//! dye grid, and a lava emissive material on the sphere. The Rust ports replace
-//! the volume with additive haze puffs (see `smoke_room.rs` / `rolling_fire.rs`)
-//! and share:
+//! dye grid, and a lava emissive material on the sphere. SmokeRoom (and DVD
+//! Room) now run the real simulation through
+//! [`crate::point10::volume::VolumeSim`]; Rolling Fire still uses additive haze
+//! puffs (see `rolling_fire.rs`), and both share:
 //!
 //! * [`build_sphere`] — `SphereGeometry(radius, widthSegments, heightSegments)`
 //!   with three's UV-sphere topology and vertex order, so the emitter mesh and
@@ -12,9 +13,10 @@
 //! * [`sphere_surface_sample`] — a deterministic point on the sphere, used to
 //!   seed puffs where the JS's `emitSpherePass` writes into the dye grid.
 //!
-//! The remaining shared pieces (`fire_ramp`, glass fitting, the box extents)
-//! live in [`super::dvd_room`], which already ports SmokeRoom's glass room for
-//! DVD Room; both fire scenes import them rather than duplicating the maths.
+//! The remaining shared pieces (`fire_ramp`, glass fitting, the box extents,
+//! the audio bands and the simulation clock) live in
+//! [`crate::point10::volume::room`], which ports SmokeRoom's room maths for
+//! both of its scenes.
 
 #![forbid(unsafe_code)]
 

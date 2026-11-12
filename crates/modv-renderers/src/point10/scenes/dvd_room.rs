@@ -1,24 +1,27 @@
 //! DvdRoom — Rust/wgpu port of
 //! `src/renderer/src/application/point10/scenes/DvdRoom.js`.
 //!
-//! The JS scene is **WebGPU/TSL** and inherits `SmokeRoom`: a glass room wraps
-//! a 12x12x24 volumetric fire/smoke simulation grid, and a bouncing DVD logo
-//! is both the emitter and the subject. The logo changes colour on every wall
-//! bounce and flashes white on a corner hit; music pumps its speed and the
-//! smoke emission.
+//! The JS scene inherits `SmokeRoom` and swaps the lava sphere for a bouncing
+//! extruded DVD logo that *is* the smoke emitter. The room, the simulation
+//! grid, the compute passes and the raymarch are identical, so this scene
+//! configures the same [`VolumeSim`] and [`VolumeStage`] and only changes the
+//! emitter, the lights and the logo behaviour.
 //!
 //! # Ported exactly
 //!
-//! * the logo motion (`DvdRoom.js:350-374`): `pos += vel * dt * speedMul` with
+//! * the logo geometry (`:251-275`): the SVG path from
+//!   `textures/dvd_logo.svg`, inlined and extruded by
+//!   [`crate::point10::scenes::dvd_logo`] with the JS's `LOGO_WIDTH` /
+//!   `LOGO_DEPTH` normalisation (the bounce box uses the measured extents);
+//! * the logo motion (`:350-374`): `pos += vel * dt * speedMul` with
 //!   `speedMul = 1 + min(smBass, 0.6) + burst * 0.5`, the per-axis room bounds
-//!   `VOLUME_WORLD_SIZE / 2 - logoHalf`, the reflection, and one colour step
-//!   (`colorIdx = (colorIdx + 1) % 7`) plus `pop = 1` per bounce; a 2-axis hit
-//!   sets `cornerFlash = 1`;
+//!   `VOLUME_WORLD_SIZE / 2 - logoHalf`, the reflection, one palette step plus
+//!   `pop = 1` per bounce, and `cornerFlash = 1` on a 2-axis hit;
 //! * the palette (`:31-33`), the initial position `(-2, 1, -4)` and the
 //!   `normalize(1, 0.6, 0.8) * 3.5` velocity;
 //! * the logo transform (`:410-425`): `rotation = (sin(time * 0.3) * 0.25,
 //!   faceYaw + sin(time * 0.4) * 0.5, 0)` with
-//!   `faceYaw = atan2(cam.x - pos.x, cam.z - pos.z)` and the `1 + pop * 0.12`
+//!   `faceYaw = atan2(cam.x - pos.x, cam.z - pos.z)`, and the `1 + pop * 0.12`
 //!   scale;
 //! * the audio mapping (`:376-408`): bass mean of bins `[1, 9)`, treble mean of
 //!   the top 15%, the asymmetric `dt*16` / `dt*5` smoothing, the kick attack
@@ -29,119 +32,58 @@
 //!   min(1, dt * 0.4)`, then the `k = min(1, dt * 1.2)` lerp toward
 //!   `(cos(orbitYaw) * 17, 6.5 + sin(time * 0.23) * 1.2, sin(orbitYaw) * 17)`
 //!   with `lookAt(0, 0, 0)`;
-//! * the glass fit (`SmokeRoom.js:130-185`, `:276-294`): a bottom-anchored room
-//!   whose top edge sits `GLASS_TOP_MARGIN` above the output's top edge, at
-//!   `boxScale` / `boxXYScale`;
-//! * the renderer grade (`SmokeRoom.js:417-418`): `ACESFilmicToneMapping` with
-//!   `toneMappingExposure = 2`, applied by [`Composer`]'s output pass after the
-//!   `alpha = max(rgb)` rule, exactly like the JS's pipeline output;
-//! * the room/light rig intent (`:319-336`): the glass pane opacity
-//!   `0.34 + smBass * 0.06`, the dimmed `0.35` fire light and the `22`
-//!   fire-intensity default that keeps the bounce colour visible;
-//! * the prop binder (`sceneProps.js:40-44`, `:205-218`): `smokeDensity`,
-//!   `fireIntensity`, `smokeLifespan`, `fireLifespan`, `simulationSpeed`,
-//!   `boxScale`, `boxXYScale`.
+//! * the emission gain (`:277-300`): `(sphereVerts / logoVerts) * 6`, from the
+//!   ported logo mesh's vertex count;
+//! * the room lighting (`:319-336`): the dimmed `0.35` fire light, the
+//!   HemisphereLight fill and the `22` fire-intensity default that keeps the
+//!   bounce colour readable;
+//! * the glass pane opacity (`:445`): `0.34 + smBass * 0.06` (SmokeRoom's
+//!   `_band(1, 9)` bass, not the blooms' first-five-bin bass);
+//! * the prop binder (`sceneProps.js:40-44`, `:205-218`).
 //!
-//! # Replaced TSL machinery — the smoke simulation
+//! # Deviations
 //!
-//! The JS smoke is a 150x150x300 `Storage3DTexture` grid with seven compute
-//! passes per 1/120 s step (advect velocity, divergence, two Jacobi pressure
-//! iterations, project, advect dye, emit) plus a 16-step `VolumeNodeMaterial`
-//! raymarch, a shadow volume pass, a half-resolution gaussian blur and a
-//! bloom. That compute/storage-texture path does not exist in this crate (see
-//! `point10/mod.rs`), so the *motion and audio behaviour* of the emission is
-//! kept and the volume is replaced with a procedural **additive haze**:
-//!
-//! | SmokeRoom (TSL) | DvdRoom (Rust) |
-//! |-----------------|----------------|
-//! | 3D velocity/dye/pressure grids + compute passes | 32 CPU-spawned billboard puffs drifting from the logo |
-//! | `uFireSize = 1 + hi * 2.5 + snare * 8` | the same, scaling the puff brightness |
-//! | `uEmitGain = (sphereVerts / logoVerts) * 6` | the same reference-count formula, from the ported logo mesh |
-//! | `smokeDensity` / `fireIntensity` / lifespans / `simulationSpeed` | puff brightness / life / speed |
-//! | `dropColorPulse` → `uFireHue` | the same drop detector drives the puff colour |
-//! | volume raymarch + bloom | additive puffs + [`UnrealBloomPass`] |
-//!
-//! The room, glass, logo, palette, bounce and camera behaviour are ported as
-//! they are; only the density field is substituted. The haze positions are
-//! seeded with [`seeded_rand`] instead of `Math.random`, and the puff count is
-//! fixed (32) rather than a grid.
-//!
-//! # Other deviations
-//!
-//! * **The logo is procedural, not the SVG.** `dvd_logo.svg` is a Wikimedia
-//!   text logo that the JS parses with its own SVG path parser and extrudes.
-//!   The shared asset loader only decodes PNG/JPEG, so the port builds a
-//!   rounded, bevelled slab of the same `LOGO_WIDTH` x `LOGO_WIDTH/2` x
-//!   `LOGO_DEPTH` extents — the same bounce silhouette with a fraction of the
-//!   geometry. The bounce box uses the same half extents the JS measures.
-//! * The JS glass is a `RoundedBoxGeometry` with a PMREM studio env map; the
-//!   port draws the six panes of a box with a fresnel/env-gradient glass shader
-//!   and the same opacity rule — no PMREM pass exists here.
-//! * **The smoke grid keeps its geometry only as the room's box.** The room
-//!   still matches the 12x12x24 sim footprint (`VOLUME_WORLD_SIZE_*`).
-//! * `stepBounce`'s bounds are not scaled by `boxScale` (a JS quirk); the port
-//!   keeps that, while the glass room itself does scale.
-//! * The final alpha is `clamp(max(rgb), 0, 1)` — the rule SmokeRoom writes
-//!   explicitly (`SmokeRoom.js:1270-1276`), so the empty background stays
-//!   transparent and the module composites over the layers below.
-//!
-//! [`UnrealBloomPass`]: crate::point10::postfx::UnrealBloomPass
+//! * **No bevel on the logo.** `ExtrudeGeometry` bevels 3 SVG units (0.012
+//!   world units at this scale) — sub-pixel, so the caps and walls are flat.
+//! * The extruded caps are triangulated with a trapezoidal decomposition rather
+//!   than Earcut (see `dvd_logo`).
+//! * The logo and the glass keep their procedural WGSL materials instead of
+//!   `MeshStandardMaterial` + PMREM (the same substitution SmokeRoom
+//!   documents).
+//! * The volume's shadow projection onto the glass/logo is not drawn (no
+//!   shadow maps); the raymarch's shadow march is.
 
 #![forbid(unsafe_code)]
 
-use crate::point10::audio_bridge::{AUDIO_SAMPLES, AudioBridge};
-use crate::point10::postfx::{Composer, ToneMapping, UnrealBloomPass};
+use crate::point10::audio_bridge::AudioBridge;
 use crate::point10::scenes::cube_mesh::{
-    Mat4, Mesh, MeshGpu, Vertex, build_box, create_depth, depth_state, look_at, mat4_mul,
-    normalise, perspective, scale, translation, trs,
+    Mat4, MeshGpu, build_box, depth_state, look_at, mat4_mul, normalise, perspective, scale,
+    translation, trs,
 };
+use crate::point10::scenes::dvd_logo::{LogoMesh, build_logo};
 use crate::point10::shared::phrase_color::{
-    DropColorState, drop_color_pulse, ease_phrase_hue, equalized_hue, srgb_hex_to_linear,
+    DropColorState, drop_color_pulse, ease_phrase_hue, srgb_hex_to_linear,
 };
 use crate::point10::shared::random::seeded_rand;
+use crate::point10::volume::room::{
+    BAND_TWO_END, BAND_TWO_START, BLOOM_BASE, BLOOM_MAX, BLOOM_PER_BASS, CAMERA_FAR, CAMERA_FOV,
+    CAMERA_NEAR, CAMERA_START, CLEAR_ALPHA, FireTemporal, GLASS_HALF_X, GLASS_HALF_Y, GLASS_HALF_Z,
+    ImprovedNoise, SimulationClock, fire_colour, fire_size, fire_temporal, glass_fit, room_top,
+    smoke_bass, treble_band, volume_point_light,
+};
+use crate::point10::volume::stage::{Material, VolumeStage, volumetric_size};
+use crate::point10::volume::{VolumeGrid, VolumeSim, VolumeUniforms};
 use crate::point10::{
-    FULLSCREEN_TRIANGLE_WGSL, HDR_FORMAT, Point10Scene, SceneContext, SceneMeta, SceneProp,
-    UnitQuad, frame_dt, read_scene_props, scene_props_with_levers,
+    Point10Scene, SceneContext, SceneMeta, SceneProp, frame_dt, read_scene_props,
+    scene_props_with_levers,
 };
 
-// ---------------------------------------------------------------------------
-// Constants (`SmokeRoom.js:60-88`, `DvdRoom.js:26-33`)
-// ---------------------------------------------------------------------------
-
-/// `VOLUME_WORLD_SIZE_X` — the room/sim footprint.
-pub const VOLUME_WORLD_SIZE_X: f32 = 12.0;
-/// `VOLUME_WORLD_SIZE_Y`.
-pub const VOLUME_WORLD_SIZE_Y: f32 = 12.0;
-/// `VOLUME_WORLD_SIZE_Z`.
-pub const VOLUME_WORLD_SIZE_Z: f32 = 24.0;
-
-/// `GLASS_PADDING`.
-pub const GLASS_PADDING: f32 = 0.6;
-/// `GLASS_HALF_X` = `(VOLUME_WORLD_SIZE_X + GLASS_PADDING) / 2`.
-pub const GLASS_HALF_X: f32 = (VOLUME_WORLD_SIZE_X + GLASS_PADDING) / 2.0;
-/// `GLASS_HALF_Y`.
-pub const GLASS_HALF_Y: f32 = (VOLUME_WORLD_SIZE_Y + GLASS_PADDING) / 2.0;
-/// `GLASS_HALF_Z`.
-pub const GLASS_HALF_Z: f32 = (VOLUME_WORLD_SIZE_Z + GLASS_PADDING) / 2.0;
-/// `GLASS_TOP_MARGIN`.
-pub const GLASS_TOP_MARGIN: f32 = 0.75;
-
-/// `LOGO_WIDTH` — world units across.
-pub const LOGO_WIDTH: f32 = 4.2;
-/// `LOGO_HEIGHT` — the fallback box's `LOGO_WIDTH / 2`.
-pub const LOGO_HEIGHT: f32 = LOGO_WIDTH / 2.0;
-/// `LOGO_DEPTH`.
-pub const LOGO_DEPTH: f32 = 0.35;
-/// The rounded-slab corner radius (a visual stand-in for the SVG bevel).
-pub const LOGO_RADIUS: f32 = 0.45;
-
-/// `BASE_SPEED`.
+/// `BASE_SPEED` (`DvdRoom.js:29`).
 pub const BASE_SPEED: f32 = 3.5;
 /// The initial logo position (`:206`).
 pub const LOGO_START_POSITION: [f32; 3] = [-2.0, 1.0, -4.0];
 /// The initial velocity direction (`:207`).
 pub const LOGO_START_VELOCITY: [f32; 3] = [1.0, 0.6, 0.8];
-
 /// `PALETTE` — the classic screensaver cycle (never random).
 pub const PALETTE: [u32; 7] = [
     0x0000_b3ff,
@@ -152,390 +94,23 @@ pub const PALETTE: [u32; 7] = [
     0x00ff_3b3b,
     0x00ff_ffff,
 ];
-
-/// `FIRE_HAT_K`.
-pub const FIRE_HAT_K: f32 = 2.5;
-/// `FIRE_SNARE_K`.
-pub const FIRE_SNARE_K: f32 = 8.0;
-/// `BASS_BINS` (SmokeRoom).
-pub const BASS_BINS: usize = 5;
-/// `BLOOM_BASE`.
-pub const BLOOM_BASE: f32 = 0.12;
-/// `BLOOM_PER_BASS`.
-pub const BLOOM_PER_BASS: f32 = 2.2;
-/// The JS clamps the smoke-room bloom at 2.8.
-pub const BLOOM_MAX: f32 = 2.8;
-
-/// `SPHERE_RADIUS`.
+/// `SPHERE_RADIUS` — the reference emitter's radius (`SmokeRoom.js:73`).
 pub const SPHERE_RADIUS: f32 = 0.9;
-/// `SphereGeometry(SPHERE_RADIUS, 64, 40)`'s position count.
+/// `SphereGeometry(0.9, 64, 40)`'s position count, the emission reference.
 pub const REFERENCE_EMITTER_VERTICES: usize = (64 + 1) * (40 + 1);
-
-/// `CLEAR_ALPHA` — SmokeRoom sets `scene.background = null`.
-pub const CLEAR_ALPHA: f64 = 0.0;
-
-/// The number of haze puffs that stand in for the smoke volume.
-pub const PUFF_COUNT: usize = 32;
-/// The emit-gain normalisation the puffs are calibrated at.
-pub const REFERENCE_EMIT_GAIN: f32 = 82.0;
-
-/// `CAMERA_FOV` (`PerspectiveCamera(60, …)`).
-pub const CAMERA_FOV: f32 = 60.0;
-/// `CAMERA_NEAR`.
-pub const CAMERA_NEAR: f32 = 0.1;
-/// `CAMERA_FAR`.
-pub const CAMERA_FAR: f32 = 100.0;
-/// The initial camera (`SmokeRoom.js:433`: `(14.0, 5.5, 4.4)`).
-pub const CAMERA_START: [f32; 3] = [14.0, 5.5, 4.4];
 /// The orbit radius (`DvdRoom.js:433-437`).
 pub const CAMERA_ORBIT_RADIUS: f32 = 17.0;
+/// The DVD room's fire-intensity default (`sceneProps.js`).
+pub const FIRE_INTENSITY: f32 = 22.0;
+/// `uFireIntensity` for the volume, dimmed so the logo stays readable
+/// (`DvdRoom.js:332`: `this._uFireIntensity.value = 22.0`).
+pub const VOLUME_FIRE_INTENSITY: f32 = 22.0;
+/// The emitter density default (shared with SmokeRoom).
+pub const EMIT_DENSITY: f32 = 28.0;
+/// `uEmitTemperature` default.
+pub const EMIT_TEMPERATURE: f32 = 22.0;
 
-// ---------------------------------------------------------------------------
-// Pure geometry / motion helpers
-// ---------------------------------------------------------------------------
-
-/// `SmokeRoom.boxHalfExtents(scale, xyScale)`.
-pub fn box_half_extents(scale: f32, xy_scale: f32) -> [f32; 3] {
-    let scale = if scale.is_finite() {
-        scale.max(0.0)
-    } else {
-        1.0
-    };
-    let xy = if xy_scale.is_finite() {
-        xy_scale.max(0.0)
-    } else {
-        1.0
-    };
-    [
-        GLASS_HALF_X * scale * xy,
-        GLASS_HALF_Y * scale * xy,
-        GLASS_HALF_Z * scale,
-    ]
-}
-
-/// The world-space Y that puts the room's highest edge on the output's top
-/// edge (`SmokeRoom.js:146-174`).
-///
-/// `forward` is `camera.getWorldDirection` and `up` the camera's up vector.
-/// Returns the natural half height when the ray/plane intersection degenerates
-/// (the camera looking straight down the room's top plane), where the JS would
-/// divide by ~0.
-pub fn required_glass_top(
-    camera_position: [f32; 3],
-    forward: [f32; 3],
-    up: [f32; 3],
-    fov_degrees: f32,
-    scale: f32,
-    xy_scale: f32,
-) -> f32 {
-    let forward = normalise(forward);
-    let right = normalise([
-        forward[1] * up[2] - forward[2] * up[1],
-        forward[2] * up[0] - forward[0] * up[2],
-        forward[0] * up[1] - forward[1] * up[0],
-    ]);
-    let up = [
-        right[1] * forward[2] - right[2] * forward[1],
-        right[2] * forward[0] - right[0] * forward[2],
-        right[0] * forward[1] - right[1] * forward[0],
-    ];
-    let tan_half_fov = (fov_degrees.to_radians() * 0.5).tan();
-    let denominator = up[1] - tan_half_fov * forward[1];
-    let extents = box_half_extents(scale, xy_scale);
-    if denominator.abs() < 1e-5 {
-        return extents[1];
-    }
-
-    let mut top = f32::NEG_INFINITY;
-    for x in [-extents[0], extents[0]] {
-        for z in [-extents[2], extents[2]] {
-            let ex = x - camera_position[0];
-            let ez = z - camera_position[2];
-            let offset =
-                ex * up[0] + ez * up[2] - tan_half_fov * (ex * forward[0] + ez * forward[2]);
-            top = top.max(camera_position[1] - offset / denominator);
-        }
-    }
-    top
-}
-
-/// `SmokeRoom.glassFit(top, scale, xyScale)` — the bottom-anchored room height
-/// and centre.
-pub fn glass_fit(top: f32, scale: f32, xy_scale: f32) -> (f32, f32) {
-    let half_y = box_half_extents(scale, xy_scale)[1];
-    let top_y = if top.is_finite() {
-        top.max(half_y)
-    } else {
-        half_y
-    };
-    (top_y + half_y, (top_y - half_y) / 2.0)
-}
-
-/// The room's top edge for a camera looking at the origin, including the
-/// `GLASS_TOP_MARGIN`.
-pub fn room_top(camera_position: [f32; 3], scale: f32, xy_scale: f32) -> f32 {
-    let forward = normalise([
-        -camera_position[0],
-        -camera_position[1],
-        -camera_position[2],
-    ]);
-    required_glass_top(
-        camera_position,
-        forward,
-        [0.0, 1.0, 0.0],
-        CAMERA_FOV,
-        scale,
-        xy_scale,
-    ) + GLASS_TOP_MARGIN * scale
-}
-
-/// The logo's half extents (`this.logoHalf` for the fallback box).
-pub fn logo_half_extents() -> [f32; 3] {
-    [LOGO_WIDTH / 2.0, LOGO_HEIGHT / 2.0, LOGO_DEPTH / 2.0]
-}
-
-/// The bounce bounds `VOLUME_WORLD_SIZE / 2 - logoHalf` (`:351-355`).
-///
-/// Note the JS does **not** scale these by `boxScale`; the port keeps that.
-pub fn bounce_bounds() -> [f32; 3] {
-    let half = logo_half_extents();
-    [
-        VOLUME_WORLD_SIZE_X / 2.0 - half[0],
-        VOLUME_WORLD_SIZE_Y / 2.0 - half[1],
-        VOLUME_WORLD_SIZE_Z / 2.0 - half[2],
-    ]
-}
-
-/// One `stepBounce` result.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BounceStep {
-    /// Integrated position, clamped into the room.
-    pub position: [f32; 3],
-    /// Reflected velocity.
-    pub velocity: [f32; 3],
-    /// Number of axes that hit a wall (2+ = a corner).
-    pub axes_hit: u32,
-}
-
-/// Pure `stepBounce(dt, speedMul)` (`:350-374`).
-pub fn step_bounce(position: [f32; 3], velocity: [f32; 3], dt: f32, speed_mul: f32) -> BounceStep {
-    let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-    let speed_mul = if speed_mul.is_finite() {
-        speed_mul
-    } else {
-        1.0
-    };
-    let bounds = bounce_bounds();
-    let mut position = [
-        position[0] + velocity[0] * dt * speed_mul,
-        position[1] + velocity[1] * dt * speed_mul,
-        position[2] + velocity[2] * dt * speed_mul,
-    ];
-    let mut velocity = velocity;
-    let mut axes_hit = 0;
-
-    for axis in 0..3 {
-        if position[axis] > bounds[axis] {
-            position[axis] = bounds[axis];
-            velocity[axis] = -velocity[axis].abs();
-            axes_hit += 1;
-        } else if position[axis] < -bounds[axis] {
-            position[axis] = -bounds[axis];
-            velocity[axis] = velocity[axis].abs();
-            axes_hit += 1;
-        }
-    }
-
-    BounceStep {
-        position,
-        velocity,
-        axes_hit,
-    }
-}
-
-/// `advanceCamera` (`:427-438`): returns `(camera, orbitYaw)`.
-pub fn advance_camera(
-    camera: [f32; 3],
-    orbit_yaw: f32,
-    smoothed_bass: f32,
-    time: f32,
-    dt: f32,
-) -> ([f32; 3], f32) {
-    let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-    let bass = if smoothed_bass.is_finite() {
-        smoothed_bass.max(0.0)
-    } else {
-        0.0
-    };
-    let yaw = orbit_yaw + (bass * 0.35 - orbit_yaw) * (dt * 0.4).min(1.0);
-    let k = (dt * 1.2).min(1.0);
-    let target = [
-        yaw.cos() * CAMERA_ORBIT_RADIUS,
-        6.5 + (time * 0.23).sin() * 1.2,
-        yaw.sin() * CAMERA_ORBIT_RADIUS,
-    ];
-    (
-        [
-            camera[0] + (target[0] - camera[0]) * k,
-            camera[1] + (target[1] - camera[1]) * k,
-            camera[2] + (target[2] - camera[2]) * k,
-        ],
-        yaw,
-    )
-}
-
-/// The Plane9-style fire ramp SmokeRoom uses (`SmokeRoom.js:850-858`), in
-/// linear RGB.
-pub fn fire_ramp(t: f32) -> [f32; 3] {
-    let start = srgb_hex_to_linear(0x00ff_e68c);
-    let mid = srgb_hex_to_linear(0x00ff_7305);
-    let end = srgb_hex_to_linear(0x00ff_0000);
-    let mix = |a: [f32; 3], b: [f32; 3], k: f32| {
-        [
-            a[0] + (b[0] - a[0]) * k,
-            a[1] + (b[1] - a[1]) * k,
-            a[2] + (b[2] - a[2]) * k,
-        ]
-    };
-    let steps = |edge0: f32, edge1: f32, x: f32| {
-        let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-
-    let colour = mix([0.0; 3], end, steps(0.05, 0.35, t));
-    let colour = mix(colour, mid, steps(0.35, 0.65, t));
-    mix(colour, start, steps(0.65, 1.0, t))
-}
-
-/// `fireHue(fireRamp(t), hue)` on the CPU (luminance-equalised rotation).
-pub fn fire_colour(t: f32, hue: f32) -> [f32; 3] {
-    equalized_hue(fire_ramp(t), hue)
-}
-
-/// `_band(lo, hi)` (`:223-229`): mean of the `freqMag` bins in `[lo, hi)`.
-pub fn band(freq_mag: &[f32; AUDIO_SAMPLES], lo: usize, hi: usize) -> f32 {
-    let hi = hi.min(freq_mag.len());
-    if hi <= lo {
-        return 0.0;
-    }
-    let mut sum = 0.0;
-    for value in freq_mag.iter().take(hi).skip(lo) {
-        sum += value;
-    }
-    sum / (hi - lo) as f32
-}
-
-/// The top-15% treble mean (`:379-385`).
-pub fn treble_band(freq_mag: &[f32; AUDIO_SAMPLES]) -> f32 {
-    let lo = (AUDIO_SAMPLES as f32 * 0.85).floor() as usize;
-    band(freq_mag, lo, AUDIO_SAMPLES)
-}
-
-/// One puff of the procedural smoke haze.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Puff {
-    /// World position.
-    pub position: [f32; 3],
-    /// World velocity.
-    pub velocity: [f32; 3],
-    /// Normalised age, 0..1.
-    pub age: f32,
-    /// World-space radius.
-    pub size: f32,
-    /// Brightness multiplier.
-    pub alpha: f32,
-    /// Temperature (for the fire ramp).
-    pub temperature: f32,
-    /// The seed stream offset for the next respawn.
-    pub seed: u32,
-}
-
-impl Puff {
-    /// A dead puff (age 1 → respawns on the next update).
-    pub fn dead() -> Self {
-        Self {
-            position: [0.0; 3],
-            velocity: [0.0; 3],
-            age: 1.0,
-            size: 0.0,
-            alpha: 0.0,
-            temperature: 0.0,
-            seed: 0,
-        }
-    }
-}
-
-/// Spawn a puff around the logo (`emitter` is the logo's world position).
-pub fn spawn_puff(seed: u32, emitter: [f32; 3]) -> Puff {
-    let rand = |offset: u32| seeded_rand(seed as i32, offset as i32);
-    let direction = normalise([
-        rand(1) * 2.0 - 1.0,
-        (rand(2) * 2.0 - 1.0) * 0.6 + 0.7,
-        rand(3) * 2.0 - 1.0,
-    ]);
-    let speed = 0.5 + rand(4) * 1.2;
-    Puff {
-        position: [
-            emitter[0] + (rand(5) * 2.0 - 1.0) * 0.8,
-            emitter[1] + (rand(6) * 2.0 - 1.0) * 0.6,
-            emitter[2] + (rand(7) * 2.0 - 1.0) * 0.8,
-        ],
-        velocity: [
-            direction[0] * speed,
-            direction[1] * speed,
-            direction[2] * speed,
-        ],
-        age: 0.0,
-        size: 0.35 + rand(8) * 0.6,
-        alpha: 0.6 + rand(9) * 0.4,
-        temperature: 0.35 + rand(10) * 0.55,
-        seed: seed.wrapping_add(1),
-    }
-}
-
-/// Advance one puff (the substitute for the advection pass).
-pub fn advance_puff(
-    puff: &mut Puff,
-    emitter: [f32; 3],
-    dt: f32,
-    simulation_speed: f32,
-    lifespan: f32,
-) {
-    let speed = if simulation_speed.is_finite() {
-        simulation_speed.clamp(0.1, 4.0)
-    } else {
-        1.2
-    };
-    let life = if lifespan.is_finite() {
-        lifespan.clamp(0.1, 20.0)
-    } else {
-        3.5
-    };
-    let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 } * speed;
-    if puff.age >= 1.0 {
-        *puff = spawn_puff(puff.seed, emitter);
-        return;
-    }
-    puff.age = (puff.age + step / life).min(1.0);
-    puff.position = [
-        puff.position[0] + puff.velocity[0] * step,
-        puff.position[1] + puff.velocity[1] * step,
-        puff.position[2] + puff.velocity[2] * step,
-    ];
-    // Slow down and cool as it rises.
-    puff.velocity = [
-        puff.velocity[0] * (1.0 - 0.6 * step),
-        puff.velocity[1] * (1.0 - 0.3 * step),
-        puff.velocity[2] * (1.0 - 0.6 * step),
-    ];
-    puff.size += step * 1.4;
-}
-
-// ---------------------------------------------------------------------------
-// GPU
-// ---------------------------------------------------------------------------
-
-/// `DVD_ROOM_PROPS` (`sceneProps.js:18-44`).
+/// `DVD_ROOM_PROPS` (`sceneProps.js:40-44`).
 const DVD_ROOM_PROPS: &[SceneProp] = &[
     SceneProp::float("smokeDensity", "Smoke Density", 28.0, 0.0, 100.0, 0.1),
     SceneProp::float("fireIntensity", "Fire Intensity", 22.0, 0.0, 100.0, 0.1),
@@ -576,128 +151,16 @@ struct GlassUniforms {
     params: [f32; 4],
 }
 
-/// The haze puff shader's uniform block (96 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct PuffUniforms {
-    view_proj: Mat4,
-    camera_right: [f32; 4],
-    camera_up: [f32; 4],
-}
-
-/// One puff instance (32 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct PuffInstance {
-    position: [f32; 3],
-    size: f32,
-    colour: [f32; 3],
-    alpha: f32,
-}
-
-impl PuffInstance {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Self>() as u64,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 0,
-                    shader_location: 4,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 12,
-                    shader_location: 5,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 16,
-                    shader_location: 6,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 28,
-                    shader_location: 7,
-                },
-            ],
-        }
-    }
-}
-
-/// The final composite uniform block (16 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct FinalUniforms {
-    resolution: [f32; 2],
-    _pad: [f32; 2],
-}
-
-/// A texture plus its view.
-struct TextureTarget {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
-}
-
-impl TextureTarget {
-    fn new(
-        device: &wgpu::Device,
-        label: &str,
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-        usage: wgpu::TextureUsages,
-    ) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self {
-            _texture: texture,
-            view,
-        }
-    }
-}
-
 /// GPU resources built in `init`.
 struct DvdRoomGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    logo_pipeline: wgpu::RenderPipeline,
-    logo_uniforms: wgpu::Buffer,
-    logo_bind_group: wgpu::BindGroup,
-    glass_pipeline: wgpu::RenderPipeline,
-    glass_uniforms: wgpu::Buffer,
-    glass_bind_group: wgpu::BindGroup,
-    puff_pipeline: wgpu::RenderPipeline,
-    puff_uniforms: wgpu::Buffer,
-    puff_bind_group: wgpu::BindGroup,
-    puff_instances: wgpu::Buffer,
+    sim: VolumeSim,
+    stage: VolumeStage,
+    logo: Material,
+    glass: Material,
     logo_mesh: MeshGpu,
     glass_mesh: MeshGpu,
-    quad: UnitQuad,
-    scene_target: TextureTarget,
-    _depth: wgpu::Texture,
-    depth_view: wgpu::TextureView,
-    bloom: UnrealBloomPass,
-    final_pipeline: wgpu::RenderPipeline,
-    final_uniforms: wgpu::Buffer,
-    final_bind_group: wgpu::BindGroup,
-    final_layout: wgpu::BindGroupLayout,
-    final_sampler: wgpu::Sampler,
-    composer: Composer,
 }
 
 /// DvdRoom scene.
@@ -734,6 +197,8 @@ pub struct DvdRoom {
     last_beat: f32,
     /// `this.time` (`BaseSceneWebGPU.update` accumulates the raw delta).
     time: f32,
+    /// The frame delta handed to `update`.
+    dt: f32,
     /// `this._orbitYaw`.
     orbit_yaw: f32,
     /// The camera position (`this.camera.position`).
@@ -744,10 +209,15 @@ pub struct DvdRoom {
     seed: u32,
     /// `uFireHue`.
     fire_hue: f32,
-    /// The haze puffs.
-    puffs: [Puff; PUFF_COUNT],
     /// `uEmitGain` from the emitter vertex counts.
     emit_gain: f32,
+    /// `this.logoHalf`, measured from the built logo mesh.
+    logo_half: [f32; 3],
+    /// The simulation clock and its CPU noise.
+    clock: SimulationClock,
+    noise: ImprovedNoise,
+    /// The raymarch dither's `frameId`.
+    frame: u32,
     /// Props.
     smoke_density: f32,
     fire_intensity: f32,
@@ -761,6 +231,8 @@ pub struct DvdRoom {
     glass_centre_y: f32,
     camera_aspect: f32,
     size: (u32, u32),
+    /// The simulation grid (`VolumeGrid::JS` unless a test scales it).
+    grid: VolumeGrid,
     gpu: Option<DvdRoomGpu>,
 }
 
@@ -774,10 +246,7 @@ impl DvdRoom {
     /// Create the scene (`DvdRoom.js:186-221` defaults).
     pub fn new() -> Self {
         let direction = normalise(LOGO_START_VELOCITY);
-        let mut puffs = [Puff::dead(); PUFF_COUNT];
-        for (index, puff) in puffs.iter_mut().enumerate() {
-            puff.seed = index as u32 * 7 + 1;
-        }
+        let logo = build_logo();
         Self {
             position: LOGO_START_POSITION,
             velocity: [
@@ -799,15 +268,19 @@ impl DvdRoom {
             bass_average: 0.0,
             last_beat: -1.0,
             time: 0.0,
+            dt: 0.0,
             orbit_yaw: 0.0,
             camera: CAMERA_START,
             pulse: DropColorState::new(),
             seed: 0,
             fire_hue: 0.0,
-            puffs,
             emit_gain: 6.0,
-            smoke_density: 28.0,
-            fire_intensity: 22.0,
+            logo_half: logo.half_extents,
+            clock: SimulationClock::default(),
+            noise: ImprovedNoise,
+            frame: 0,
+            smoke_density: EMIT_DENSITY,
+            fire_intensity: FIRE_INTENSITY,
             smoke_lifespan: 3.5,
             fire_lifespan: 1.3,
             simulation_speed: 1.2,
@@ -817,8 +290,18 @@ impl DvdRoom {
             glass_centre_y: 0.0,
             camera_aspect: 1.0,
             size: (1, 1),
+            grid: VolumeGrid::JS,
             gpu: None,
         }
+    }
+
+    /// A scene with a different simulation grid (tests and the offline
+    /// reference renderer use a smaller grid; the scene defaults to the JS
+    /// `150 x 150 x 300`).
+    pub fn with_grid(grid: VolumeGrid) -> Self {
+        let mut scene = Self::new();
+        scene.grid = grid;
+        scene
     }
 
     /// Apply the resolved modV props (`sceneProps.js:40-44`).
@@ -835,6 +318,7 @@ impl DvdRoom {
                 _ => {}
             }
         }
+        self.refresh_glass_fit();
     }
 
     /// `this.pos`.
@@ -879,9 +363,7 @@ impl DvdRoom {
 
     /// The glass pane opacity (`DvdRoom.js:445`):
     /// `0.34 + this.smBass * 0.06`, where the JS's `smBass` is smoothed from
-    /// `this._band(1, 9)` (the same value as [`DvdRoom::smoothed_bass`]) — not
-    /// the SmokeRoom bloom bass (`smoke_bass`, the mean of the first five
-    /// bins).
+    /// `this._band(1, 9)` — not the smoke room's first-five-bin bloom bass.
     pub fn glass_opacity(&self) -> f32 {
         0.34 + self.smoothed_bass * 0.06
     }
@@ -891,23 +373,41 @@ impl DvdRoom {
         srgb_hex_to_linear(PALETTE[self.colour_index % PALETTE.len()])
     }
 
-    /// The haze puffs.
-    pub fn puffs(&self) -> &[Puff; PUFF_COUNT] {
-        &self.puffs
-    }
-
     /// The destination alpha the scene clears to.
     pub fn clear_alpha(&self) -> f64 {
         CLEAR_ALPHA
     }
 
-    fn fire_light(&self) -> [f32; 4] {
-        let colour = fire_colour(0.72, self.fire_hue);
-        let intensity = (self.fire_intensity / 22.0).max(0.0) * 0.35;
+    /// The volume grid the scene runs.
+    pub fn grid(&self) -> VolumeGrid {
+        self.grid
+    }
+
+    /// `this.logoHalf`, measured from the extruded SVG.
+    pub fn logo_half_extents(&self) -> [f32; 3] {
+        self.logo_half
+    }
+
+    /// The bounce bounds `VOLUME_WORLD_SIZE / 2 - logoHalf` (`:351-355`).
+    ///
+    /// Note the JS does **not** scale these by `boxScale`; the port keeps that.
+    pub fn bounce_bounds(&self) -> [f32; 3] {
         [
-            colour[0] * intensity,
-            colour[1] * intensity,
-            colour[2] * intensity,
+            (crate::point10::volume::VOLUME_WORLD_SIZE_X / 2.0 - self.logo_half[0]).max(0.05),
+            (crate::point10::volume::VOLUME_WORLD_SIZE_Y / 2.0 - self.logo_half[1]).max(0.05),
+            (crate::point10::volume::VOLUME_WORLD_SIZE_Z / 2.0 - self.logo_half[2]).max(0.05),
+        ]
+    }
+
+    fn fire_light(&self) -> [f32; 4] {
+        // `uPointLightSurfaceIntensity` 10 x the `0.35` the DVD room sets
+        // (`DvdRoom.js:329`), modulated by the fire intensity.
+        let colour = fire_colour(0.72, self.fire_hue);
+        let intensity = (self.fire_intensity / FIRE_INTENSITY).max(0.0) * 0.35;
+        [
+            colour[0] * intensity * 10.0,
+            colour[1] * intensity * 10.0,
+            colour[2] * intensity * 10.0,
             intensity,
         ]
     }
@@ -950,22 +450,6 @@ impl DvdRoom {
         )
     }
 
-    /// The camera-facing billboard basis (`right`, `up`).
-    fn billboard_basis(&self) -> ([f32; 3], [f32; 3]) {
-        let forward = normalise([-self.camera[0], -self.camera[1], -self.camera[2]]);
-        let right = normalise([
-            forward[1] * 0.0 - forward[2] * 1.0,
-            forward[2] * 0.0 - forward[0] * 0.0,
-            forward[0] * 1.0 - forward[1] * 0.0,
-        ]);
-        let up = [
-            right[1] * forward[2] - right[2] * forward[1],
-            right[2] * forward[0] - right[0] * forward[2],
-            right[0] * forward[1] - right[1] * forward[0],
-        ];
-        (right, up)
-    }
-
     fn refresh_glass_fit(&mut self) {
         let top = room_top(self.camera, self.box_scale, self.box_xy_scale);
         let (height, centre_y) = glass_fit(top, self.box_scale, self.box_xy_scale);
@@ -973,114 +457,161 @@ impl DvdRoom {
         self.glass_centre_y = centre_y;
     }
 
-    fn puff_instances(&self) -> Vec<PuffInstance> {
-        self.puffs
-            .iter()
-            .map(|puff| {
-                let fade = (1.0 - puff.age).clamp(0.0, 1.0);
-                let density = (self.smoke_density / 28.0).max(0.0);
-                let gain = (self.emit_gain / REFERENCE_EMIT_GAIN).max(0.0);
-                let fire = (self.fire_size / 1.0).max(0.0);
-                let decay = (-puff.age * (1.3 / self.fire_lifespan.max(0.1))).exp();
-                let colour = fire_colour(puff.temperature * fade, self.fire_hue);
-                let alpha = 0.09 * density * gain * fire * puff.alpha * fade * fade * decay;
-                PuffInstance {
-                    position: puff.position,
-                    size: puff.size * (0.8 + fade * 0.8),
-                    colour,
-                    alpha,
-                }
-            })
-            .collect()
+    /// `stepBounce(dt, speedMul)` (`:350-374`), using the measured logo half
+    /// extents.
+    pub fn step_bounce(&mut self, dt: f32, speed_mul: f32) {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let speed_mul = if speed_mul.is_finite() {
+            speed_mul
+        } else {
+            1.0
+        };
+        let bounds = self.bounce_bounds();
+        for (position, velocity) in self.position.iter_mut().zip(self.velocity.iter()) {
+            *position += velocity * dt * speed_mul;
+        }
+        let mut hit = 0;
+        for ((position, velocity), limit) in self
+            .position
+            .iter_mut()
+            .zip(self.velocity.iter_mut())
+            .zip(bounds.iter())
+        {
+            if *position > *limit {
+                *position = *limit;
+                *velocity = -velocity.abs();
+                hit += 1;
+            } else if *position < -*limit {
+                *position = -*limit;
+                *velocity = velocity.abs();
+                hit += 1;
+            }
+        }
+        if hit > 0 {
+            self.bounce();
+            if hit >= 2 {
+                self.corner_flash = 1.0;
+            }
+        }
     }
 
-    fn upload_uniforms(&self) {
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let view_proj = self.view_proj();
+    fn bounce(&mut self) {
+        self.bounces += 1;
+        self.colour_index = (self.colour_index + 1) % PALETTE.len();
+        self.pop = 1.0;
+    }
+
+    fn band(
+        &self,
+        freq_mag: &[f32; crate::point10::audio_bridge::AUDIO_SAMPLES],
+        lo: usize,
+        hi: usize,
+    ) -> f32 {
+        crate::point10::volume::room::band(freq_mag, lo, hi)
+    }
+
+    fn glass_uniforms(&self) -> GlassUniforms {
+        GlassUniforms {
+            view_proj: self.view_proj(),
+            model: self.glass_model(),
+            camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
+            logo_pos: [self.position[0], self.position[1], self.position[2], 1.0],
+            fire: self.fire_light(),
+            params: [self.glass_opacity(), self.time, self.smoothed_bass, 0.0],
+        }
+    }
+
+    fn logo_uniforms(&self) -> LogoUniforms {
         let colour = self.logo_colour();
-        let fire = self.fire_light();
-
-        gpu.queue.write_buffer(
-            &gpu.logo_uniforms,
-            0,
-            bytemuck::bytes_of(&LogoUniforms {
-                view_proj,
-                model: self.logo_model(),
-                camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
-                colour: [colour[0], colour[1], colour[2], 1.0],
-                logo_pos: [self.position[0], self.position[1], self.position[2], 1.0],
-                fire,
-                params: [
-                    self.emissive_intensity(),
-                    self.corner_flash,
-                    self.time,
-                    self.smoke_bass,
-                ],
-            }),
-        );
-        gpu.queue.write_buffer(
-            &gpu.glass_uniforms,
-            0,
-            bytemuck::bytes_of(&GlassUniforms {
-                view_proj,
-                model: self.glass_model(),
-                camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
-                logo_pos: [self.position[0], self.position[1], self.position[2], 1.0],
-                fire,
-                params: [self.glass_opacity(), self.time, self.smoothed_bass, 0.0],
-            }),
-        );
-        let (right, up) = self.billboard_basis();
-        gpu.queue.write_buffer(
-            &gpu.puff_uniforms,
-            0,
-            bytemuck::bytes_of(&PuffUniforms {
-                view_proj,
-                camera_right: [right[0], right[1], right[2], 0.0],
-                camera_up: [up[0], up[1], up[2], 0.0],
-            }),
-        );
-        gpu.queue.write_buffer(
-            &gpu.final_uniforms,
-            0,
-            bytemuck::bytes_of(&FinalUniforms {
-                resolution: [self.size.0 as f32, self.size.1 as f32],
-                _pad: [0.0; 2],
-            }),
-        );
-        let instances = self.puff_instances();
-        gpu.queue
-            .write_buffer(&gpu.puff_instances, 0, bytemuck::cast_slice(&instances));
+        LogoUniforms {
+            view_proj: self.view_proj(),
+            model: self.logo_model(),
+            camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
+            colour: [colour[0], colour[1], colour[2], 1.0],
+            logo_pos: [self.position[0], self.position[1], self.position[2], 1.0],
+            fire: self.fire_light(),
+            params: [
+                self.emissive_intensity(),
+                self.corner_flash,
+                self.time,
+                self.smoke_bass,
+            ],
+        }
     }
 
-    /// Recreate the size-dependent targets and re-bind the final pass.
-    fn rebuild_targets(&mut self) {
-        let Some(gpu) = self.gpu.as_mut() else {
-            return;
+    fn volume_uniforms(
+        &self,
+        temporal: &FireTemporal,
+        tick: &crate::point10::volume::room::SimTick,
+    ) -> VolumeUniforms {
+        let scale = self.box_scale;
+        let xy = self.box_xy_scale;
+        let world = [12.0 * scale * xy, 12.0 * scale * xy, 24.0 * scale];
+        let mut uniforms = VolumeUniforms::for_grid(self.grid);
+        uniforms.grid[3] = tick.step;
+        uniforms.world = [world[0], world[1], world[2], temporal.time];
+        // The grid never moves: `_afterInitVolume` pins the origin to the box
+        // bottom (`DvdRoom.js:320`), unlike SmokeRoom's emitter-following one.
+        uniforms.origin = [0.0, -world[1] * 0.5, 0.0, scale];
+        uniforms.sphere_pos = [self.position[0], self.position[1], self.position[2], 0.0];
+        uniforms.sphere_vel = [self.velocity[0], self.velocity[1], self.velocity[2], 0.25];
+        uniforms.sphere_pos[3] = self.velocity.iter().map(|v| v * v).sum::<f32>().sqrt();
+        uniforms.camera = [
+            self.camera[0],
+            self.camera[1],
+            self.camera[2],
+            self.frame as f32,
+        ];
+        uniforms.set_camera(self.camera, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        uniforms.fire_start = fire_stop(
+            crate::point10::volume::room::FIRE_START_HEX,
+            VOLUME_FIRE_INTENSITY,
+        );
+        uniforms.fire_mid = fire_stop(crate::point10::volume::room::FIRE_MID_HEX, 5.0);
+        uniforms.fire_end = fire_stop(crate::point10::volume::room::FIRE_END_HEX, self.fire_hue);
+        uniforms.turb = [3.0, 0.15, tick.turbulence, 0.1];
+        uniforms.turb2 = [10.0, 0.25, tick.cooling, tick.dissipation];
+        uniforms.emit = [
+            self.smoke_density,
+            EMIT_TEMPERATURE,
+            self.fire_size,
+            self.emit_gain,
+        ];
+        uniforms.emit2 = [6.5, temporal.flicker, temporal.flame_height, 0.0];
+        uniforms.light = [2.0, 0.5, 1.0, 0.59];
+        uniforms.point_light = {
+            let colour = volume_point_light(
+                temporal,
+                EMIT_TEMPERATURE,
+                self.smoke_density,
+                VOLUME_FIRE_INTENSITY,
+                self.fire_hue,
+            );
+            [colour[0], colour[1], colour[2], 0.0]
         };
-        gpu.scene_target = TextureTarget::new(
-            &gpu.device,
-            "point10-dvd-room-scene",
-            self.size.0,
-            self.size.1,
-            HDR_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let (depth, depth_view) = create_depth(
-            &gpu.device,
-            "point10-dvd-room-depth",
-            self.size.0,
-            self.size.1,
-        );
-        gpu._depth = depth;
-        gpu.depth_view = depth_view;
-        gpu.bloom.resize(self.size.0, self.size.1);
-        gpu.bloom.set_input(&gpu.scene_target.view);
-        gpu.composer.resize(self.size.0, self.size.1);
-        gpu.final_bind_group = create_final_bind_group(&gpu.device, gpu);
-        self.upload_uniforms();
+        let (volume_width, volume_height) = volumetric_size(self.size.0, self.size.1);
+        uniforms.view = [
+            (CAMERA_FOV.to_radians() * 0.5).tan(),
+            self.camera_aspect,
+            volume_width as f32,
+            volume_height as f32,
+        ];
+        uniforms.set_emitter_model(self.logo_model());
+        uniforms
+    }
+}
+
+/// A fire ramp stop in linear RGB plus its scalar slot.
+fn fire_stop(hex: u32, scalar: f32) -> [f32; 4] {
+    let colour = srgb_hex_to_linear(hex);
+    [colour[0], colour[1], colour[2], scalar]
+}
+
+#[cfg(test)]
+impl DvdRoom {
+    /// The live simulation, for the debug readback in the reference renderer.
+    pub(crate) fn debug_sim(&self) -> Option<&crate::point10::volume::VolumeSim> {
+        self.gpu.as_ref().map(|gpu| &gpu.sim)
     }
 }
 
@@ -1092,387 +623,115 @@ impl Point10Scene for DvdRoom {
     fn init(&mut self, ctx: &mut SceneContext) {
         let device = ctx.device.clone();
         let queue = ctx.queue.clone();
-        self.size = (ctx.width, ctx.height);
+        self.size = (ctx.width.max(1), ctx.height.max(1));
         self.camera_aspect = ctx.aspect();
         self.refresh_glass_fit();
 
-        // The logo mesh replaces `DvdRoom._logoGeometry`'s SVG extrusion: a
-        // rounded, bevelled slab with the same extents.
-        let logo_mesh_data =
-            build_rounded_slab(LOGO_WIDTH, LOGO_HEIGHT, LOGO_DEPTH, LOGO_RADIUS, 8);
-        // `_emitGainValue = (refCount / max(1, logoVerts)) * 6`.
+        let LogoMesh { mesh, half_extents } = build_logo();
+        self.logo_half = half_extents;
+        // `_emitGainValue = (refCount / max(1, logoVerts)) * 6`
+        // (`DvdRoom.js:297-299`).
         self.emit_gain =
-            (REFERENCE_EMITTER_VERTICES as f32 / logo_mesh_data.vertices.len().max(1) as f32) * 6.0;
+            (REFERENCE_EMITTER_VERTICES as f32 / mesh.vertices.len().max(1) as f32) * 6.0;
+        let emitter_positions: Vec<[f32; 3]> =
+            mesh.vertices.iter().map(|vertex| vertex.position).collect();
 
-        let logo_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-dvd-room-logo-shader"),
-            source: wgpu::ShaderSource::Wgsl(dvd_room_logo_wgsl().into()),
-        });
-        let logo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-dvd-room-logo-layout"),
-            entries: &[uniform_entry(
-                0,
-                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            )],
-        });
-        let logo_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-dvd-room-logo-uniforms"),
-            size: std::mem::size_of::<LogoUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let logo_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-dvd-room-logo-bind-group"),
-            layout: &logo_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: logo_uniforms.as_entire_binding(),
-            }],
-        });
-        let logo_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("point10-dvd-room-logo-pipeline-layout"),
-            bind_group_layouts: &[Some(&logo_layout)],
-            immediate_size: 0,
-        });
-        let logo_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-dvd-room-logo-pipeline"),
-            layout: Some(&logo_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &logo_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            primitive: wgpu::PrimitiveState {
+        let sim = VolumeSim::new(&device, &queue, self.grid, &emitter_positions);
+        let stage = VolumeStage::new(&device, &queue, self.size.0, self.size.1, ctx.target_format);
+
+        let logo = Material::new(
+            &device,
+            "point10-dvd-room-logo",
+            DVD_ROOM_LOGO_WGSL,
+            std::mem::size_of::<LogoUniforms>() as u64,
+            Some(crate::point10::scenes::cube_mesh::Vertex::layout()),
+            wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                // `MeshStandardMaterial({ side: DoubleSide })`.
+                // `MeshStandardMaterial({ side: DoubleSide })`: the flattened
+                // SVG windings are not all outward-facing.
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(depth_state()),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &logo_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // --- glass room ----------------------------------------------------
-        let glass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-dvd-room-glass-shader"),
-            source: wgpu::ShaderSource::Wgsl(dvd_room_glass_wgsl().into()),
-        });
-        let glass_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-dvd-room-glass-layout"),
-            entries: &[uniform_entry(
-                0,
-                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            )],
-        });
-        let glass_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-dvd-room-glass-uniforms"),
-            size: std::mem::size_of::<GlassUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let glass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-dvd-room-glass-bind-group"),
-            layout: &glass_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: glass_uniforms.as_entire_binding(),
-            }],
-        });
-        let glass_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("point10-dvd-room-glass-pipeline-layout"),
-                bind_group_layouts: &[Some(&glass_layout)],
-                immediate_size: 0,
-            });
-        let glass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-dvd-room-glass-pipeline"),
-            layout: Some(&glass_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &glass_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            primitive: wgpu::PrimitiveState {
+            Some(depth_state()),
+            None,
+        );
+        let glass = Material::new(
+            &device,
+            "point10-dvd-room-glass",
+            DVD_ROOM_GLASS_WGSL,
+            std::mem::size_of::<GlassUniforms>() as u64,
+            Some(crate::point10::scenes::cube_mesh::Vertex::layout()),
+            wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                // `side: FrontSide` — only the panes facing the camera.
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: crate::point10::scenes::cube_mesh::DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &glass_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    // `transparent: true`, `opacity`, `depthWrite: false`.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+            Some(depth_state()),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
 
-        // --- haze puffs ----------------------------------------------------
-        let puff_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-dvd-room-puff-shader"),
-            source: wgpu::ShaderSource::Wgsl(dvd_room_puff_wgsl().into()),
-        });
-        let puff_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-dvd-room-puff-layout"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
-        });
-        let puff_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-dvd-room-puff-uniforms"),
-            size: std::mem::size_of::<PuffUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let puff_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-dvd-room-puff-bind-group"),
-            layout: &puff_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: puff_uniforms.as_entire_binding(),
-            }],
-        });
-        let puff_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("point10-dvd-room-puff-pipeline-layout"),
-            bind_group_layouts: &[Some(&puff_layout)],
-            immediate_size: 0,
-        });
-        let quad = UnitQuad::new(&device);
-        let puff_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point10-dvd-room-puff-pipeline"),
-            layout: Some(&puff_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &puff_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[
-                    Some(UnitQuad::vertex_layout()),
-                    Some(PuffInstance::layout()),
-                ],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &puff_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    // `THREE.AdditiveBlending`, alpha kept.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Zero,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let puff_instances = {
-            use wgpu::util::DeviceExt;
-            let instances = vec![
-                PuffInstance {
-                    position: [0.0; 3],
-                    size: 0.0,
-                    colour: [0.0; 3],
-                    alpha: 0.0,
-                };
-                PUFF_COUNT
-            ];
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("point10-dvd-room-puff-instances"),
-                contents: bytemuck::cast_slice(&instances),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            })
-        };
-
-        // --- scene target, bloom, final composite --------------------------
-        let scene_target = TextureTarget::new(
+        let logo_mesh = MeshGpu::new(&device, "point10-dvd-room-logo-mesh", &mesh);
+        let glass_mesh = MeshGpu::new(
             &device,
-            "point10-dvd-room-scene",
-            self.size.0,
-            self.size.1,
-            HDR_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "point10-dvd-room-glass-mesh",
+            &build_box(1.0, 1.0, 1.0),
         );
-        let (depth, depth_view) =
-            create_depth(&device, "point10-dvd-room-depth", self.size.0, self.size.1);
-
-        let mut bloom = UnrealBloomPass::new(&device, &queue, self.size.0, self.size.1);
-        bloom.set_strength(BLOOM_BASE);
-        bloom.set_radius(1.0);
-        bloom.set_threshold(0.5);
-        bloom.set_input(&scene_target.view);
-
-        let final_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point10-dvd-room-final-shader"),
-            source: wgpu::ShaderSource::Wgsl(dvd_room_final_wgsl().into()),
-        });
-        let final_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("point10-dvd-room-final-layout"),
-            entries: &[
-                uniform_entry(0, wgpu::ShaderStages::FRAGMENT),
-                texture_entry(1),
-                texture_entry(2),
-                sampler_entry(3),
-            ],
-        });
-        let final_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point10-dvd-room-final-uniforms"),
-            size: std::mem::size_of::<FinalUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let final_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("point10-dvd-room-final-sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-        let final_pipeline = ctx.fullscreen_pipeline_with_format(
-            "point10-dvd-room-final-pipeline",
-            &final_shader,
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("point10-dvd-room-final-pipeline-layout"),
-                bind_group_layouts: &[Some(&final_layout)],
-                immediate_size: 0,
-            }),
-            HDR_FORMAT,
-            None,
-        );
-        let final_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point10-dvd-room-final-bind-group"),
-            layout: &final_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: final_uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&scene_target.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(
-                        bloom
-                            .composite_view()
-                            .expect("the bloom pass always has a composite target"),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&final_sampler),
-                },
-            ],
-        });
-
-        // `SmokeRoom._initVolume`: ACESFilmic tone mapping with exposure 2.
-        let mut composer =
-            Composer::new(&device, &queue, self.size.0, self.size.1, ctx.target_format);
-        composer
-            .output_mut()
-            .set_tone_mapping(ToneMapping::AcesFilmic);
-        composer.output_mut().set_exposure(2.0);
-
-        let logo_mesh = MeshGpu::new(&device, "point10-dvd-room-logo", &logo_mesh_data);
-        let glass_mesh = MeshGpu::new(&device, "point10-dvd-room-glass", &build_box(1.0, 1.0, 1.0));
 
         self.gpu = Some(DvdRoomGpu {
             device,
             queue,
-            logo_pipeline,
-            logo_uniforms,
-            logo_bind_group,
-            glass_pipeline,
-            glass_uniforms,
-            glass_bind_group,
-            puff_pipeline,
-            puff_uniforms,
-            puff_bind_group,
-            puff_instances,
+            sim,
+            stage,
+            logo,
+            glass,
             logo_mesh,
             glass_mesh,
-            quad,
-            scene_target,
-            _depth: depth,
-            depth_view,
-            bloom,
-            final_pipeline,
-            final_uniforms,
-            final_bind_group,
-            final_layout,
-            final_sampler,
-            composer,
         });
-        for puff in &mut self.puffs {
-            *puff = spawn_puff(puff.seed, self.position);
-        }
-        self.upload_uniforms();
     }
 
     fn resize(&mut self, width: u32, height: u32) {
         self.size = (width.max(1), height.max(1));
         self.camera_aspect = self.size.0 as f32 / self.size.1 as f32;
         self.refresh_glass_fit();
-        self.rebuild_targets();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let device = gpu.device.clone();
+        let queue = gpu.queue.clone();
+        let (width, height) = self.size;
+        gpu.stage.resize(&device, &queue, width, height);
     }
 
     fn update(&mut self, dt: f32, audio: &AudioBridge) {
         let dt = frame_dt(dt);
+        self.dt = dt;
         self.time += dt;
 
-        let (bass, treble) = if audio.is_available() {
+        // ---- SmokeRoom's own audio mapping (the inherited `update`) --------
+        if audio.is_available() {
             let freq_mag = &audio.freq_mag;
-            (band(freq_mag, 1, 9), treble_band(freq_mag))
-        } else {
-            (0.0, 0.0)
-        };
+            let bass = smoke_bass(freq_mag);
+            self.smoke_bass += (bass - self.smoke_bass) * (dt * 8.0).min(1.0);
+            let hi = treble_band(freq_mag);
+            let snare = crate::point10::volume::room::snare_band(freq_mag);
+            self.hi += (hi - self.hi) * (dt * 10.0).min(1.0);
+            self.snare += (snare - self.snare) * (dt * 12.0).min(1.0);
+            self.fire_size = fire_size(self.hi, self.snare);
 
+            let sample = seeded_rand(0, self.seed as i32);
+            if drop_color_pulse(&mut self.pulse, self.smoke_bass, dt, sample) {
+                self.seed = self.seed.wrapping_add(1);
+            }
+            self.fire_hue = ease_phrase_hue(self.fire_hue, self.pulse.hue, dt, 1.2);
+        }
+
+        // ---- DvdRoom's audio mapping (`:376-408`) -------------------------
+        let bass = self.band(&audio.freq_mag, BAND_TWO_START, BAND_TWO_END);
+        let treble = if audio.is_available() {
+            treble_band(&audio.freq_mag)
+        } else {
+            0.0
+        };
         self.smoothed_bass += (bass - self.smoothed_bass)
             * (dt * if bass > self.smoothed_bass { 16.0 } else { 5.0 }).min(1.0);
         self.smoothed_treble += (treble - self.smoothed_treble)
@@ -1484,9 +743,13 @@ impl Point10Scene for DvdRoom {
                 })
             .min(1.0);
 
-        // Kick attack (`:393-405`).
+        // Kick attack: a sharp jump of the bass envelope.
         self.bass_average = self.bass_average * 0.95 + bass * 0.05;
-        if bass > 0.07 && bass > self.bass_average * 1.4 && self.time - self.last_beat > 0.12 {
+        if audio.is_available()
+            && bass > 0.07
+            && bass > self.bass_average * 1.4
+            && self.time - self.last_beat > 0.12
+        {
             self.last_beat = self.time;
             self.pop = 1.0;
             self.burst = (self.burst + 0.8).min(1.5);
@@ -1495,161 +758,78 @@ impl Point10Scene for DvdRoom {
         self.pop *= (-dt * 6.0).exp();
         self.corner_flash *= (-dt * 3.0).exp();
 
-        // Bass speeds the logo (`:408`).
+        // Bass speeds the logo up.
         let speed_mul = 1.0 + self.smoothed_bass.min(0.6) + self.burst * 0.5;
-        let step = step_bounce(self.position, self.velocity, dt, speed_mul);
-        self.position = step.position;
-        self.velocity = step.velocity;
-        if step.axes_hit > 0 {
-            self.bounces += 1;
-            self.colour_index = (self.colour_index + 1) % PALETTE.len();
-            self.pop = 1.0;
-            if step.axes_hit >= 2 {
-                self.corner_flash = 1.0;
-            }
-        }
+        self.step_bounce(dt, speed_mul);
 
-        // Camera orbit (`:429-438`).
-        let (camera, yaw) = advance_camera(
-            self.camera,
-            self.orbit_yaw,
-            self.smoothed_bass,
-            self.time,
-            dt,
-        );
-        self.camera = camera;
-        self.orbit_yaw = yaw;
+        // Free float: a slow bass-driven orbit around the room centre.
+        self.orbit_yaw += (self.smoothed_bass * 0.35 - self.orbit_yaw) * (dt * 0.4).min(1.0);
+        let k = (dt * 1.2).min(1.0);
+        let target = [
+            self.orbit_yaw.cos() * CAMERA_ORBIT_RADIUS,
+            6.5 + (self.time * 0.23).sin() * 1.2,
+            self.orbit_yaw.sin() * CAMERA_ORBIT_RADIUS,
+        ];
+        for (camera, target) in self.camera.iter_mut().zip(target.iter()) {
+            *camera += (target - *camera) * k;
+        }
         self.refresh_glass_fit();
-
-        // The smoke-room side of the audio: bloom bass, hats/snares -> fire
-        // size, and the drop pulse -> fire hue (`SmokeRoom.js:340-374`).
-        if audio.is_available() {
-            let freq_mag = &audio.freq_mag;
-            let bass_sum: f32 = freq_mag.iter().take(BASS_BINS).sum();
-            let smoke_bass = bass_sum / BASS_BINS as f32;
-            self.smoke_bass += (smoke_bass - self.smoke_bass) * (dt * 8.0).min(1.0);
-
-            let hi_start = AUDIO_SAMPLES - (AUDIO_SAMPLES as f32 * 0.15).floor() as usize;
-            let hi = band(freq_mag, hi_start, AUDIO_SAMPLES);
-            self.hi += (hi - self.hi) * (dt * 10.0).min(1.0);
-            let snare_lo = (AUDIO_SAMPLES as f32 * 0.02).floor() as usize;
-            let snare_hi = (AUDIO_SAMPLES as f32 * 0.13).floor() as usize;
-            let snare = band(freq_mag, snare_lo, snare_hi);
-            self.snare += (snare - self.snare) * (dt * 12.0).min(1.0);
-            self.fire_size = 1.0 + self.hi * FIRE_HAT_K + self.snare * FIRE_SNARE_K;
-
-            let sample = seeded_rand(0, self.seed as i32);
-            if drop_color_pulse(&mut self.pulse, self.smoke_bass, dt, sample) {
-                self.seed = self.seed.wrapping_add(1);
-            }
-            self.fire_hue = ease_phrase_hue(self.fire_hue, self.pulse.hue, dt, 1.2);
-        }
-
-        // The haze substitute for the smoke grid.
-        for puff in &mut self.puffs {
-            advance_puff(
-                puff,
-                self.position,
-                dt,
-                self.simulation_speed,
-                self.smoke_lifespan,
-            );
-        }
-        self.upload_uniforms();
     }
 
     fn render(&mut self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let tick = self.clock.pending(
+            frame_dt(self.dt),
+            self.simulation_speed,
+            self.smoke_lifespan,
+            self.fire_lifespan,
+        );
+
+        let mut steps: Vec<VolumeUniforms> = Vec::with_capacity(tick.steps as usize);
+        let mut temporal = fire_temporal(&self.noise, self.clock.time());
+        for index in 0..tick.steps {
+            let step_temporal = fire_temporal(&self.noise, tick.time_of(index));
+            steps.push(self.volume_uniforms(&step_temporal, &tick));
+            temporal = step_temporal;
+        }
+        let idle_uniforms = if steps.is_empty() {
+            Some(self.volume_uniforms(&temporal, &tick))
+        } else {
+            None
+        };
+        let logo_uniforms = self.logo_uniforms();
+        let glass_uniforms = self.glass_uniforms();
         let bloom_strength = self.bloom_strength();
+        self.frame = self.frame.wrapping_add(1);
+
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
+        let device = gpu.device.clone();
+        let queue = gpu.queue.clone();
 
-        // Logo first (opaque, depth), then the glass panes over it, then the
-        // additive haze.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point10-dvd-room-scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gpu.scene_target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &gpu.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+        if let Some(uniforms) = idle_uniforms {
+            gpu.sim.write(&queue, &uniforms);
+        }
+        for uniforms in &steps {
+            let mut sim_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("point10-dvd-room-sim"),
             });
-            pass.set_pipeline(&gpu.logo_pipeline);
-            pass.set_bind_group(0, &gpu.logo_bind_group, &[]);
-            gpu.logo_mesh.draw(&mut pass);
-
-            pass.set_pipeline(&gpu.glass_pipeline);
-            pass.set_bind_group(0, &gpu.glass_bind_group, &[]);
-            gpu.glass_mesh.draw(&mut pass);
+            gpu.sim.write(&queue, uniforms);
+            gpu.sim.step(&mut sim_encoder);
+            queue.submit(Some(sim_encoder.finish()));
         }
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point10-dvd-room-haze"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gpu.scene_target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&gpu.puff_pipeline);
-            pass.set_bind_group(0, &gpu.puff_bind_group, &[]);
-            pass.set_vertex_buffer(1, gpu.puff_instances.slice(..));
-            gpu.quad.draw_instanced(&mut pass, PUFF_COUNT as u32);
-        }
-
-        // The bright pass is bound to the scene target in `init` and after
-        // every resize (`rebuild_targets`).
-        gpu.bloom.set_strength(bloom_strength);
-        gpu.bloom.encode(encoder);
+        gpu.logo.write(&queue, bytemuck::bytes_of(&logo_uniforms));
+        gpu.glass.write(&queue, bytemuck::bytes_of(&glass_uniforms));
 
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point10-dvd-room-final"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: gpu.composer.scene_view(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&gpu.final_pipeline);
-            pass.set_bind_group(0, &gpu.final_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            let mut pass = gpu.stage.begin_scene(encoder);
+            gpu.logo.draw(&mut pass, &gpu.logo_mesh);
+            gpu.glass.draw(&mut pass, &gpu.glass_mesh);
         }
 
-        gpu.composer.render(encoder, target);
+        gpu.stage
+            .encode_post(encoder, &gpu.sim, bloom_strength, target);
     }
 
     fn dispose(&mut self) {
@@ -1661,196 +841,13 @@ impl Point10Scene for DvdRoom {
     }
 
     fn meta(&self) -> SceneMeta {
-        // `Point10DvdRoom.js` sets `webgpu: true` and no category.
         SceneMeta::for_scene("Point10 DVD Room", "3d-scenes")
     }
 }
 
-/// Rebuild the final-composite bind group after its targets change.
-fn create_final_bind_group(device: &wgpu::Device, gpu: &DvdRoomGpu) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("point10-dvd-room-final-bind-group"),
-        layout: &gpu.final_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: gpu.final_uniforms.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&gpu.scene_target.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(
-                    gpu.bloom
-                        .composite_view()
-                        .expect("the bloom pass always has a composite target"),
-                ),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Sampler(&gpu.final_sampler),
-            },
-        ],
-    })
-}
-
-/// `DvdRoom._logoGeometry`'s silhouette: a rounded, bevelled slab extruded
-/// along +z, centred on the origin. The JS extrudes the Wikimedia SVG; the
-/// shared asset loader cannot rasterise it (PNG/JPEG only), so this keeps the
-/// same `width x height x depth` extents with a deterministic mesh.
-pub fn build_rounded_slab(width: f32, height: f32, depth: f32, radius: f32, segments: u32) -> Mesh {
-    let segments = segments.max(2);
-    let half_width = width * 0.5;
-    let half_height = height * 0.5;
-    let half_depth = depth * 0.5;
-    let radius = radius.min(half_width.min(half_height)).max(0.0);
-    let corner_x = half_width - radius;
-    let corner_y = half_height - radius;
-
-    // CCW outline: bottom-right, top-right, top-left, bottom-left arcs.
-    let mut outline = Vec::with_capacity((segments * 4) as usize);
-    let corners = [
-        (corner_x, -corner_y, -std::f32::consts::FRAC_PI_2),
-        (corner_x, corner_y, 0.0),
-        (-corner_x, corner_y, std::f32::consts::FRAC_PI_2),
-        (-corner_x, -corner_y, std::f32::consts::PI),
-    ];
-    for (cx, cy, start) in corners {
-        for step in 0..segments {
-            let t = step as f32 / segments as f32;
-            let angle = start + t * std::f32::consts::FRAC_PI_2;
-            outline.push([cx + radius * angle.cos(), cy + radius * angle.sin()]);
-        }
-    }
-
-    let count = outline.len();
-    let mut mesh = Mesh::default();
-
-    // Front cap (+z): a fan from the centre, plus the outline ring.
-    let uv_of = |point: [f32; 2]| [point[0] / width + 0.5, point[1] / height + 0.5];
-    let front_centre = mesh.vertices.len() as u32;
-    mesh.vertices.push(Vertex {
-        position: [0.0, 0.0, half_depth],
-        normal: [0.0, 0.0, 1.0],
-        uv: [0.5, 0.5],
-    });
-    let front_start = mesh.vertices.len() as u32;
-    for point in &outline {
-        mesh.vertices.push(Vertex {
-            position: [point[0], point[1], half_depth],
-            normal: [0.0, 0.0, 1.0],
-            uv: uv_of(*point),
-        });
-    }
-    for index in 0..count {
-        let a = front_start + index as u32;
-        let b = front_start + ((index + 1) % count) as u32;
-        mesh.indices.extend_from_slice(&[front_centre, a, b]);
-    }
-
-    // Back cap (-z): reversed winding, inward-facing normal.
-    let back_centre = mesh.vertices.len() as u32;
-    mesh.vertices.push(Vertex {
-        position: [0.0, 0.0, -half_depth],
-        normal: [0.0, 0.0, -1.0],
-        uv: [0.5, 0.5],
-    });
-    let back_start = mesh.vertices.len() as u32;
-    for point in &outline {
-        mesh.vertices.push(Vertex {
-            position: [point[0], point[1], -half_depth],
-            normal: [0.0, 0.0, -1.0],
-            uv: uv_of(*point),
-        });
-    }
-    for index in 0..count {
-        let a = back_start + index as u32;
-        let b = back_start + ((index + 1) % count) as u32;
-        mesh.indices.extend_from_slice(&[back_centre, b, a]);
-    }
-
-    // Sides: one quad per outline edge with an outward radial normal.
-    for (index, point) in outline.iter().enumerate() {
-        let next = (index + 1) % count;
-        let point = *point;
-        let following = outline[next];
-        let edge = [following[0] - point[0], following[1] - point[1]];
-        let normal = normalise([edge[1], -edge[0], 0.0]);
-        let base = mesh.vertices.len() as u32;
-        for (position, uv) in [
-            ([point[0], point[1], half_depth], [0.0, 1.0]),
-            ([point[0], point[1], -half_depth], [0.0, 0.0]),
-            ([following[0], following[1], -half_depth], [1.0, 0.0]),
-            ([following[0], following[1], half_depth], [1.0, 1.0]),
-        ] {
-            mesh.vertices.push(Vertex {
-                position,
-                normal,
-                uv,
-            });
-        }
-        mesh.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    mesh
-}
-
-/// A uniform binding entry.
-fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// A sampled-texture binding entry.
-fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-/// A filtering-sampler binding entry.
-fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    }
-}
-
-fn dvd_room_logo_wgsl() -> String {
-    DVD_ROOM_LOGO_WGSL.to_string()
-}
-
-fn dvd_room_glass_wgsl() -> String {
-    DVD_ROOM_GLASS_WGSL.to_string()
-}
-
-fn dvd_room_puff_wgsl() -> String {
-    DVD_ROOM_PUFF_WGSL.to_string()
-}
-
-fn dvd_room_final_wgsl() -> String {
-    format!("{FULLSCREEN_TRIANGLE_WGSL}\n{DVD_ROOM_FINAL_WGSL}")
-}
+// ---------------------------------------------------------------------------
+// Shaders
+// ---------------------------------------------------------------------------
 
 const DVD_ROOM_LOGO_WGSL: &str = r#"
 struct LogoUniforms {
@@ -1960,13 +957,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let view_dir = normalize(u.camera_pos.xyz - in.w_pos);
   let fresnel = pow(1.0 - clamp(abs(dot(normal, view_dir)), 0.0, 1.0), 3.0);
 
-  // The JS panes are lit by a dark PMREM studio and the fire point light; the
-  // port keeps the glass tint, the vertical env gradient and a cheap specular
-  // streak.
-  let tint = vec3<f32>(0.34, 0.55, 0.82);
-  let env = mix(vec3<f32>(0.01, 0.015, 0.03), vec3<f32>(0.22, 0.3, 0.5), normal.y * 0.5 + 0.5);
+  // The JS panes are lit by a dark PMREM studio and the fire point light: a
+  // standard material reads that as almost-black glass with a specular streak,
+  // so the env stays dark and the highlight carries the reflection.
+  let tint = vec3<f32>(0.58, 0.73, 0.9);
+  let env = mix(vec3<f32>(0.0015, 0.002, 0.004), vec3<f32>(0.018, 0.026, 0.042), normal.y * 0.5 + 0.5);
   let streak_dir = normalize(vec3<f32>(-0.4, 0.25, 0.6));
-  let streak = pow(max(dot(reflect(-view_dir, normal), streak_dir), 0.0), 16.0);
+  let streak = pow(max(dot(reflect(-view_dir, normal), streak_dir), 0.0), 16.0) * 0.5
+    + pow(max(dot(normal, normalize(vec3<f32>(0.0, 1.0, 0.35))), 0.0), 6.0) * 0.35;
 
   let to_fire = u.logo_pos.xyz - in.w_pos;
   let fire_distance = length(to_fire);
@@ -1974,81 +972,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let fire_term = max(dot(normal, fire_dir), 0.0)
     * u.fire.a / (1.0 + fire_distance * fire_distance);
 
-  let colour = tint * (env + streak * 0.6) + u.fire.rgb * fire_term + tint * fresnel * 0.4;
-  return vec4<f32>(colour, u.params.x + fresnel * 0.12);
-}
-"#;
-
-const DVD_ROOM_PUFF_WGSL: &str = r#"
-struct PuffUniforms {
-  view_proj: mat4x4<f32>,
-  camera_right: vec4<f32>,
-  camera_up: vec4<f32>,
-}
-@group(0) @binding(0) var<uniform> u: PuffUniforms;
-
-struct VsOut {
-  @builtin(position) position: vec4<f32>,
-  @location(0) colour: vec3<f32>,
-  @location(1) alpha: f32,
-  @location(2) uv: vec2<f32>,
-}
-
-@vertex
-fn vs_main(
-  @location(2) corner: vec2<f32>,
-  @location(3) uv: vec2<f32>,
-  @location(4) instance_position: vec3<f32>,
-  @location(5) instance_size: f32,
-  @location(6) instance_colour: vec3<f32>,
-  @location(7) instance_alpha: f32,
-) -> VsOut {
-  let world = instance_position
-    + u.camera_right.xyz * corner.x * instance_size
-    + u.camera_up.xyz * corner.y * instance_size;
-  var out: VsOut;
-  out.position = u.view_proj * vec4<f32>(world, 1.0);
-  out.colour = instance_colour;
-  out.alpha = instance_alpha;
-  out.uv = uv;
-  return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-  let radius = length(in.uv * 2.0 - 1.0);
-  let mask = pow(1.0 - smoothstep(0.0, 1.0, radius), 2.0);
-  return vec4<f32>(in.colour, in.alpha * mask);
-}
-"#;
-
-const DVD_ROOM_FINAL_WGSL: &str = r#"
-struct FinalUniforms {
-  resolution: vec2<f32>,
-  _pad: vec2<f32>,
-}
-@group(0) @binding(0) var<uniform> u: FinalUniforms;
-@group(0) @binding(1) var scene_colour: texture_2d<f32>;
-@group(0) @binding(2) var bloom_colour: texture_2d<f32>;
-@group(0) @binding(3) var source_sampler: sampler;
-
-@fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-  let uv = position.xy / u.resolution;
-  let scene = textureSample(scene_colour, source_sampler, uv);
-  let bloom = textureSample(bloom_colour, source_sampler, uv);
-  let rgb = scene.rgb + bloom.rgb;
-  // SmokeRoom's output node: `alpha = max(rgb)`.
-  return vec4<f32>(rgb, clamp(max(max(rgb.r, rgb.g), rgb.b), 0.0, 1.0));
+  let colour = tint * (env * 2.5 + streak) + u.fire.rgb * fire_term + tint * fresnel * 0.35;
+  return vec4<f32>(colour, u.params.x + fresnel * 0.15);
 }
 "#;
 
 #[cfg(test)]
+fn shader_programs() -> Vec<(&'static str, String)> {
+    vec![
+        ("logo", DVD_ROOM_LOGO_WGSL.to_string()),
+        ("glass", DVD_ROOM_GLASS_WGSL.to_string()),
+    ]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::point10::audio_bridge::BandPayload;
-
-    // Port of tests/unit/point10-dvd-room.test.js plus the pure bounce maths.
+    use crate::point10::audio_bridge::{AUDIO_SAMPLES, BandPayload};
+    use crate::point10::scenes::dvd_logo::{LOGO_DEPTH, LOGO_WIDTH};
 
     fn close(a: f32, b: f32, tolerance: f32) {
         assert!((a - b).abs() < tolerance, "{a} != {b}");
@@ -2057,10 +998,8 @@ mod tests {
     #[test]
     fn glass_opacity_uses_the_dvd_room_bass_band() {
         // `DvdRoom.js:445`: `opacity = 0.34 + smBass * 0.06` where `smBass`
-        // is smoothed from `this._band(1, 9)`. The SmokeRoom bloom bass
-        // (`smoke_bass`, the mean of the first five bins) must not drive it:
-        // with bin 0 loud and bins 1..9 silent the bloom bass rises while the
-        // glass stays at its floor.
+        // is smoothed from `this._band(1, 9)`. The SmokeRoom bloom bass (the
+        // mean of the first five bins) must not drive it.
         let mut scene = DvdRoom::new();
         let mut payload = BandPayload::silent(44_100.0);
         payload.freq_mag[0] = 1.0;
@@ -2074,7 +1013,6 @@ mod tests {
             "glass opacity must ignore the smoke bass"
         );
 
-        // Bins 1..9 loud: `band(1, 9)` rises and the glass breathes.
         let mut scene = DvdRoom::new();
         let mut payload = BandPayload::silent(44_100.0);
         for value in payload.freq_mag.iter_mut().take(9).skip(1) {
@@ -2089,193 +1027,68 @@ mod tests {
     }
 
     #[test]
-    fn glass_half_extents_scale_and_stretch() {
-        let base = box_half_extents(1.0, 1.0);
-        assert_eq!(base, [GLASS_HALF_X, GLASS_HALF_Y, GLASS_HALF_Z]);
-        assert_eq!((GLASS_HALF_X, GLASS_HALF_Y, GLASS_HALF_Z), (6.3, 6.3, 12.3));
-
-        let scaled = box_half_extents(2.5, 1.6);
-        close(scaled[0], base[0] * 2.5 * 1.6, 1e-5);
-        close(scaled[1], base[1] * 2.5 * 1.6, 1e-5);
-        close(scaled[2], base[2] * 2.5, 1e-5);
-    }
-
-    fn project(camera: [f32; 3], point: [f32; 3]) -> [f32; 3] {
-        let view_proj = mat4_mul(
-            &perspective(CAMERA_FOV.to_radians(), 16.0 / 9.0, CAMERA_NEAR, CAMERA_FAR),
-            &look_at(camera, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-        );
-        let clip = crate::point10::scenes::cube_mesh::transform_point(&view_proj, point);
-        [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]]
-    }
-
-    #[test]
-    fn required_glass_top_puts_the_room_top_on_the_frame_top() {
-        for yaw in [0.0_f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI] {
-            for y in [5.3_f32, 6.5, 7.7] {
-                let camera = [
-                    yaw.cos() * CAMERA_ORBIT_RADIUS,
-                    y,
-                    yaw.sin() * CAMERA_ORBIT_RADIUS,
-                ];
-                let top = required_glass_top(
-                    camera,
-                    normalise([-camera[0], -camera[1], -camera[2]]),
-                    [0.0, 1.0, 0.0],
-                    CAMERA_FOV,
-                    1.0,
-                    1.0,
-                );
-                for x in [-GLASS_HALF_X, GLASS_HALF_X] {
-                    for z in [-GLASS_HALF_Z, GLASS_HALF_Z] {
-                        let projected = project(camera, [x, top, z]);
-                        assert!(
-                            projected[1] >= 1.0 - 1e-4,
-                            "corner ({x}, {top}, {z}) projects to {}",
-                            projected[1]
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn required_glass_top_ignores_the_output_aspect_like_the_js() {
-        // three's fov is vertical, so the fit must not depend on aspect. Both
-        // calls use the same 16:9 projection in `project`, so assert the pure
-        // function is deterministic and positive here.
-        let camera = [0.0, 6.5, CAMERA_ORBIT_RADIUS];
-        let top = required_glass_top(
-            camera,
-            normalise([-camera[0], -camera[1], -camera[2]]),
-            [0.0, 1.0, 0.0],
-            CAMERA_FOV,
-            1.0,
-            1.0,
-        );
-        assert!(top > GLASS_HALF_Y);
-    }
-
-    #[test]
-    fn glass_fit_is_bottom_anchored() {
-        let (height, centre_y) = glass_fit(20.0, 1.0, 1.0);
-        close(centre_y - height * 0.5, -GLASS_HALF_Y, 1e-5);
-        close(centre_y + height * 0.5, 20.0, 1e-5);
-
-        let (height, centre_y) = glass_fit(20.0, 1.3, 1.4);
-        let half_y = box_half_extents(1.3, 1.4)[1];
-        close(centre_y - height * 0.5, -half_y, 1e-5);
-        close(centre_y + height * 0.5, 20.0, 1e-5);
-    }
-
-    #[test]
-    fn room_top_stays_above_the_natural_half_height() {
-        for yaw in [0.0_f32, 1.0, 2.0, 3.0] {
-            let camera = [
-                yaw.cos() * CAMERA_ORBIT_RADIUS,
-                6.5,
-                yaw.sin() * CAMERA_ORBIT_RADIUS,
-            ];
-            let top = room_top(camera, 1.0, 1.0);
-            assert!(top > GLASS_HALF_Y, "top {top} at yaw {yaw}");
-            let (height, _) = glass_fit(top, 1.0, 1.0);
-            assert!(height > GLASS_HALF_Y * 2.0);
-        }
-    }
-
-    #[test]
-    fn the_default_camera_orbit_is_outside_the_room() {
-        let extents = box_half_extents(1.0, 1.0);
-        for yaw in [0.0_f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI] {
-            let camera = [
-                yaw.cos() * CAMERA_ORBIT_RADIUS,
-                6.5,
-                yaw.sin() * CAMERA_ORBIT_RADIUS,
-            ];
-            assert!(camera[0].abs() > extents[0] || camera[2].abs() > extents[2]);
-        }
-    }
-
-    #[test]
-    fn bounce_bounds_match_the_volume_minus_the_logo_half_extents() {
-        assert_eq!(logo_half_extents(), [2.1, 1.05, 0.175]);
-        assert_eq!(bounce_bounds(), [3.9, 4.95, 11.825]);
+    fn the_logo_bounces_inside_the_js_bounds() {
+        let scene = DvdRoom::new();
+        // The extruded SVG measures 2.1 x 0.924 x 0.175 half extents.
+        close(scene.logo_half_extents()[0], 2.1, 2e-3);
+        close(scene.logo_half_extents()[2], LOGO_DEPTH * 0.5, 1e-5);
+        let bounds = scene.bounce_bounds();
+        close(bounds[0], 6.0 - scene.logo_half_extents()[0], 1e-4);
+        close(bounds[1], 6.0 - scene.logo_half_extents()[1], 1e-4);
+        close(bounds[2], 12.0 - scene.logo_half_extents()[2], 1e-4);
+        assert!(scene.logo_half_extents()[0] * 2.0 > 4.0);
     }
 
     #[test]
     fn step_bounce_reflects_and_counts_the_axes() {
-        let start = [3.8, 0.0, 0.0];
-        let velocity = [10.0, 0.0, 0.0];
-        let step = step_bounce(start, velocity, 1.0, 1.0);
+        let mut scene = DvdRoom::new();
+        let bounds = scene.bounce_bounds();
+        scene.position = [bounds[0] - 0.01, 0.0, 0.0];
+        scene.velocity = [20.0, 0.0, 0.0];
+        scene.step_bounce(0.01, 1.0);
 
-        assert_eq!(step.axes_hit, 1);
-        assert_eq!(step.position[0], 3.9);
-        assert_eq!(step.velocity, [-10.0, 0.0, 0.0]);
+        assert_eq!(scene.bounces(), 1);
+        assert_eq!(scene.position()[0], bounds[0]);
+        assert_eq!(scene.velocity()[0], -20.0);
+        assert_eq!(scene.colour_index(), 1);
+        assert!(scene.pop > 0.0);
+        assert_eq!(scene.corner_flash(), 0.0);
 
-        // A corner hit counts two axes.
-        let corner = step_bounce([3.8, 4.9, 0.0], [10.0, 10.0, 0.0], 1.0, 1.0);
-        assert_eq!(corner.axes_hit, 2);
-        assert_eq!(corner.velocity, [-10.0, -10.0, 0.0]);
-    }
-
-    #[test]
-    fn step_bounce_scales_with_the_speed_multiplier_and_caps_the_step() {
-        let step = step_bounce([0.0; 3], [1.0, 0.0, 0.0], 0.1, 2.0);
-        close(step.position[0], 0.2, 1e-6);
-
-        let negative = step_bounce([0.0; 3], [1.0, 0.0, 0.0], f32::NAN, f32::NAN);
-        assert_eq!(negative.position, [0.0; 3]);
+        // A corner hit counts two axes and flashes.
+        let mut scene = DvdRoom::new();
+        let bounds = scene.bounce_bounds();
+        scene.position = [bounds[0] - 0.01, bounds[1] - 0.01, 0.0];
+        scene.velocity = [20.0, 20.0, 0.0];
+        scene.step_bounce(0.01, 1.0);
+        assert_eq!(scene.bounces(), 1);
+        assert!(scene.corner_flash() > 0.99);
     }
 
     #[test]
     fn camera_orbit_lerps_toward_the_js_target() {
-        let (camera, yaw) = advance_camera(CAMERA_START, 0.0, 0.0, 0.0, 1.0 / 60.0);
-        // k = 0.02: 14 -> 17 * 0.02 + 14 * 0.98.
-        close(camera[0], 14.0 + (17.0 - 14.0) * 0.02, 1e-5);
-        close(camera[1], 5.5 + (6.5 - 5.5) * 0.02, 1e-5);
-        close(camera[2], 4.4 + (0.0 - 4.4) * 0.02, 1e-5);
-        assert_eq!(yaw, 0.0);
-
-        // A loud bass pushes the orbit yaw positive.
-        let (_, yaw) = advance_camera(CAMERA_START, 0.0, 0.6, 0.0, 0.1);
-        assert!(yaw > 0.0);
-    }
-
-    #[test]
-    fn fire_ramp_moves_from_red_to_mid_to_start() {
-        let red = fire_ramp(0.2);
-        // A red-dominant ramp: green and blue are both 0 on the way to `end`.
-        assert!(red[0] > red[1] && red[0] > red[2]);
-        let mid = fire_ramp(0.5);
-        assert!(mid[0] > mid[1]);
-        let hot = fire_ramp(0.9);
-        assert!(hot[1] > 0.2);
-    }
-
-    #[test]
-    fn a_bounce_steps_the_palette_and_pops_the_logo() {
         let mut scene = DvdRoom::new();
-        scene.position = [3.89, 0.0, 0.0];
-        scene.velocity = [20.0, 0.0, 0.0];
-        scene.update(0.001, &AudioBridge::new());
-
-        assert_eq!(scene.bounces(), 1);
-        assert_eq!(scene.colour_index(), 1);
-        assert!(scene.pop > 0.0);
-        assert_eq!(scene.corner_flash(), 0.0);
-    }
-
-    #[test]
-    fn a_corner_hit_flashes_and_counts_two_axes() {
-        let mut scene = DvdRoom::new();
-        scene.position = [3.89, 4.94, 0.0];
-        scene.velocity = [20.0, 20.0, 0.0];
-        scene.update(0.001, &AudioBridge::new());
-
-        assert_eq!(scene.bounces(), 1);
-        assert_eq!(scene.colour_index(), 1);
-        assert!(scene.corner_flash() > 0.99);
+        scene.update(1.0 / 60.0, &AudioBridge::new());
+        let k = (1.0 / 60.0 * 1.2_f32).min(1.0);
+        let target = [
+            CAMERA_ORBIT_RADIUS,
+            6.5 + ((1.0_f32 / 60.0) * 0.23).sin() * 1.2,
+            0.0,
+        ];
+        close(
+            scene.camera_position()[0],
+            CAMERA_START[0] + (target[0] - CAMERA_START[0]) * k,
+            1e-5,
+        );
+        close(
+            scene.camera_position()[1],
+            CAMERA_START[1] + (target[1] - CAMERA_START[1]) * k,
+            1e-5,
+        );
+        close(
+            scene.camera_position()[2],
+            CAMERA_START[2] + (target[2] - CAMERA_START[2]) * k,
+            1e-5,
+        );
     }
 
     #[test]
@@ -2284,66 +1097,21 @@ mod tests {
         let scene = DvdRoom::new();
         assert_eq!(scene.colour_index(), 0);
         assert_eq!(scene.logo_colour(), srgb_hex_to_linear(PALETTE[0]));
-
-        // Drive one bounce directly through the pure step.
-        let step = step_bounce([3.85, 0.0, 0.0], [10.0, 0.0, 0.0], 0.1, 1.0);
-        assert_eq!(step.axes_hit, 1);
-    }
-
-    #[test]
-    fn puffs_spawn_around_the_logo_and_advance() {
-        let mut puff = spawn_puff(4, [1.0, 2.0, 3.0]);
-        assert_eq!(puff.age, 0.0);
-        let start = puff.position;
-        advance_puff(&mut puff, [1.0, 2.0, 3.0], 0.1, 1.2, 3.5);
-        assert!(puff.age > 0.0);
-        assert_ne!(puff.position, start);
-
-        // A dead puff respawns at the emitter.
-        puff.age = 1.0;
-        advance_puff(&mut puff, [1.0, 2.0, 3.0], 0.1, 1.2, 3.5);
-        assert_eq!(puff.age, 0.0);
     }
 
     #[test]
     fn preset_constants_match_the_js() {
-        assert_eq!(VOLUME_WORLD_SIZE_X, 12.0);
-        assert_eq!(VOLUME_WORLD_SIZE_Y, 12.0);
-        assert_eq!(VOLUME_WORLD_SIZE_Z, 24.0);
-        assert_eq!(LOGO_WIDTH, 4.2);
-        assert_eq!(LOGO_DEPTH, 0.35);
-        assert_eq!(BASE_SPEED, 3.5);
+        assert_eq!((BASE_SPEED, FIRE_INTENSITY), (3.5, 22.0));
         assert_eq!(LOGO_START_POSITION, [-2.0, 1.0, -4.0]);
-        assert_eq!((FIRE_HAT_K, FIRE_SNARE_K), (2.5, 8.0));
-        assert_eq!((BLOOM_BASE, BLOOM_PER_BASS), (0.12, 2.2));
-        assert_eq!(GLASS_TOP_MARGIN, 0.75);
+        assert_eq!(LOGO_START_VELOCITY, [1.0, 0.6, 0.8]);
+        assert_eq!((LOGO_WIDTH, LOGO_DEPTH), (4.2, 0.35));
+        assert_eq!((BLOOM_BASE, BLOOM_PER_BASS, BLOOM_MAX), (0.12, 2.2, 2.8));
+        assert_eq!(CAMERA_ORBIT_RADIUS, 17.0);
         assert_eq!(CLEAR_ALPHA, 0.0);
-    }
-
-    #[test]
-    fn rounded_slab_has_the_requested_extents_and_outward_normals() {
-        let mesh = build_rounded_slab(LOGO_WIDTH, LOGO_HEIGHT, LOGO_DEPTH, LOGO_RADIUS, 8);
-        assert_eq!(mesh.vertices.len(), 2 + 6 * 32);
-        let mut min = [f32::INFINITY; 3];
-        let mut max = [f32::NEG_INFINITY; 3];
-        for vertex in &mesh.vertices {
-            for axis in 0..3 {
-                min[axis] = min[axis].min(vertex.position[axis]);
-                max[axis] = max[axis].max(vertex.position[axis]);
-            }
-        }
-        close(min[0], -LOGO_WIDTH * 0.5, 1e-5);
-        close(max[0], LOGO_WIDTH * 0.5, 1e-5);
-        close(min[1], -LOGO_HEIGHT * 0.5, 1e-5);
-        close(max[1], LOGO_HEIGHT * 0.5, 1e-5);
-        close(min[2], -LOGO_DEPTH * 0.5, 1e-6);
-        close(max[2], LOGO_DEPTH * 0.5, 1e-6);
-
-        // Front/back caps point away from the slab.
-        assert_eq!(mesh.vertices[0].normal, [0.0, 0.0, 1.0]);
-        // The emit-gain reference is `SphereGeometry(0.9, 64, 40)`'s count.
-        assert_eq!((64 + 1) * (40 + 1), REFERENCE_EMITTER_VERTICES);
-        assert!(SPHERE_RADIUS > 0.0);
+        // The emission gain is normalised against the sphere's vertex count.
+        let logo = build_logo();
+        let gain = (REFERENCE_EMITTER_VERTICES as f32 / logo.mesh.vertices.len() as f32) * 6.0;
+        assert!(gain > 1.0 && gain < 100.0, "emit gain {gain}");
     }
 
     #[test]
@@ -2359,7 +1127,7 @@ mod tests {
         for _ in 0..600 {
             scene.update(1.0 / 60.0, &bridge);
         }
-        // Six seconds at 5 units/s must hit at least one wall.
+        // Six seconds at >3.5 units/s must hit at least one wall.
         assert!(scene.bounces() > 0, "position stayed at {start:?}");
         assert_ne!(scene.position(), start);
         assert_ne!(scene.camera_position(), CAMERA_START);
@@ -2392,56 +1160,40 @@ mod tests {
     fn uniforms_match_the_documented_sizes() {
         assert_eq!(std::mem::size_of::<LogoUniforms>(), 208);
         assert_eq!(std::mem::size_of::<GlassUniforms>(), 192);
-        assert_eq!(std::mem::size_of::<PuffUniforms>(), 96);
-        assert_eq!(std::mem::size_of::<PuffInstance>(), 32);
-        assert_eq!(std::mem::size_of::<FinalUniforms>(), 16);
     }
 
     #[test]
-    fn wgsl_parses_and_validates() {
-        for (label, program) in [
-            ("logo", dvd_room_logo_wgsl()),
-            ("glass", dvd_room_glass_wgsl()),
-            ("puff", dvd_room_puff_wgsl()),
-            ("final", dvd_room_final_wgsl()),
-        ] {
-            let module = match naga::front::wgsl::parse_str(&program) {
-                Ok(module) => module,
-                Err(error) => panic!("{label} WGSL failed to parse: {error}"),
-            };
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{label} WGSL must validate: {error}"));
-        }
-    }
-
-    #[test]
-    fn shaders_keep_the_bounce_and_haze_maths() {
-        let logo = dvd_room_logo_wgsl();
-        for needle in [
-            "let hemi = mix(",
-            "let emissive = u.colour.rgb * u.params.x;",
-            "u.params.y * 0.8",
-        ] {
-            assert!(logo.contains(needle), "logo lost {needle}");
-        }
-
-        let glass = dvd_room_glass_wgsl();
-        for needle in [
-            "let fresnel = pow(1.0 - clamp(abs(dot(normal, view_dir)), 0.0, 1.0), 3.0);",
-            "return vec4<f32>(colour, u.params.x + fresnel * 0.12);",
-        ] {
-            assert!(glass.contains(needle), "glass lost {needle}");
-        }
-
-        let puff = dvd_room_puff_wgsl();
-        assert!(puff.contains("let mask = pow(1.0 - smoothstep(0.0, 1.0, radius), 2.0);"));
-
-        let final_shader = dvd_room_final_wgsl();
-        assert!(final_shader.contains("clamp(max(max(rgb.r, rgb.g), rgb.b), 0.0, 1.0)"));
+    fn the_volume_uniforms_follow_the_logo() {
+        let mut scene = DvdRoom::new();
+        scene.position = [1.0, 2.0, 3.0];
+        scene.velocity = [1.0, 0.0, 0.0];
+        scene.fire_size = 2.0;
+        scene.camera_aspect = 1.0;
+        scene.size = (64, 64);
+        let temporal = fire_temporal(&ImprovedNoise, 5.0);
+        let tick = crate::point10::volume::room::SimTick {
+            steps: 1,
+            step: 0.01,
+            start_time: 0.0,
+            turbulence: 3.0,
+            dissipation: 0.2,
+            cooling: 0.5,
+        };
+        let uniforms = scene.volume_uniforms(&temporal, &tick);
+        assert_eq!(uniforms.sphere_pos[0..3], [1.0, 2.0, 3.0]);
+        close(uniforms.sphere_pos[3], 1.0, 1e-6);
+        assert_eq!(uniforms.sphere_vel[0..3], [1.0, 0.0, 0.0]);
+        // The emitter matrix carries the bounce position.
+        let origin = [
+            uniforms.emitter_model[3][0],
+            uniforms.emitter_model[3][1],
+            uniforms.emitter_model[3][2],
+        ];
+        assert_eq!(origin, [1.0, 2.0, 3.0]);
+        assert_eq!(uniforms.emit[3], scene.emit_gain);
+        assert!(uniforms.emit[3] > 0.0);
+        assert_eq!(uniforms.view[2], 32.0);
+        assert_eq!(uniforms.view[3], 32.0);
     }
 
     #[test]
@@ -2463,5 +1215,38 @@ mod tests {
             ]
         );
         assert_eq!(names[0], "gain");
+    }
+
+    #[test]
+    fn wgsl_parses_and_validates() {
+        for (label, program) in shader_programs() {
+            let module = match naga::front::wgsl::parse_str(&program) {
+                Ok(module) => module,
+                Err(error) => panic!("{label} WGSL failed to parse: {error}"),
+            };
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{label} WGSL must validate: {error}"));
+        }
+    }
+
+    #[test]
+    fn shaders_keep_the_bounce_and_lighting_maths() {
+        for needle in [
+            "let hemi = mix(",
+            "let emissive = u.colour.rgb * u.params.x;",
+            "u.params.y * 0.8",
+        ] {
+            assert!(DVD_ROOM_LOGO_WGSL.contains(needle), "logo lost {needle}");
+        }
+        for needle in [
+            "let fresnel = pow(1.0 - clamp(abs(dot(normal, view_dir)), 0.0, 1.0), 3.0);",
+            "return vec4<f32>(colour, u.params.x + fresnel * 0.15);",
+        ] {
+            assert!(DVD_ROOM_GLASS_WGSL.contains(needle), "glass lost {needle}");
+        }
     }
 }
