@@ -44,8 +44,9 @@ use modv_render::surface::{SurfaceTarget, create_surface};
 use modv_render::wgpu;
 use modv_render::{Engine, FrameReport, FrameStats};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::cli::Cli;
@@ -131,12 +132,81 @@ struct WindowedApp {
     audio_feed: Option<AudioFeed>,
     /// One-shot guard for the capture-failure log line.
     audio_error_logged: bool,
+    /// Double-click detection for the output window: F or a double click
+    /// toggles fullscreen (the legacy Output Window does the same on the
+    /// popup's document).
+    double_click: DoubleClickTracker,
+    /// Live keyboard modifiers, so `Ctrl+F`/`Alt+F` are not treated as the
+    /// fullscreen shortcut.
+    modifiers: ModifiersState,
+}
+
+/// How long two clicks may be apart to count as a double click.
+pub const DOUBLE_CLICK_MS: u64 = 400;
+
+/// Tracks the previous mouse click so two presses of the same button within
+/// [`DOUBLE_CLICK_MS`] toggle fullscreen.
+#[derive(Debug, Default)]
+pub struct DoubleClickTracker {
+    last: Option<(Instant, MouseButton)>,
+}
+
+impl DoubleClickTracker {
+    /// Register a press; returns `true` when it completes a double click.
+    ///
+    /// Time is passed in so the behaviour is unit-testable. A triple click
+    /// toggles once (the pair consumes the state and the third press starts
+    /// over) rather than flickering twice.
+    pub fn register(&mut self, now: Instant, button: MouseButton) -> bool {
+        let double = matches!(
+            self.last,
+            Some((at, previous)) if previous == button
+                && now.saturating_duration_since(at) <= Duration::from_millis(DOUBLE_CLICK_MS)
+        );
+        self.last = if double { None } else { Some((now, button)) };
+        double
+    }
+}
+
+/// Whether a key press should toggle the output window's fullscreen state.
+///
+/// `f`/`F` without Ctrl/Meta/Alt; Shift is allowed because it is how `F` is
+/// typed. AltGr arrives as Ctrl+Alt on some layouts, so Ctrl is rejected on
+/// purpose (the engine has no other F shortcut to clash with).
+pub fn is_fullscreen_toggle_key(key: &Key, modifiers: ModifiersState) -> bool {
+    let touches_command = modifiers.control_key() || modifiers.super_key() || modifiers.alt_key();
+    !touches_command
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("f"))
+}
+
+/// Whether a key press should leave fullscreen.
+pub fn is_fullscreen_exit_key(key: &Key) -> bool {
+    matches!(key, Key::Named(NamedKey::Escape))
 }
 
 // `FrameStats` contains no public Clone; store it in an Option so `finish()`
 // can consume it exactly once.
 
 impl WindowedApp {
+    /// Toggle the window between borderless fullscreen and windowed.
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let leaving = window.fullscreen().is_some();
+        window.set_fullscreen(if leaving {
+            None
+        } else {
+            // Wayland has no primary monitor; `None` means "the monitor the
+            // window is on", which is what the user expects.
+            Some(Fullscreen::Borderless(None))
+        });
+        eprintln!(
+            "engine: INFO fullscreen {}",
+            if leaving { "off" } else { "on" }
+        );
+    }
+
     fn new(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Self {
         let start = Instant::now();
         // WS-10: initialise GStreamer (and log its version) before the loop, so
@@ -255,6 +325,8 @@ impl WindowedApp {
             preview_error_logged: false,
             audio_feed,
             audio_error_logged: false,
+            double_click: DoubleClickTracker::default(),
+            modifiers: ModifiersState::default(),
         }
         .with_socket_failure(socket_failed)
     }
@@ -835,6 +907,36 @@ impl ApplicationHandler for WindowedApp {
                 }
             }
             WindowEvent::RedrawRequested => self.draw_frame(event_loop),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    if is_fullscreen_toggle_key(&event.logical_key, self.modifiers) {
+                        self.toggle_fullscreen();
+                    } else if is_fullscreen_exit_key(&event.logical_key)
+                        && self
+                            .window
+                            .as_ref()
+                            .is_some_and(|window| window.fullscreen().is_some())
+                    {
+                        self.toggle_fullscreen();
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                // A left double-click toggles fullscreen, mirroring the
+                // legacy output window's `dblclick` handler.
+                if button == MouseButton::Left
+                    && self.double_click.register(Instant::now(), button)
+                {
+                    self.toggle_fullscreen();
+                }
+            }
             _ => {}
         }
     }
@@ -881,6 +983,48 @@ fn wall_clock_date(monotonic_seconds: f32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f_toggles_fullscreen_without_command_modifiers() {
+        let f = Key::Character("f".into());
+        let shift_f = Key::Character("F".into());
+        assert!(is_fullscreen_toggle_key(&f, ModifiersState::default()));
+        assert!(is_fullscreen_toggle_key(
+            &shift_f,
+            ModifiersState::SHIFT
+        ));
+        assert!(!is_fullscreen_toggle_key(&f, ModifiersState::CONTROL));
+        assert!(!is_fullscreen_toggle_key(&f, ModifiersState::ALT));
+        assert!(!is_fullscreen_toggle_key(&f, ModifiersState::SUPER));
+        assert!(!is_fullscreen_toggle_key(
+            &Key::Character("g".into()),
+            ModifiersState::default()
+        ));
+        assert!(is_fullscreen_exit_key(&Key::Named(NamedKey::Escape)));
+        assert!(!is_fullscreen_exit_key(&f));
+    }
+
+    #[test]
+    fn double_click_needs_two_presses_within_the_window() {
+        let start = Instant::now();
+        let mut tracker = DoubleClickTracker::default();
+        assert!(!tracker.register(start, MouseButton::Left));
+        assert!(tracker.register(start + Duration::from_millis(200), MouseButton::Left));
+        // A triple click only toggles once: the pair cleared the state.
+        assert!(!tracker.register(start + Duration::from_millis(350), MouseButton::Left));
+        assert!(tracker.register(start + Duration::from_millis(500), MouseButton::Left));
+
+        let mut slow = DoubleClickTracker::default();
+        assert!(!slow.register(start, MouseButton::Left));
+        assert!(!slow.register(start + Duration::from_millis(DOUBLE_CLICK_MS + 1), MouseButton::Left));
+
+        // A right press does not pair with a left press.
+        let mut mixed = DoubleClickTracker::default();
+        assert!(!mixed.register(start, MouseButton::Left));
+        assert!(!mixed.register(start + Duration::from_millis(50), MouseButton::Right));
+        assert!(!mixed.register(start + Duration::from_millis(100), MouseButton::Left));
+        assert!(mixed.register(start + Duration::from_millis(150), MouseButton::Left));
+    }
 
     #[test]
     fn wall_clock_date_has_the_shader_uniform_shape() {

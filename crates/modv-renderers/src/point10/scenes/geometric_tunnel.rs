@@ -79,6 +79,7 @@ use crate::point10::scenes::cube_mesh::{
     DEPTH_FORMAT, Mat4, Mesh, MeshGpu, Vertex, depth_state, look_at, mat4_mul, normalise,
     perspective, rotation_z, scale, transform_point, translation, trs,
 };
+use crate::point10::shared::phrase_color::srgb_hex_to_linear;
 use crate::point10::shared::random::seeded_rand;
 use crate::point10::{
     FULLSCREEN_TRIANGLE_WGSL, HDR_FORMAT, Point10Scene, SceneContext, SceneMeta, SceneProp,
@@ -131,6 +132,13 @@ pub const TUNNEL_SSAO: SsaoParams = SsaoParams {
     strength: 1.0,
     bias: 0.04,
 };
+
+/// The JS neon material's `color: 0x3a4358` (`_neonMat`).
+pub const TUNNEL_BASE_TINT_HEX: u32 = 0x003a_4358;
+/// `TUNNEL_BASE_TINT_HEX` converted from sRGB to linear, like three's
+/// `MeshStandardMaterial.color` (the renderer's colour management converts
+/// it once at material creation).
+pub const TUNNEL_BASE_TINT: [f32; 3] = [0.042_312, 0.056_128, 0.097_587];
 
 /// `OUTER_SIDES`.
 pub const OUTER_SIDES: [u32; 6] = [4, 8, 3, 32, 10, 12];
@@ -1014,6 +1022,11 @@ impl Bolt {
 struct TunnelGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// `grainMap`/`emissiveMap`/`roughnessMap` (`buildTunnelGrain`).
+    _grain_texture: wgpu::Texture,
+    /// `scene.environment` (`buildTunnelEnvironment`, equirectangular).
+    _environment_texture: wgpu::Texture,
+    _surface_sampler: wgpu::Sampler,
     _scene_texture: wgpu::Texture,
     scene_view: wgpu::TextureView,
     _lit_texture: wgpu::Texture,
@@ -1306,7 +1319,10 @@ impl GeometricTunnel {
 
         let b = self.smoothed_bass;
         let m = self.smoothed_mid;
-        let base_tint = [0.227_45, 0.263_24, 0.345_09_f32];
+        // `MeshStandardMaterial` colour management converts the sRGB tint to
+        // linear; using the raw 0x3a/0x43/0x58 components made the hoops ~5x
+        // too bright and washed the grain/environment detail out.
+        let base_tint = TUNNEL_BASE_TINT;
 
         for index in 0..RING_COUNT {
             let pose = self.current_pose(index);
@@ -1786,9 +1802,48 @@ impl Point10Scene for GeometricTunnel {
             label: Some("point10-tunnel-shader"),
             source: wgpu::ShaderSource::Wgsl(tunnel_wgsl().into()),
         });
+        // `GeometricTunnel._buildSurfaceMaps()`: the brushed-metal grain is
+        // both the roughness and emissive map, and the equirect studio map is
+        // `scene.environment`. Without these the hoops render as flat paint.
+        let grain_texture = create_surface_texture(
+            &device,
+            &queue,
+            "point10-tunnel-grain",
+            TUNNEL_GRAIN_SIZE,
+            TUNNEL_GRAIN_SIZE,
+            &build_tunnel_grain(TUNNEL_GRAIN_SIZE),
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let environment_texture = create_surface_texture(
+            &device,
+            &queue,
+            "point10-tunnel-environment",
+            TUNNEL_ENV_WIDTH,
+            TUNNEL_ENV_HEIGHT,
+            &build_tunnel_environment(TUNNEL_ENV_WIDTH, TUNNEL_ENV_HEIGHT),
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let grain_view = grain_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let environment_view =
+            environment_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("point10-tunnel-surface-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("point10-tunnel-layout"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+            entries: &[
+                uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                texture_entry(1),
+                sampler_entry(2),
+                texture_entry(3),
+            ],
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("point10-tunnel-uniforms"),
@@ -1834,10 +1889,24 @@ impl Point10Scene for GeometricTunnel {
         let instance_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("point10-tunnel-bind-group"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&grain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&surface_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&environment_view),
+                },
+            ],
         });
         let instance_buffer = {
             use wgpu::util::DeviceExt;
@@ -2237,6 +2306,9 @@ impl Point10Scene for GeometricTunnel {
         self.gpu = Some(TunnelGpu {
             device,
             queue,
+            _grain_texture: grain_texture,
+            _environment_texture: environment_texture,
+            _surface_sampler: surface_sampler,
             _scene_texture: scene_texture,
             scene_view,
             _lit_texture: lit_texture,
@@ -2631,6 +2703,59 @@ fn create_final_bind_group(device: &wgpu::Device, gpu: &TunnelGpu) -> wgpu::Bind
     })
 }
 
+/// Upload one procedural surface map (`THREE.DataTexture`).
+///
+/// The grain is `RGBA8` with the height/noise in all three channels and an
+/// opaque alpha; the environment is the equirect studio in sRGB. Both use
+/// `LinearFilter` and repeat addressing, like `_dataTexture` /
+/// `_environmentTexture`.
+fn create_surface_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    data: &[u8],
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    let width = width.max(1);
+    let height = height.max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
+}
+
 fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -2704,6 +2829,9 @@ struct TunnelUniforms {
   bolt_pos1: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: TunnelUniforms;
+@group(0) @binding(1) var grain_texture: texture_2d<f32>;
+@group(0) @binding(2) var surface_sampler: sampler;
+@group(0) @binding(3) var environment_texture: texture_2d<f32>;
 
 fn point_light(position: vec3<f32>, colour: vec3<f32>, intensity: f32, normal: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
   let to_light = position - world;
@@ -2804,9 +2932,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     in.world,
   ) * in.colour;
 
-  // `frame.material.emissive * emissiveIntensity` (the palette glow).
-  let emissive = in.emissive.rgb * in.emissive.w;
-  let colour = fog_mix(lit + emissive, length(u.camera_pos.xyz - in.world));
+  // `roughnessMap` / `emissiveMap` / `bumpMap` are all `grainMap`
+  // (`_neonMat`). The extruded ring quads carry no meaningful UVs, so the
+  // grain is sampled triplanar from world position, at the same 2.5x repeat
+  // the JS texture uses.
+  let grain_position = in.world * 2.0;
+  let blend = pow(abs(normal), vec3<f32>(4.0));
+  let blend_total = max(blend.x + blend.y + blend.z, 0.0001);
+  let grain = (
+    textureSample(grain_texture, surface_sampler, grain_position.zy).r * blend.x
+    + textureSample(grain_texture, surface_sampler, grain_position.xz).r * blend.y
+    + textureSample(grain_texture, surface_sampler, grain_position.xy).r * blend.z
+  ) / blend_total;
+
+  // `frame.material.emissive * emissiveIntensity * emissiveMap` (the palette
+  // glow, worn by the brushed grain).
+  let emissive = in.emissive.rgb * in.emissive.w * grain * 1.6;
+
+  // `MeshStandardMaterial({ metalness: 0.9, roughness: 0.8,
+  // envMapIntensity: 1.45 })`: the equirect studio reflection is what gives
+  // the hoops their metal sheen. `TUNNEL_SURFACE.env_intensity` is 1.45.
+  let rough = clamp(0.8 * (0.35 + 0.65 * grain), 0.12, 1.0);
+  let reflected = reflect(-view_dir, normal);
+  let environment_uv = vec2<f32>(
+    atan2(reflected.z, reflected.x) * 0.15915494 + 0.5,
+    asin(clamp(reflected.y, -1.0, 1.0)) * 0.31830989 + 0.5,
+  );
+  let environment = textureSample(environment_texture, surface_sampler, environment_uv).rgb;
+  let reflection = environment * 1.45 * (1.0 - rough * 0.55) * 0.35;
+
+  // Brushed metal: the grain breaks up the lit base and the environment
+  // reflects in the tinted metal (`metalness: 0.9`).
+  let brushed = lit * (0.85 + 0.15 * grain) + in.colour * reflection * 0.85;
+  let colour = fog_mix(brushed + emissive, length(u.camera_pos.xyz - in.world));
   return vec4<f32>(colour, 1.0);
 }
 "#;
@@ -2941,6 +3099,39 @@ mod tests {
 
     fn close(a: f32, b: f32, tolerance: f32) {
         assert!((a - b).abs() < tolerance, "{a} != {b}");
+    }
+
+    #[test]
+    fn base_tint_is_the_linear_js_colour() {
+        // three converts `color: 0x3a4358` from sRGB to linear (0.042/0.056/
+        // 0.095). Treating the sRGB bytes as linear made the hoops a flat
+        // lavender and hid the surface maps.
+        let converted = srgb_hex_to_linear(TUNNEL_BASE_TINT_HEX);
+        for (linear, expected) in TUNNEL_BASE_TINT.iter().zip(converted.iter()) {
+            close(*linear, *expected, 1e-6);
+        }
+        assert!(TUNNEL_BASE_TINT.iter().all(|channel| *channel < 0.1));
+    }
+
+    #[test]
+    fn surface_maps_are_bound_and_sampled() {
+        // The JS material maps `grainMap` to roughness and emissive and
+        // `scene.environment` to the equirect studio. The port must actually
+        // bind/sample them; building the textures alone renders flat paint.
+        let program = tunnel_wgsl();
+        assert!(program.contains("grain_texture"), "grain map not bound");
+        assert!(
+            program.contains("environment_texture"),
+            "environment map not bound"
+        );
+        assert!(
+            program.contains("textureSample(grain_texture"),
+            "the surface shader never samples the grain"
+        );
+        assert!(
+            program.contains("textureSample(environment_texture"),
+            "the surface shader never samples the environment"
+        );
     }
 
     #[test]
@@ -3257,7 +3448,7 @@ mod tests {
         for needle in [
             "let hemi = mix(",
             "let key = max(dot(normal, normalize(vec3<f32>(3.0, 4.0, 6.0))), 0.0)",
-            "let emissive = in.emissive.rgb * in.emissive.w;",
+            "let emissive = in.emissive.rgb * in.emissive.w * grain * 1.6;",
             "let factor = clamp((view_distance - u.fog.w) / max(u.lights.x - u.fog.w, 0.001), 0.0, 1.0);",
         ] {
             assert!(program.contains(needle), "tunnel shader lost {needle}");

@@ -140,6 +140,13 @@ const windowPrefs = {
         nodeIntegrationInWorker: true,
         nativeWindowOpen: true, // window.open return Window object(like in regular browsers), not BrowserWindowProxy
         affinity: "main-window", // main window, and additional windows should work in one process
+        // The renderer's audio pump runs on requestAnimationFrame (engine
+        // mode has no worker loop). Watching the engine's own output window
+        // occludes this window, and Chromium would otherwise pause rAF — the
+        // engine would keep rendering but never receive another
+        // `meyda/SET_BANDS`, so every audio-reactive scene (the DVD logo's
+        // beat pulse included) freezes. Keep the pump alive when hidden.
+        backgroundThrottling: false,
       },
     },
     unique: true,

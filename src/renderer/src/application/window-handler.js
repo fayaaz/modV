@@ -1,3 +1,11 @@
+import {
+  exitFullscreen,
+  isFullscreen,
+  isFullscreenExitEvent,
+  isFullscreenToggleEvent,
+  toggleFullscreen,
+} from "./output-window-controls.js";
+
 export default function windowHandler() {
   const windows = {};
   const that = this;
@@ -109,13 +117,32 @@ export default function windowHandler() {
       canvas.style.objectFit = "cover";
       canvas.style.width = "100%";
 
+      // The canvas has been transferred to the worker, so it is a placeholder:
+      // fullscreen the document root instead, and accept F/Escape like the
+      // engine's native output window.
+      const outputDocument = canvas.ownerDocument;
+
       canvas.addEventListener("dblclick", () => {
-        if (!canvas.ownerDocument.webkitFullscreenElement) {
-          canvas.webkitRequestFullscreen();
-        } else {
-          canvas.ownerDocument.webkitExitFullscreen();
+        toggleFullscreen(outputDocument);
+      });
+
+      outputDocument.addEventListener("keydown", (event) => {
+        if (isFullscreenToggleEvent(event)) {
+          event.preventDefault();
+          toggleFullscreen(outputDocument);
+        } else if (
+          isFullscreenExitEvent(event) &&
+          isFullscreen(outputDocument)
+        ) {
+          event.preventDefault();
+          exitFullscreen(outputDocument);
         }
       });
+
+      // A popup opened from the main window does not always keep focus after a
+      // click; without focus the keydown listener never sees F. Refocusing on
+      // pointer input is enough and does not steal focus at open time.
+      win.addEventListener("pointerdown", () => win.focus());
 
       canvas.addEventListener("mousemove", createHideMouseTimerhandler(canvas));
 

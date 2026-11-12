@@ -1115,6 +1115,57 @@ mod tests {
     }
 
     #[test]
+    fn a_loud_bass_attack_fires_the_kick_and_scales_the_logo() {
+        // `DvdRoom.js:392-405`: a bass attack pops the logo scale
+        // (`1 + pop * 0.12`) and speeds the bounce up (`burst`). This is the
+        // visible music pulse; a silent bridge must not trigger it.
+        let mut scene = DvdRoom::new();
+        let mut payload = BandPayload::silent(44_100.0);
+        let mut bridge = AudioBridge::new();
+        bridge.update(0.1, Some(&payload), &Default::default());
+        scene.update(0.1, &bridge);
+        assert_eq!(scene.pop, 0.0, "silence must not pop the logo");
+
+        // Bins 1..9 are the band `_band(1, 9)` reads.
+        for value in payload.freq_mag.iter_mut().take(9).skip(1) {
+            *value = 0.8;
+        }
+        bridge.update(0.1, Some(&payload), &Default::default());
+        scene.update(0.1, &bridge);
+        assert!(scene.pop > 0.5, "a bass attack pops the logo (pop {})", scene.pop);
+        assert!(scene.burst > 0.0, "a bass attack bursts the logo speed");
+
+        // The model scale carries the pop into the drawn geometry
+        // (`Mat4` is column-major, so column 0's length is the x scale).
+        let model = scene.logo_model();
+        let scale_x = (model[0][0] * model[0][0]
+            + model[1][0] * model[1][0]
+            + model[2][0] * model[2][0])
+            .sqrt();
+        assert!(scale_x > 1.05, "logo scale must pulse (got {scale_x})");
+    }
+
+    #[test]
+    fn treble_raises_the_logo_emissive() {
+        // `DvdRoom.js:441-443`: the top-15% treble mean drives the emissive
+        // glow (`1 + smTreble * 2.5`).
+        let mut scene = DvdRoom::new();
+        let mut payload = BandPayload::silent(44_100.0);
+        let lo = (AUDIO_SAMPLES as f32 * 0.85).floor() as usize;
+        for value in payload.freq_mag.iter_mut().skip(lo) {
+            *value = 0.9;
+        }
+        let mut bridge = AudioBridge::new();
+        bridge.update(0.1, Some(&payload), &Default::default());
+        scene.update(0.1, &bridge);
+        assert!(
+            scene.emissive_intensity() > 1.5,
+            "treble must glow the logo (emissive {})",
+            scene.emissive_intensity()
+        );
+    }
+
+    #[test]
     fn update_bounces_the_logo_and_advances_the_camera() {
         let mut scene = DvdRoom::new();
         let mut payload = BandPayload::silent(44_100.0);

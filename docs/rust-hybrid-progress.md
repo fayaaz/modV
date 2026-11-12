@@ -12,9 +12,9 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1803 tests pass** (modv-app 303, modv-engine 439,
-  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 762).
-- Vitest: **1139 tests pass** across 90 files (engine mirror-parity replay,
+- Rust workspace: **1809 tests pass** (modv-app 305, modv-engine 439,
+  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 766).
+- Vitest: **1145 tests pass** across 91 files (engine mirror-parity replay,
   preview/read helpers, supervisor restart budget, preload scoping, sync
   replay, plugin host, engine media controller/paths, module meta and payload
   shapes).
@@ -251,6 +251,12 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 
 ## Known gaps (M7 sign-off)
 
+- **Module parity vs the legacy AppImage**: quantified in
+  [module-parity.md](./module-parity.md) — the engine registers 429 modules vs the
+  legacy renderer's 432 (missing `Point10 Earth`, `Point10 Sun`, `Cube`), plus
+  registered-but-inert gaps (Texture 2D, ISF image inputs/transitions, no
+  third-party module install path). Verified-clean areas and the fix order are
+  listed there.
 - **Engine stays opt-in (`MODV_ENGINE=1`).** Cameras and video files are now
   engine-owned, but engine-mode **screen capture** waits on an Electron API
   that exposes the portal PipeWire node id (the GStreamer `pipewiresrc` path is
@@ -297,3 +303,24 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       on a clean machine
 - [ ] Remaining ISF overrides; goldens for all renderers/scenes
 - [ ] User JS modules/plugins known-gap documentation and the Rust plugin ABI
+
+## Post-review parity fixes
+
+- **Output-window fullscreen.** `F` (without Ctrl/Meta/Alt) and a left
+  double click toggle borderless fullscreen on the engine's native window
+  (winit `set_fullscreen`, Escape leaves it); the legacy Output Window popup
+  uses the same shortcuts and fullscreens its `documentElement` because its
+  canvas has been transferred to the worker. Covered by `modv-app` unit tests
+  and `tests/unit/output-window-controls.test.js`.
+- **GeometricTunnel surface maps.** The port bound neither the brushed-metal
+  grain (`grainMap`/`roughnessMap`/`emissiveMap`) nor the equirect studio
+  environment, so the hoops rendered as flat paint. Both maps are uploaded and
+  sampled triplanar in the surface shader; the base tint is now the sRGB →
+  linear conversion of the JS `0x3a4358` (using the raw bytes made the metal
+  ~5x too bright).
+- **Audio pump while the output window is watched.** Engine mode drives the
+  renderer's analyser from `requestAnimationFrame`; Chromium throttled it when
+  the main window was occluded by the engine's own output window, freezing
+  `meyda/SET_BANDS` and every audio-reactive scene (the DVD logo's beat pulse
+  included). The main window now sets `backgroundThrottling: false`, asserted
+  by `engineSkeleton.spec.js`.

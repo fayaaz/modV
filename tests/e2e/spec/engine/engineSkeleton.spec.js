@@ -90,6 +90,19 @@ test.describe("engine skeleton (MODV_ENGINE=1)", () => {
       expect(await waitForReady(page)).toBe(true);
       expect(await page.evaluate(() => window.__gpuContexts || [])).toEqual([]);
 
+      // Engine mode pumps audio from the renderer's requestAnimationFrame.
+      // Watching the engine's own fullscreen output occludes this window; if
+      // Chromium throttled it, `meyda/SET_BANDS` would stop and every
+      // audio-reactive scene would freeze (the DVD logo's beat pulse
+      // included). The main window must opt out of background throttling.
+      const mainWindowThrottling = await app.evaluate(
+        ({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .filter((window) => window.webContents.getURL().includes("index.html"))
+            .map((window) => window.webContents.getBackgroundThrottling()),
+      );
+      expect(mainWindowThrottling).toEqual([false]);
+
       // The engine publishes preview frames on its own cadence; the renderer
       // counts them into window.__enginePreviewCount (engine-client.js).
       const before = await page.evaluate(
