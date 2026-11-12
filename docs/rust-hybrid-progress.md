@@ -12,8 +12,8 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1785 tests pass** (modv-app 288, modv-engine 438,
-  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 760).
+- Rust workspace: **1788 tests pass** (modv-app 290, modv-engine 438,
+  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 761).
 - Vitest: **1118 tests pass** across 89 files (engine mirror-parity replay,
   preview/read helpers, supervisor restart budget, preload scoping, sync
   replay, plugin host, engine media controller and payload shapes).
@@ -38,7 +38,14 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 - Final packaged build (all review fixes, Point10 textures bundled): the
   engine logs **zero** asset fallbacks, runs at 107 fps at 1080×720 with the
   status bar live, and the live radio still drives Boxy (140 BPM, bass 0.35,
-  linked gain moving). Full e2e **144/144** on this build.
+  linked gain moving).
+- Latest packaged AppImage (`MODV_ENGINE=1`, all review fixes): full e2e
+  **144/144**, including engineParity. Media smoke checked directly: V4L2
+  enumeration lists the two UVC cameras (`/dev/video0`, `/dev/video2`) with
+  caps, `/dev/video0` starts and paints a Webcam module, `groups/UPDATE_GROUP`,
+  `groups/updateGroupName` and `groups/removeGroup` update the engine and the
+  mirror, and no engine SIGSEGV on startup (the previous libcamera provider
+  crash is gone).
 - `make lint`: clean (one pre-existing warning in an untouched component).
 - e2e: **144/144 pass** against the packaged AppImage — the full legacy suite
   plus the engine-mode specs (`engineSkeleton`: preview frames publish, engine

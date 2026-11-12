@@ -1775,6 +1775,12 @@ only extended. Last full pass: `270a0003` — 2026-11-12.</sub>
   (`libgstreamer1.0-0`, plugins base/good/libav) alongside
   `libpipewire-0.3-0`; the AppImage still needs them from the host (the legacy
   renderer does not), documented in AGENTS/progress.
+- **Input Link mirror flush** — a value that settled inside the 100 ms delta
+  throttle was cleared as "unchanged" before it reached the mirror, so the UI
+  slider could stick at an intermediate value while the engine rendered the
+  final one (reproduced by the engineParity bass link: mirror 1.37, engine
+  0.63). Unchanged writes now flush the current value for module props, meta
+  values and group controls, with a regression test.
 - **Volumetric fidelity** — SmokeRoom, DvdRoom, RollingFire and BallOfFire now
   run the real GPU volume sim + raymarch; BallOfFire is registered (26
   scenes); side-by-side captures against the legacy AppImage look structurally
