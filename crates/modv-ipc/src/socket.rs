@@ -58,6 +58,8 @@ pub struct Inframe {
 pub struct PollResult {
     /// All complete frames received since the last poll, in read order.
     pub frames: Vec<Inframe>,
+    /// Ids assigned to clients accepted since the last poll.
+    pub accepted: Vec<usize>,
     /// Ids of clients that were dropped during this poll (EOF, hard I/O error,
     /// or a framing error on their stream). Disconnected ids are stable and
     /// are never reused.
@@ -170,6 +172,7 @@ impl SocketServer {
                         out: RefCell::new(Vec::new()),
                         dead: Cell::new(false),
                     });
+                    result.accepted.push(id);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

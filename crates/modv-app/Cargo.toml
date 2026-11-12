@@ -14,7 +14,9 @@ path = "src/main.rs"
 clap = "4.6.7"
 image = "0.25.10"
 modv-engine = { path = "../modv-engine" }
+modv-ipc = { path = "../modv-ipc" }
 modv-render = { version = "0.1.0", path = "../modv-render" }
 modv-renderers = { version = "0.1.0", path = "../modv-renderers" }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 winit = "0.30.13"

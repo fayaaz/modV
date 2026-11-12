@@ -1210,8 +1210,10 @@ dependencies = [
  "clap",
  "image",
  "modv-engine",
+ "modv-ipc",
  "modv-render",
  "modv-renderers",
+ "serde",
  "serde_json",
  "winit",
 ]

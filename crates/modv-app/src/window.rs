@@ -19,6 +19,7 @@ use modv_renderers::point10::chromatic_line::{ChromaticLine, SyntheticSine};
 
 use crate::cli::Cli;
 use crate::report::{AdapterSummary, report_json};
+use crate::supervisor::EngineSupervisor;
 
 /// Run the windowed event loop. Returns an error string on fatal failures
 /// (window creation, surface creation, event loop).
@@ -28,6 +29,17 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))?;
+    // Flush the snapshot on any exit path (window close, bench deadline,
+    // engine/shutdown) so a supervisor restart restores the last frame count.
+    if let Some(mut supervisor) = app.supervisor.take() {
+        eprintln!("engine: INFO flushing state snapshot to disk");
+        match supervisor.save_snapshot() {
+            Ok(()) => eprintln!("engine: INFO state snapshot flushed"),
+            Err(error) => eprintln!("engine: WARN final snapshot failed: {error}"),
+        }
+    } else {
+        eprintln!("engine: WARN no supervisor; state snapshot not flushed");
+    }
     if app.failed {
         return Err("fatal error during windowed run (see above)".to_string());
     }
@@ -50,6 +62,7 @@ struct WindowedApp {
     start: Instant,
     done: bool,
     failed: bool,
+    supervisor: Option<EngineSupervisor>,
 }
 
 // `FrameStats` contains no public Clone; store it in an Option so `finish()`
@@ -58,6 +71,25 @@ struct WindowedApp {
 impl WindowedApp {
     fn new(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Self {
         let start = Instant::now();
+        let supervisor = cli.socket.as_ref().and_then(|socket_path| {
+            match EngineSupervisor::new(socket_path.clone(), cli.state.clone()) {
+                Ok(supervisor) => {
+                    eprintln!(
+                        "engine: INFO control socket listening on {}",
+                        socket_path.display()
+                    );
+                    Some(supervisor)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "engine: ERROR could not bind control socket {}: {error}",
+                        socket_path.display()
+                    );
+                    None
+                }
+            }
+        });
+        let socket_failed = cli.socket.is_some() && supervisor.is_none();
         Self {
             bench_deadline: cli.bench_deadline(),
             cli,
@@ -73,7 +105,16 @@ impl WindowedApp {
             start,
             done: false,
             failed: false,
+            supervisor,
         }
+        .with_socket_failure(socket_failed)
+    }
+
+    fn with_socket_failure(mut self, failed: bool) -> Self {
+        if failed {
+            self.failed = true;
+        }
+        self
     }
 
     /// Build the window, surface, scene and audio fixture (first `resumed`).
@@ -86,7 +127,7 @@ impl WindowedApp {
         };
 
         let mut attributes = WindowAttributes::default()
-            .with_title("modV Engine — Rust hybrid spike")
+            .with_title("modV Engine")
             .with_inner_size(winit::dpi::PhysicalSize::new(
                 self.cli.width.max(1),
                 self.cli.height.max(1),
@@ -225,6 +266,15 @@ impl WindowedApp {
             stats.record_frame(dt_duration);
         }
         self.frames_done += 1;
+
+        if let Some(supervisor) = &mut self.supervisor {
+            supervisor.note_frame_presented();
+            supervisor.poll();
+            if supervisor.shutdown_requested() {
+                self.finish_and_exit(event_loop);
+                return;
+            }
+        }
 
         let reached_frames = self
             .cli

@@ -3,6 +3,7 @@
 mod cli;
 mod headless;
 mod report;
+mod supervisor;
 mod window;
 
 use std::process::ExitCode;
@@ -11,17 +12,8 @@ use modv_render::{Engine, EngineConfig};
 
 fn main() -> ExitCode {
     let cli = cli::parse();
-    if let Some(socket) = &cli.socket {
-        eprintln!(
-            "engine socket flag accepted but unused in the M0 spike: {}",
-            socket.display()
-        );
-    }
-    if let Some(state) = &cli.state {
-        eprintln!(
-            "engine state flag accepted but unused in the M0 spike: {}",
-            state.display()
-        );
+    if cli.socket.is_some() && cli.headless {
+        eprintln!("engine: note — the control socket is only polled in windowed mode");
     }
 
     let engine = match Engine::new(&EngineConfig::default()) {

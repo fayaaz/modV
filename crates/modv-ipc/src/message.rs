@@ -264,7 +264,10 @@ mod tests {
         let wire = br#"{"id":42,"ok":true,"result":null}"#;
         let decoded: Response = serde_json::from_slice(wire).expect("decode wire");
         assert!(decoded.ok);
-        assert_eq!(decoded.result, None, "JSON null decodes to None (documented collapse)");
+        assert_eq!(
+            decoded.result, None,
+            "JSON null decodes to None (documented collapse)"
+        );
         assert!(decoded.error.is_none());
     }
 
