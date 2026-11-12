@@ -237,6 +237,16 @@ impl OutputPass {
         self.encode_srgb
     }
 
+    /// Override the shader-side sRGB transfer.
+    ///
+    /// [`Composer`](super::Composer) picks it from the destination format; a
+    /// scene whose JS counterpart has no `OutputPass` (Mycelium) turns it off
+    /// so its display-referred values are not gamma-lifted a second time.
+    pub fn set_encode_srgb(&mut self, encode_srgb: bool) {
+        self.encode_srgb = encode_srgb;
+        self.upload_uniforms();
+    }
+
     /// Point the pass at the composer's final HDR target.
     pub fn set_source(&mut self, device: &wgpu::Device, source: &wgpu::TextureView) {
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {

@@ -104,11 +104,15 @@ use modv_renderers::isf::{
 };
 use modv_renderers::point10::chromatic::line::ChromaticLine;
 use modv_renderers::point10::chromatic::wave::ChromaticWave;
+use modv_renderers::point10::scenes::around_plus::AroundPlus;
+use modv_renderers::point10::scenes::glass_lens::GlassLens;
 use modv_renderers::point10::scenes::it_is_coming_for_you::ItIsComingForYou;
 use modv_renderers::point10::scenes::light_tunnel::LightTunnel;
+use modv_renderers::point10::scenes::mycelium::Mycelium;
 use modv_renderers::point10::scenes::particle_field::ParticleField;
 use modv_renderers::point10::scenes::spiral_particles::SpiralParticles;
 use modv_renderers::point10::scenes::square_tunnel::SquareTunnel;
+use modv_renderers::point10::scenes::water_ripple::WaterRipple;
 use modv_renderers::point10::scenes::waveform::Waveform;
 use modv_renderers::point10::scenes::wormhole::Wormhole;
 use modv_renderers::point10::{
@@ -231,6 +235,14 @@ pub enum Point10SceneKind {
     Wormhole(Wormhole),
     /// `Point10 It Is Coming For You` (`scenes/it_is_coming_for_you.rs`).
     ItIsComingForYou(ItIsComingForYou),
+    /// `Point10 Water Ripple` (`scenes/water_ripple.rs`).
+    WaterRipple(WaterRipple),
+    /// `Point10 Glass Lens` (`scenes/glass_lens.rs`).
+    GlassLens(GlassLens),
+    /// `Point10 Mycelium` (`scenes/mycelium.rs`).
+    Mycelium(Mycelium),
+    /// `Point10 Around Plus` (`scenes/around_plus.rs`).
+    AroundPlus(AroundPlus),
 }
 
 impl Point10SceneKind {
@@ -249,6 +261,10 @@ impl Point10SceneKind {
             "Point10 Light Tunnel" => Self::LightTunnel(LightTunnel::new()),
             "Point10 Wormhole" => Self::Wormhole(Wormhole::new()),
             "Point10 It Is Coming For You" => Self::ItIsComingForYou(ItIsComingForYou::new()),
+            "Point10 Water Ripple" => Self::WaterRipple(WaterRipple::new()),
+            "Point10 Glass Lens" => Self::GlassLens(GlassLens::new()),
+            "Point10 Mycelium" => Self::Mycelium(Mycelium::new()),
+            "Point10 Around Plus" => Self::AroundPlus(AroundPlus::new()),
             _ => return None,
         })
     }
@@ -262,6 +278,10 @@ impl Point10SceneKind {
     pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
         match self {
             Self::ChromaticLine(scene) => scene.apply_props(|key| get(key)),
+            Self::WaterRipple(scene) => scene.apply_props(|key| get(key)),
+            Self::GlassLens(scene) => scene.apply_props(|key| get(key)),
+            Self::Mycelium(scene) => scene.apply_props(|key| get(key)),
+            Self::AroundPlus(scene) => scene.apply_props(|key| get(key)),
             Self::SquareTunnel(scene) => scene.apply_props(|key| get(key)),
             Self::LightTunnel(scene) => scene.apply_props(|key| get(key)),
             Self::Wormhole(scene) => scene.apply_props(|key| get(key)),
@@ -279,6 +299,10 @@ impl Point10Scene for Point10SceneKind {
     fn name(&self) -> &'static str {
         match self {
             Self::ChromaticLine(scene) => scene.name(),
+            Self::WaterRipple(scene) => scene.name(),
+            Self::GlassLens(scene) => scene.name(),
+            Self::Mycelium(scene) => scene.name(),
+            Self::AroundPlus(scene) => scene.name(),
             Self::SquareTunnel(scene) => scene.name(),
             Self::LightTunnel(scene) => scene.name(),
             Self::Wormhole(scene) => scene.name(),
@@ -293,6 +317,10 @@ impl Point10Scene for Point10SceneKind {
     fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
         match self {
             Self::ChromaticLine(scene) => scene.init(ctx),
+            Self::WaterRipple(scene) => scene.init(ctx),
+            Self::GlassLens(scene) => scene.init(ctx),
+            Self::Mycelium(scene) => scene.init(ctx),
+            Self::AroundPlus(scene) => scene.init(ctx),
             Self::SquareTunnel(scene) => scene.init(ctx),
             Self::LightTunnel(scene) => scene.init(ctx),
             Self::Wormhole(scene) => scene.init(ctx),
@@ -307,6 +335,10 @@ impl Point10Scene for Point10SceneKind {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Self::ChromaticLine(scene) => scene.resize(width, height),
+            Self::WaterRipple(scene) => scene.resize(width, height),
+            Self::GlassLens(scene) => scene.resize(width, height),
+            Self::Mycelium(scene) => scene.resize(width, height),
+            Self::AroundPlus(scene) => scene.resize(width, height),
             Self::SquareTunnel(scene) => scene.resize(width, height),
             Self::LightTunnel(scene) => scene.resize(width, height),
             Self::Wormhole(scene) => scene.resize(width, height),
@@ -321,6 +353,10 @@ impl Point10Scene for Point10SceneKind {
     fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
         match self {
             Self::ChromaticLine(scene) => scene.update(dt, audio),
+            Self::WaterRipple(scene) => scene.update(dt, audio),
+            Self::GlassLens(scene) => scene.update(dt, audio),
+            Self::Mycelium(scene) => scene.update(dt, audio),
+            Self::AroundPlus(scene) => scene.update(dt, audio),
             Self::SquareTunnel(scene) => scene.update(dt, audio),
             Self::LightTunnel(scene) => scene.update(dt, audio),
             Self::Wormhole(scene) => scene.update(dt, audio),
@@ -339,6 +375,10 @@ impl Point10Scene for Point10SceneKind {
     ) {
         match self {
             Self::ChromaticLine(scene) => scene.render(encoder, target),
+            Self::WaterRipple(scene) => scene.render(encoder, target),
+            Self::GlassLens(scene) => scene.render(encoder, target),
+            Self::Mycelium(scene) => scene.render(encoder, target),
+            Self::AroundPlus(scene) => scene.render(encoder, target),
             Self::SquareTunnel(scene) => scene.render(encoder, target),
             Self::LightTunnel(scene) => scene.render(encoder, target),
             Self::Wormhole(scene) => scene.render(encoder, target),
@@ -353,6 +393,10 @@ impl Point10Scene for Point10SceneKind {
     fn dispose(&mut self) {
         match self {
             Self::ChromaticLine(scene) => scene.dispose(),
+            Self::WaterRipple(scene) => scene.dispose(),
+            Self::GlassLens(scene) => scene.dispose(),
+            Self::Mycelium(scene) => scene.dispose(),
+            Self::AroundPlus(scene) => scene.dispose(),
             Self::SquareTunnel(scene) => scene.dispose(),
             Self::LightTunnel(scene) => scene.dispose(),
             Self::Wormhole(scene) => scene.dispose(),
@@ -367,6 +411,10 @@ impl Point10Scene for Point10SceneKind {
     fn props(&self) -> Vec<SceneProp> {
         match self {
             Self::ChromaticLine(scene) => scene.props(),
+            Self::WaterRipple(scene) => scene.props(),
+            Self::GlassLens(scene) => scene.props(),
+            Self::Mycelium(scene) => scene.props(),
+            Self::AroundPlus(scene) => scene.props(),
             Self::SquareTunnel(scene) => scene.props(),
             Self::LightTunnel(scene) => scene.props(),
             Self::Wormhole(scene) => scene.props(),
@@ -381,6 +429,10 @@ impl Point10Scene for Point10SceneKind {
     fn meta(&self) -> SceneMeta {
         match self {
             Self::ChromaticLine(scene) => scene.meta(),
+            Self::WaterRipple(scene) => scene.meta(),
+            Self::GlassLens(scene) => scene.meta(),
+            Self::Mycelium(scene) => scene.meta(),
+            Self::AroundPlus(scene) => scene.meta(),
             Self::SquareTunnel(scene) => scene.meta(),
             Self::LightTunnel(scene) => scene.meta(),
             Self::Wormhole(scene) => scene.meta(),
@@ -1159,7 +1211,7 @@ mod tests {
         // Point10 names are their own kind, not 2D modules.
         assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
         assert_eq!(registry.kind("Point10 Not A Scene"), None);
-        assert_eq!(registry.point10_definitions().len(), 9);
+        assert_eq!(registry.point10_definitions().len(), 13);
     }
 
     #[test]
@@ -1182,6 +1234,10 @@ mod tests {
                 "Point10 Light Tunnel",
                 "Point10 Wormhole",
                 "Point10 It Is Coming For You",
+                "Point10 Water Ripple",
+                "Point10 Glass Lens",
+                "Point10 Mycelium",
+                "Point10 Around Plus",
             ]
         );
 

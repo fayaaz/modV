@@ -235,7 +235,13 @@ fn it_is_coming_for_you_keeps_the_background_transparent() {
         return;
     };
 
-    let pixel_count = pixels.len() / 4;
+    assert_transparency(&pixels);
+}
+
+// ————— batch 3 —————
+
+/// Count the fully transparent and fully opaque pixels.
+fn alpha_counts(pixels: &[u8]) -> (usize, usize, usize) {
     let mut transparent = 0_usize;
     let mut opaque = 0_usize;
     for pixel in pixels.chunks_exact(4) {
@@ -246,20 +252,121 @@ fn it_is_coming_for_you_keeps_the_background_transparent() {
             opaque += 1;
         }
     }
+    (transparent, opaque, pixels.len() / 4)
+}
 
+/// Assert the frame has an alpha-0 background *and* drawn pixels, with most of
+/// the frame still background.
+fn assert_transparency(pixels: &[u8]) {
+    let (transparent, opaque, total) = alpha_counts(pixels);
     assert!(
         transparent > 0,
-        "expected an alpha-0 background, but every pixel was drawn ({pixel_count} px)"
+        "expected an alpha-0 background, but every pixel was drawn ({total} px)"
     );
     assert!(
         opaque > 0,
-        "expected opaque point sprites, but no pixel reached alpha 255"
+        "expected opaque pixels, but none reached alpha 255"
     );
-    // The cloud is a sparse band, not a full-frame wash: most of the frame is
-    // still background.
     assert!(
-        transparent > pixel_count / 4,
-        "the cloud covers too much of the frame: {transparent} transparent px of {pixel_count}"
+        transparent > total / 4,
+        "the scene covers too much of the frame: {transparent} transparent px of {total}"
+    );
+}
+
+#[test]
+fn water_ripple_renders() {
+    let mut scene = crate::point10::scenes::water_ripple::WaterRipple::new();
+    let Some(pixels) = render_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "WaterRipple produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+/// The ripple is a circular overlay (`CLEAR_ALPHA = 0`): the corners of the
+/// frame are outside `inCircle` and must stay transparent.
+#[test]
+fn water_ripple_keeps_the_corners_transparent() {
+    let mut scene = crate::point10::scenes::water_ripple::WaterRipple::new();
+    assert_eq!(scene.clear_alpha(), 0.0);
+
+    let Some(pixels) = render_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    let (transparent, opaque, total) = alpha_counts(&pixels);
+    assert!(
+        transparent > 0,
+        "expected an alpha-0 background, but every pixel was drawn ({total} px)"
+    );
+    assert!(
+        opaque > 0,
+        "expected opaque pixels, but none reached alpha 255"
+    );
+
+    // The artwork is a disc of radius ~1 in screenP (the JS default is 0.9),
+    // so at most a fifth of the square is background; unlike ItIsComingForYou
+    // the coverage is most of the frame. What must hold is that the *extreme
+    // corners* (length(screenP) ≈ 1.39) sit outside radius + 0.1 and are
+    // exactly transparent.
+    let size = SIZE as usize;
+    for (x, y) in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)] {
+        let alpha = pixels[(y * size + x) * 4 + 3];
+        assert_eq!(alpha, 0, "corner ({x}, {y}) must stay transparent");
+    }
+}
+
+#[test]
+fn glass_lens_renders() {
+    let mut scene = crate::point10::scenes::glass_lens::GlassLens::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "GlassLens produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // Outside the glass block the frame is the Chromatic Wave backdrop, whose
+    // alpha fades away from the line, so the scene still composites.
+    let (transparent, opaque, _) = alpha_counts(&pixels);
+    assert!(
+        transparent > 0,
+        "the backdrop lost its transparent background"
+    );
+    assert!(opaque > 0, "the glass block must be opaque");
+}
+
+#[test]
+fn mycelium_renders() {
+    let mut scene = crate::point10::scenes::mycelium::Mycelium::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "Mycelium produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // `gl_FragColor = vec4(col, 1.0)` — the colony is opaque.
+    let (_, opaque, total) = alpha_counts(&pixels);
+    assert_eq!(opaque, total, "Mycelium must stay opaque");
+}
+
+#[test]
+fn around_plus_renders() {
+    let mut scene = crate::point10::scenes::around_plus::AroundPlus::new();
+    let Some(pixels) = render_owned_chain_two_frames(&mut scene, SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "AroundPlus produced an empty frame at {SIZE}x{SIZE}"
+    );
+    // The camera sits inside the tube: most of the frame is the concrete wall.
+    let (_, opaque, total) = alpha_counts(&pixels);
+    assert!(
+        opaque > total / 4,
+        "AroundPlus drew too little of the tube: {opaque} opaque px of {total}"
     );
 }
 

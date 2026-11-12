@@ -29,7 +29,7 @@
 //! `engine/shutdown` is still the only request with side effects beyond the
 //! store: persist the snapshot, then signal the event loop to exit.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,11 +43,50 @@ use modv_ipc::preview::{PreviewFrame, PreviewRing};
 use modv_ipc::socket::SocketServer;
 
 use crate::compositor::{PREVIEW_HEIGHT, PREVIEW_WIDTH};
+use crate::module_preview::{
+    MAX_PREVIEW_DIMENSION, PreviewError, base64_encode, clamp_preview_dimension,
+};
 use crate::store_ops::{Store, frames_presented_in};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(33); // ≤ 30 fps
 const SNAPSHOT_SAVE_EVERY_FRAMES: u64 = 120;
+
+/// Most `preview/module` requests allowed to wait for the window loop.
+///
+/// Gallery tiles poll at ~10 fps each; a handful of tiles never reaches this.
+/// A request that would overflow the queue is answered with `engine_busy`
+/// immediately instead of growing memory (spec: bounded queues only).
+pub const MAX_PENDING_PREVIEWS: usize = 32;
+
+/// A queued `preview/module` request.
+///
+/// The supervisor cannot render (it owns no GPU device), so
+/// [`EngineSupervisor::handle_request`] validates the payload and parks it
+/// here; the window loop drains the queue after `render_frame` and answers it
+/// through [`EngineSupervisor::complete_preview`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewRequest {
+    /// Request id the response must carry.
+    pub id: u64,
+    /// Client that sent it, for [`SocketServer::send_response`].
+    pub client: usize,
+    /// Registry name of the module to render.
+    pub module_name: String,
+    /// Requested (already clamped) width.
+    pub width: u32,
+    /// Requested (already clamped) height.
+    pub height: u32,
+}
+
+/// How [`EngineSupervisor::handle_request`] answered a request.
+pub enum Reply {
+    /// A complete response; `poll` sends it immediately.
+    Now(Response),
+    /// The response is produced later (a queued `preview/module` render); `poll`
+    /// sends nothing now.
+    Deferred,
+}
 
 /// The engine-side supervision state. Created before the window exists and
 /// polled from the frame loop.
@@ -69,6 +108,8 @@ pub struct EngineSupervisor {
     /// Set by `engine/restore`; the window loop drops the compositor's GPU
     /// state (stale group textures and module slots) when it sees this.
     reset_requested: bool,
+    /// `preview/module` requests waiting for the window loop's compositor.
+    pending_previews: VecDeque<PreviewRequest>,
     unknown_dispatches_warned: HashSet<String>,
 }
 
@@ -98,6 +139,7 @@ impl EngineSupervisor {
             preview_unavailable: false,
             shutdown_requested: false,
             reset_requested: false,
+            pending_previews: VecDeque::new(),
             unknown_dispatches_warned: HashSet::new(),
         })
     }
@@ -175,13 +217,17 @@ impl EngineSupervisor {
             }
             match from_frame(frame.kind, &frame.payload) {
                 Ok(Incoming::Request(request)) => {
-                    let response = self.handle_request(request, store);
+                    let reply = self.handle_request(request, store, frame.client);
                     // Deltas first: the caller then observes every mutation
                     // this request produced before its own acknowledgement, so
                     // the mirror never applies an ack it cannot explain.
                     self.broadcast_deltas(store);
-                    if let Err(error) = self.server.send_response(frame.client, &response) {
-                        eprintln!("engine: WARN could not send response: {error}");
+                    // A deferred request is answered by the window loop after
+                    // it has rendered (it owns the compositor).
+                    if let Reply::Now(response) = reply {
+                        if let Err(error) = self.server.send_response(frame.client, &response) {
+                            eprintln!("engine: WARN could not send response: {error}");
+                        }
                     }
                 }
                 Ok(_) | Err(_) => {
@@ -206,7 +252,140 @@ impl EngineSupervisor {
         }
     }
 
-    fn handle_request(&mut self, request: Request, store: &mut Store) -> Response {
+    /// Dispatch one request.
+    ///
+    /// `preview/module` cannot be answered here — the supervisor has no
+    /// compositor — so it is validated and queued ([`Reply::Deferred`]); every
+    /// other method answers immediately ([`Reply::Now`]).
+    fn handle_request(&mut self, request: Request, store: &mut Store, client: usize) -> Reply {
+        if request.method == "preview/module" {
+            return self.queue_module_preview(request, client);
+        }
+        Reply::Now(self.handle_request_now(request, store))
+    }
+
+    /// Validate and queue a `preview/module` request for the window loop.
+    ///
+    /// The payload is `{ moduleName, width, height }`; widths/heights are
+    /// clamped to `1..=512` (the main process already clamps, but the engine
+    /// must not trust a peer). An unknown module is *not* rejected here: the
+    /// compositor reports `module_not_found`, so the renderer gets the same
+    /// error shape whether the registry or the renderer is at fault.
+    fn queue_module_preview(&mut self, request: Request, client: usize) -> Reply {
+        if self.shutdown_requested {
+            return Reply::Now(Response::err(
+                request.id,
+                "engine_shutting_down",
+                "the engine is shutting down",
+            ));
+        }
+
+        let module_name = match request.params.get("moduleName").and_then(Value::as_str) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => {
+                return Reply::Now(Response::err(
+                    request.id,
+                    "invalid_params",
+                    "preview/module needs a non-empty string \"moduleName\"",
+                ));
+            }
+        };
+        let (Some(width), Some(height)) = (
+            preview_dimension(request.params.get("width")),
+            preview_dimension(request.params.get("height")),
+        ) else {
+            return Reply::Now(Response::err(
+                request.id,
+                "invalid_params",
+                "preview/module needs numeric \"width\" and \"height\"",
+            ));
+        };
+
+        if self.pending_previews.len() >= MAX_PENDING_PREVIEWS {
+            return Reply::Now(Response::err(
+                request.id,
+                "engine_busy",
+                "too many module preview requests are queued",
+            ));
+        }
+
+        self.pending_previews.push_back(PreviewRequest {
+            id: request.id,
+            client,
+            module_name,
+            width,
+            height,
+        });
+        Reply::Deferred
+    }
+
+    /// Take every queued preview request (the window loop answers them).
+    pub fn pending_previews(&mut self) -> Vec<PreviewRequest> {
+        self.pending_previews.drain(..).collect()
+    }
+
+    /// Return unanswered requests to the front of the queue, in order.
+    ///
+    /// The window loop answers a bounded number per frame, so a burst of tile
+    /// requests rolls over to the next frame instead of stalling present.
+    pub fn requeue_previews(&mut self, requests: Vec<PreviewRequest>) {
+        for request in requests.into_iter().rev() {
+            self.pending_previews.push_front(request);
+        }
+    }
+
+    /// Send the answer for a request the window loop rendered.
+    ///
+    /// Success is `{ width, height, pixels }` with `pixels` the base64 of
+    /// `width × height × 4` tightly packed RGBA8 bytes; a failure is the
+    /// renderer-facing error code (`module_not_found` / `preview_failed`).
+    pub fn complete_preview(
+        &mut self,
+        request: PreviewRequest,
+        result: Result<Vec<u8>, PreviewError>,
+    ) {
+        let response = match result {
+            Ok(pixels) => {
+                let expected = request.width as usize * request.height as usize * 4;
+                if pixels.len() == expected {
+                    Response::ok(
+                        request.id,
+                        json!({
+                            "width": request.width,
+                            "height": request.height,
+                            "pixels": base64_encode(&pixels),
+                        }),
+                    )
+                } else {
+                    Response::err(
+                        request.id,
+                        "preview_failed",
+                        format!(
+                            "preview returned {} bytes, expected {expected}",
+                            pixels.len()
+                        ),
+                    )
+                }
+            }
+            Err(error) => Response::err(request.id, error.code(), error.message()),
+        };
+
+        if let Err(error) = self.server.send_response(request.client, &response) {
+            eprintln!("engine: WARN could not send module preview response: {error}");
+        }
+    }
+
+    /// Error every queued preview request (shutdown or a fatal render failure).
+    pub fn reject_pending_previews(&mut self, code: &str, message: &str) {
+        for request in std::mem::take(&mut self.pending_previews) {
+            let response = Response::err(request.id, code, message);
+            if let Err(error) = self.server.send_response(request.client, &response) {
+                eprintln!("engine: WARN could not send module preview error: {error}");
+            }
+        }
+    }
+
+    fn handle_request_now(&mut self, request: Request, store: &mut Store) -> Response {
         match request.method.as_str() {
             "engine/shutdown" => {
                 eprintln!("engine: INFO shutdown requested; flushing state");
@@ -214,6 +393,9 @@ impl EngineSupervisor {
                     eprintln!("engine: WARN shutdown snapshot failed: {error}");
                 }
                 self.shutdown_requested = true;
+                // Nothing will render another frame: answer the queued
+                // thumbnails instead of leaving their callers to time out.
+                self.reject_pending_previews("engine_shutting_down", "the engine is shutting down");
                 Response::ok(request.id, json!({ "saved": true }))
             }
 
@@ -384,6 +566,20 @@ impl EngineSupervisor {
             eprintln!("engine: WARN preview broadcast failed: {error}");
         }
     }
+}
+
+/// Read one requested preview edge: finite and positive, rounded, clamped to
+/// `1..=MAX_PREVIEW_DIMENSION`.
+///
+/// `None` for a missing or non-numeric value (a malformed request), so the
+/// caller can answer `invalid_params` rather than render an arbitrary size.
+fn preview_dimension(value: Option<&Value>) -> Option<u32> {
+    let number = value?.as_f64()?;
+    if !number.is_finite() {
+        return None;
+    }
+    let rounded = number.round().clamp(0.0, f64::from(MAX_PREVIEW_DIMENSION)) as u32;
+    Some(clamp_preview_dimension(rounded))
 }
 
 /// `framesPresented` from the on-disk snapshot's `_engine` sidecar.
@@ -712,5 +908,260 @@ mod tests {
             !supervisor.preview_due(),
             "publishing starts the cadence window"
         );
+    }
+
+    // ————————————————— preview/module (WS-14) —————————————————
+
+    /// Send one request and poll until the supervisor queued it (the socket
+    /// is non-blocking, so the frame may need a couple of polls).
+    fn queue_preview(
+        supervisor: &mut EngineSupervisor,
+        store: &mut Store,
+        stream: &mut UnixStream,
+        id: u64,
+        params: Value,
+    ) -> PreviewRequest {
+        stream
+            .write_all(
+                &Request {
+                    id,
+                    method: "preview/module".into(),
+                    params,
+                }
+                .into_frame(),
+            )
+            .expect("write preview request");
+
+        for _ in 0..100 {
+            supervisor.poll(store);
+            let queued = supervisor.pending_previews();
+            if let Some(request) = queued.first().cloned() {
+                return request;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for the preview to be queued");
+    }
+
+    /// Read `expected` KIND_RESPONSE frames without polling the supervisor:
+    /// completed previews are already buffered on the socket. Events seen on
+    /// the way are skipped.
+    fn read_buffered_responses(stream: &mut UnixStream, expected: usize) -> Vec<Response> {
+        let mut reader = FrameReader::new();
+        let mut responses = Vec::new();
+        let mut scratch = [0u8; 8192];
+        for _ in 0..200 {
+            match stream.read(&mut scratch) {
+                Ok(n) if n > 0 => {
+                    for frame in reader.push(&scratch[..n]) {
+                        let (kind, payload) = frame.expect("frame decodes");
+                        if kind == KIND_RESPONSE {
+                            responses.push(serde_json::from_slice(&payload).expect("response"));
+                        }
+                    }
+                    if responses.len() >= expected {
+                        return responses;
+                    }
+                }
+                Ok(_) => {}
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.kind() == io::ErrorKind::TimedOut =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("read failed: {error}"),
+            }
+        }
+        panic!(
+            "timed out waiting for {expected} buffered response frame(s); got {}",
+            responses.len()
+        );
+    }
+
+    #[test]
+    fn preview_request_is_deferred_and_answered_with_base64_pixels() {
+        let (socket_path, state_path) = temp_paths("preview-module");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let mut stream = connect(&socket_path);
+
+        let request = queue_preview(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            31,
+            json!({ "moduleName": "Point10 Invert", "width": 4.0, "height": 2.0 }),
+        );
+
+        assert_eq!(request.id, 31);
+        assert_eq!(request.module_name, "Point10 Invert");
+        assert_eq!((request.width, request.height), (4, 2));
+
+        let pixels: Vec<u8> = (0..(4 * 2 * 4)).map(|value| value as u8).collect();
+        supervisor.complete_preview(request, Ok(pixels.clone()));
+
+        let responses = read_buffered_responses(&mut stream, 1);
+        let response = &responses[0];
+        assert_eq!(response.id, 31);
+        assert!(response.ok);
+        let result = response.result.as_ref().expect("result present");
+        assert_eq!(result["width"], json!(4));
+        assert_eq!(result["height"], json!(2));
+        assert_eq!(result["pixels"], json!(base64_encode(&pixels)));
+    }
+
+    #[test]
+    fn preview_module_errors_surface_their_codes() {
+        let (socket_path, state_path) = temp_paths("preview-errors");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let mut stream = connect(&socket_path);
+
+        // A payload without a module name is rejected immediately rather than
+        // queued for a render that cannot resolve it.
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            41,
+            "preview/module",
+            json!({ "width": 8, "height": 8 }),
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "invalid_params");
+
+        // A queued request for an unknown module is answered with
+        // `module_not_found` (the renderer backs off on that code).
+        let request = queue_preview(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            42,
+            json!({ "moduleName": "definitely not registered", "width": 8, "height": 8 }),
+        );
+        supervisor.complete_preview(
+            request,
+            Err(PreviewError::ModuleNotFound(
+                "definitely not registered".to_string(),
+            )),
+        );
+
+        let response = read_buffered_responses(&mut stream, 1);
+        let response = &response[0];
+        assert_eq!(response.id, 42);
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().expect("error present").code,
+            "module_not_found"
+        );
+    }
+
+    #[test]
+    fn requeued_previews_keep_their_order() {
+        let (socket_path, state_path) = temp_paths("preview-queue");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let mut stream = connect(&socket_path);
+
+        let first = queue_preview(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            51,
+            json!({ "moduleName": "Ball", "width": 16, "height": 16 }),
+        );
+        // Put it back as the window loop would after answering a bounded
+        // number of previews this frame.
+        supervisor.requeue_previews(vec![first.clone()]);
+        assert_eq!(supervisor.pending_previews(), vec![first]);
+    }
+
+    #[test]
+    fn preview_queue_is_bounded() {
+        let (socket_path, state_path) = temp_paths("preview-bound");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        for id in 0..MAX_PENDING_PREVIEWS {
+            supervisor.pending_previews.push_back(PreviewRequest {
+                id: id as u64,
+                client: 0,
+                module_name: "Ball".to_string(),
+                width: 16,
+                height: 16,
+            });
+        }
+
+        let mut stream = connect(&socket_path);
+        let (response, _) = request(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            71,
+            "preview/module",
+            json!({ "moduleName": "Ball", "width": 16, "height": 16 }),
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "engine_busy");
+        assert_eq!(
+            supervisor.pending_previews().len(),
+            MAX_PENDING_PREVIEWS,
+            "the overflow request is not queued"
+        );
+    }
+
+    #[test]
+    fn shutdown_rejects_queued_previews() {
+        let (socket_path, state_path) = temp_paths("preview-shutdown");
+        let mut store = Store::new();
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+        let mut stream = connect(&socket_path);
+
+        let queued = queue_preview(
+            &mut supervisor,
+            &mut store,
+            &mut stream,
+            61,
+            json!({ "moduleName": "Ball", "width": 16, "height": 16 }),
+        );
+        // `queue_preview` drains the queue like the window loop; put it back
+        // so the shutdown path has something to reject.
+        supervisor.requeue_previews(vec![queued]);
+
+        stream
+            .write_all(
+                &Request {
+                    id: 62,
+                    method: "engine/shutdown".into(),
+                    params: Value::Null,
+                }
+                .into_frame(),
+            )
+            .expect("write shutdown request");
+        for _ in 0..100 {
+            supervisor.poll(&mut store);
+            if supervisor.shutdown_requested() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(supervisor.shutdown_requested());
+
+        // The queued preview was answered with an error before the shutdown
+        // acknowledgement.
+        let responses = read_buffered_responses(&mut stream, 2);
+        assert_eq!(responses[0].id, 61);
+        assert!(!responses[0].ok);
+        assert_eq!(
+            responses[0].error.as_ref().expect("error present").code,
+            "engine_shutting_down"
+        );
+        assert_eq!(responses[1].id, 62);
+        assert!(responses[1].ok);
     }
 }

@@ -35,6 +35,12 @@ use crate::report::{AdapterSummary, report_json};
 use crate::store_ops::Store;
 use crate::supervisor::EngineSupervisor;
 
+/// Most Gallery thumbnail requests answered in one frame.
+///
+/// Each answer can block on a GPU read-back (≤ 1 MiB at 512²), so a burst of
+/// hover requests rolls over to later frames instead of stalling present.
+const MAX_PREVIEWS_PER_FRAME: usize = 4;
+
 /// Run the windowed event loop. Returns an error string on fatal failures
 /// (window creation, surface creation, event loop).
 pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), String> {
@@ -304,6 +310,7 @@ impl WindowedApp {
             if let Err(error) = compositor.render_frame(self.store.state(), &frame_info) {
                 eprintln!("error: compositor frame failed: {error}");
                 self.failed = true;
+                self.fail_pending_previews();
                 event_loop.exit();
                 return;
             }
@@ -371,6 +378,12 @@ impl WindowedApp {
             surface.reconfigure(&engine.device);
         }
 
+        // 2b. Answer queued Gallery thumbnail requests (`preview/module`).
+        // Bounded per frame so a burst of hover requests cannot stall present;
+        // the rest stay queued for the next frame. Answered after the present
+        // so the read-back cost lands between frames.
+        self.answer_module_previews();
+
         // 3. Publish a preview frame at the supervisor's cadence (≤ 30 fps).
         if let Some(supervisor) = &mut self.supervisor {
             if supervisor.preview_due() && self.compositor.is_some() {
@@ -421,6 +434,54 @@ impl WindowedApp {
         }
     }
 
+    /// Answer up to [`MAX_PREVIEWS_PER_FRAME`] queued `preview/module`
+    /// requests, leaving the rest for the next frame.
+    ///
+    /// The supervisor only queues requests (it has no compositor), and the
+    /// reply can block on a GPU read-back, so the work is capped here. Before
+    /// the window/compositor exist the queue simply waits; when the run stops,
+    /// [`Self::fail_pending_previews`] answers whatever is left.
+    fn answer_module_previews(&mut self) {
+        let (Some(supervisor), Some(compositor)) = (&mut self.supervisor, &mut self.compositor)
+        else {
+            return;
+        };
+
+        let mut requests = supervisor.pending_previews();
+        if requests.is_empty() {
+            return;
+        }
+        // Keep the leftover requests queued, in their original order.
+        let overflow = if requests.len() > MAX_PREVIEWS_PER_FRAME {
+            requests.split_off(MAX_PREVIEWS_PER_FRAME)
+        } else {
+            Vec::new()
+        };
+        supervisor.requeue_previews(overflow);
+
+        let registry = self.store.registry_arc();
+        for request in requests {
+            let result = compositor.render_module_preview(
+                registry.as_ref(),
+                &request.module_name,
+                request.width,
+                request.height,
+            );
+            supervisor.complete_preview(request, result);
+        }
+    }
+
+    /// Answer every queued preview request with an error (the engine is
+    /// stopping, so no further frame will render it).
+    fn fail_pending_previews(&mut self) {
+        if let Some(supervisor) = &mut self.supervisor {
+            supervisor.reject_pending_previews(
+                "engine_shutting_down",
+                "the engine stopped before rendering the preview",
+            );
+        }
+    }
+
     /// Ask the window for another redraw, if it still exists.
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
@@ -435,6 +496,7 @@ impl WindowedApp {
             return;
         }
         self.done = true;
+        self.fail_pending_previews();
         let resolution = self
             .surface
             .as_ref()

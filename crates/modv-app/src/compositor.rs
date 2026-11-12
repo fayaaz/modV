@@ -204,6 +204,18 @@
 //! machine, but a heavy multi-pass shader can stall that frame; predictive
 //! prewarming (like Point10's) is a follow-up.
 //!
+//! ## Gallery thumbnails (WS-14)
+//!
+//! [`Compositor::render_module_preview`] answers `preview/module`: it renders
+//! one registered module into a `width × height` RGBA8 frame **without**
+//! touching the live groups/modules. The isolated instance, its target and the
+//! per-kind scratch state live in [`crate::module_preview`] (a small LRU keyed
+//! by module name and size), and every kind takes the same path the live loop
+//! takes: shader via a dedicated [`ShaderRenderer`] slot, 2D through a
+//! [`Canvas`], Point10 through its scene + target, ISF through [`IsfRuntime`].
+//! The finished layer is composited onto a transparent target (alpha 1,
+//! `normal` — a fresh module's defaults) and read back tightly packed.
+//!
 //! ## Present boundary
 //!
 //! All internal textures are `Rgba8Unorm`; canvas blend math is done on the
@@ -244,6 +256,7 @@ use modv_renderers::shader::pipeline::{ShaderAudioUniforms, ShaderError, ShaderR
 use modv_renderers::shader::uniforms::{PropKind, PropSlots, ShaderProp};
 use modv_renderers::two_d::{AudioFrame, Canvas, DrawContext, ModuleContext, TwoDModule};
 
+use crate::module_preview::{ModulePreviews, PreviewError};
 use crate::module_registry::{ModuleKind, ModuleRegistry, Point10SceneKind};
 
 /// Preview frame width published to the UI (`modv-ipc` `VMP1` ring).
@@ -386,9 +399,13 @@ impl From<ShaderError> for CompositorError {
 }
 
 /// An output-sized texture and its view.
-struct OutputTexture {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+///
+/// Shared with [`crate::module_preview`], which allocates its own targets at
+/// the requested thumbnail size (the preview cache is independent of the
+/// output size).
+pub(crate) struct OutputTexture {
+    pub(crate) texture: wgpu::Texture,
+    pub(crate) view: wgpu::TextureView,
 }
 
 /// One 2D module's live state: the ported instance plus its own canvas.
@@ -503,6 +520,13 @@ pub struct Compositor {
     failed_isf: HashSet<String>,
     /// One-shot log keys (unknown blend mode, skipped module type, ...).
     warned: HashSet<String>,
+    /// Isolated gallery-thumbnail renderer (`preview/module`), created on the
+    /// first request so headless/bench runs never allocate it.
+    previews: Option<ModulePreviews>,
+    /// The most recent frame's audio clock, reused by preview renders so a
+    /// Gallery tile animates on the same clock (and with the same audio) as
+    /// the live composition.
+    preview_frame: FrameInfo,
     /// Sampler for module input textures — Repeat/Linear, matching
     /// `renderers/shader/index.js:271-280`.
     group_sampler: wgpu::Sampler,
@@ -609,6 +633,8 @@ impl Compositor {
             isf: HashMap::new(),
             failed_isf: HashSet::new(),
             warned: HashSet::new(),
+            previews: None,
+            preview_frame: FrameInfo::default(),
             group_sampler,
             present_sampler,
             present_layout,
@@ -677,6 +703,11 @@ impl Compositor {
         // Drop translated pipelines too: a restored state can reference
         // different shaders, and the cache is bounded but never expired.
         self.isf_runtime = IsfRuntime::new(self.device.clone(), self.queue.clone(), 4);
+        // Preview instances hold pipelines (shader, ISF, Point10) and per-module
+        // state tied to the restored state's module registry; release them.
+        if let Some(previews) = &mut self.previews {
+            previews.reset();
+        }
     }
 
     fn drop_output_textures(&mut self) {
@@ -699,6 +730,9 @@ impl Compositor {
         if self.size.0 == 0 || self.size.1 == 0 {
             return Ok(());
         }
+        // Keep the last frame's clock/audio for `render_module_preview` (a
+        // preview request is answered between frames, after this call).
+        self.preview_frame = frame.clone();
         self.ensure_output_textures();
         self.prune(state);
 
@@ -1696,25 +1730,7 @@ impl Compositor {
     }
 
     fn create_output_texture(&self, label: &str, width: u32, height: u32) -> OutputTexture {
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        OutputTexture { texture, view }
+        create_output_texture(&self.device, label, width, height)
     }
 
     /// Drop group textures and module slots for objects that left the state.
@@ -1851,31 +1867,7 @@ impl Compositor {
     /// Clear `texture` to transparent black — the canvas `clearRect` state
     /// (`loop.js:319-321`).
     fn clear_texture(&self, texture: &wgpu::Texture, label: &str) {
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // Canvas `clearRect` is transparent black
-                        // (`loop.js:319-321`).
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
-        self.queue.submit(Some(encoder.finish()));
+        clear_texture(&self.device, &self.queue, texture, label);
     }
 
     /// Run one `Composite` node through the frame graph executor, so canvas
@@ -2121,6 +2113,35 @@ impl Compositor {
             .map(Some)
             .map_err(|error| CompositorError::Preview(error.to_string()))
     }
+
+    /// Render one Gallery thumbnail from an **isolated** module instance.
+    ///
+    /// This is the engine side of the renderer's
+    /// `window.engine.requestModulePreview({ moduleName, width, height })`
+    /// (WS-14): the live groups and modules are never touched, so hovering a
+    /// tile cannot disturb the running composition. The request's size is
+    /// clamped to `1..=512` on each edge, a frame is rendered exactly like the
+    /// live loop renders that module kind (see [`crate::module_preview`]), and
+    /// the result is returned as **tightly packed** `width × height` RGBA8.
+    ///
+    /// The frame clock and audio come from the last [`Self::render_frame`] call
+    /// (the store's `AudioFrame`), so a tile animates and reacts like the live
+    /// composition. Rendering before any frame presents uses a silent frame.
+    pub fn render_module_preview(
+        &mut self,
+        registry: &ModuleRegistry,
+        module_name: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, PreviewError> {
+        let frame = self.preview_frame.clone();
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let previews = self
+            .previews
+            .get_or_insert_with(|| ModulePreviews::new(&device, &queue));
+        previews.render(registry, module_name, width, height, &frame)
+    }
 }
 
 /// WGSL for the present blit: one fullscreen triangle sampling main.
@@ -2149,6 +2170,73 @@ const PRESENT_WGSL: &str = r#"// modV present blit — main texture to the swapc
 
 type RenderBlendMode = modv_render::blend::BlendMode;
 
+/// Allocate an `Rgba8Unorm` texture usable as a render target, a sampled
+/// source and a read-back copy source — the format every module target uses.
+///
+/// Shared with [`crate::module_preview`], which sizes its own targets to the
+/// requested thumbnail.
+pub(crate) fn create_output_texture(
+    device: &wgpu::Device,
+    label: &str,
+    width: u32,
+    height: u32,
+) -> OutputTexture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    OutputTexture { texture, view }
+}
+
+/// Clear `texture` to transparent black — the canvas `clearRect` state
+/// (`loop.js:319-321`).
+///
+/// wgpu does not zero-initialise allocations, so every newly allocated target
+/// is cleared before it can be sampled or composited.
+pub(crate) fn clear_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    label: &str,
+) {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+    queue.submit(Some(encoder.finish()));
+}
+
 /// Read a texture back as tightly packed RGBA8, padding rows to
 /// `COPY_BYTES_PER_ROW_ALIGNMENT` on the GPU and de-padding here.
 ///
@@ -2156,7 +2244,7 @@ type RenderBlendMode = modv_render::blend::BlendMode;
 /// [`modv_render::headless::read_back_rgba8`]: that helper takes `&Engine`
 /// (instance + adapter + device + queue), while the compositor deliberately
 /// owns only cloned device/queue handles. The copy/map/poll dance is identical.
-fn read_back_texture(
+pub(crate) fn read_back_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
@@ -2225,7 +2313,7 @@ fn read_back_texture(
 
 /// Encode the module's prop values as the float lanes its prop buffer expects,
 /// in declaration order (`uniforms::PropLayout`).
-fn encode_props(definition: &ShaderModule, props: &Value) -> PropSlots {
+pub(crate) fn encode_props(definition: &ShaderModule, props: &Value) -> PropSlots {
     let mut floats = Vec::new();
     for prop in &definition.props {
         let value = props.get(prop.name).unwrap_or(&Value::Null);
@@ -2345,7 +2433,7 @@ fn isf_texture_id(module_id: &str) -> TextureId {
 /// Only inputs with a usable value are inserted; anything missing (or of the
 /// wrong shape) is left out so the runtime falls back to the document
 /// default. Image/audio inputs are textures and are not uniform values.
-fn isf_values(document: &IsfDocument, props: &Value) -> IsfValues {
+pub(crate) fn isf_values(document: &IsfDocument, props: &Value) -> IsfValues {
     let mut values = IsfValues::new();
     for input in &document.inputs {
         let value = props.get(&input.name);
@@ -2423,7 +2511,7 @@ fn json_vec4(value: Option<&Value>) -> Option<[f32; 4]> {
 /// The clock is UTC so the date and the seconds-since-midnight share a zone
 /// (the engine has no timezone database); a visual shader only uses this for
 /// slow day/night variation.
-fn isf_wall_clock_date() -> [f32; 4] {
+pub(crate) fn isf_wall_clock_date() -> [f32; 4] {
     let unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
@@ -2456,7 +2544,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 /// Longest frame the Point10 scene clock reports, mirroring
 /// `MAX_FRAME_SECONDS` in `point10/timing.js`.
-const MAX_POINT10_FRAME_SECONDS: f32 = 0.1;
+pub(crate) const MAX_POINT10_FRAME_SECONDS: f32 = 0.1;
 
 /// Sample rate reported by the interim audio payload.
 ///
@@ -2485,7 +2573,7 @@ const INTERIM_SAMPLE_RATE: f32 = 48_000.0;
 /// take the "silent audio" branch rather than the "no analyser" one). M6
 /// replaces this function with the real `AudioBands` payload; nothing else
 /// changes.
-fn interim_band_payload(audio: &AudioFrame) -> BandPayload {
+pub(crate) fn interim_band_payload(audio: &AudioFrame) -> BandPayload {
     let bands = [audio.bass, audio.mid, audio.treble];
 
     let mut lanes = [0.0; LANES_PER_BAND * 3];
@@ -3220,6 +3308,179 @@ mod tests {
                 .surfaces
                 .get(&point10_texture_id("module-a"))
                 .is_none()
+        );
+    }
+
+    // ————————————————— Gallery thumbnails (WS-14) —————————————————
+
+    /// Render twice at the same size, advancing the isolated clock by one
+    /// 60 Hz frame, so scene state (dt-driven) has one non-zero step.
+    fn render_preview_twice(
+        compositor: &mut Compositor,
+        registry: &ModuleRegistry,
+        name: &str,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for (index, time) in [(0_u64, 0.0_f32), (1, 1.0 / 60.0)] {
+            compositor.preview_frame = FrameInfo {
+                time_seconds: time,
+                frame_index: index,
+                ..frame_info()
+            };
+            pixels = compositor
+                .render_module_preview(registry, name, width, height)
+                .unwrap_or_else(|error| panic!("{name} preview renders: {error}"));
+            assert_eq!(pixels.len(), (width * height * 4) as usize);
+        }
+        pixels
+    }
+
+    #[test]
+    fn module_preview_renders_a_shader_over_a_transparent_input() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = ModuleRegistry::builtin();
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+
+        let pixels = compositor
+            .render_module_preview(&registry, "Point10 Invert", 48, 32)
+            .expect("shader preview renders");
+        assert_eq!(pixels.len(), (48 * 32 * 4) as usize);
+        // The shader pass clears its target to opaque black; Invert turns the
+        // transparent input into opaque white (`c = 1 - canvas`, and the
+        // mainImage wrapper forces alpha 1).
+        for (index, chunk) in pixels.chunks_exact(4).enumerate() {
+            assert!(
+                chunk[0] >= 250 && chunk[1] >= 250 && chunk[2] >= 250 && chunk[3] >= 250,
+                "pixel {index} is {chunk:?}, expected opaque white"
+            );
+        }
+
+        // The isolated renderer never touches the live module state.
+        assert!(compositor.slots.is_empty());
+        assert!(compositor.two_d.is_empty());
+        assert!(compositor.point10.is_empty());
+
+        // An unregistered module is reported as `module_not_found`, not a
+        // generic render failure (the renderer backs off on that code).
+        assert!(matches!(
+            compositor.render_module_preview(&registry, "definitely not registered", 16, 16),
+            Err(PreviewError::ModuleNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn module_preview_renders_a_two_d_module() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = ModuleRegistry::builtin();
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+
+        let pixels = render_preview_twice(&mut compositor, &registry, "Ball", 32, 32);
+        assert_eq!(pixels.len(), (32 * 32 * 4) as usize);
+        assert!(
+            pixels.iter().any(|byte| *byte != 0),
+            "Ball drew nothing into the thumbnail"
+        );
+        // The second request reused the cached instance instead of building
+        // another one.
+        let previews = compositor.previews.as_ref().expect("previews exist");
+        assert_eq!(previews.cached_slots(), 1);
+    }
+
+    #[test]
+    fn module_preview_renders_a_point10_scene() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = ModuleRegistry::builtin();
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+
+        let pixels = render_preview_twice(
+            &mut compositor,
+            &registry,
+            "Point10 Chromatic Line",
+            128,
+            128,
+        );
+        assert!(
+            lit_pixels(&pixels) > 0,
+            "Point10 Chromatic Line drew nothing into the thumbnail"
+        );
+    }
+
+    #[test]
+    fn module_preview_renders_an_isf_module() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let Some(dir) = corpus_dir() else {
+            return;
+        };
+        let registry = ModuleRegistry::build(Some(&dir));
+        if registry.isf_definition("Color Invert").is_none() {
+            eprintln!("skipping ISF preview test: Color Invert is not in the corpus");
+            return;
+        }
+
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        let pixels = compositor
+            .render_module_preview(&registry, "Color Invert", 32, 32)
+            .expect("ISF preview renders");
+        // A filter over a transparent 1×1 input may be fully transparent, so
+        // the frame *shape* is the contract here: exactly one tightly packed
+        // RGBA8 frame at the requested size.
+        assert_eq!(pixels.len(), (32 * 32 * 4) as usize);
+    }
+
+    #[test]
+    fn module_preview_clamps_requested_sizes() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = ModuleRegistry::builtin();
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+
+        // Zero collapses to the smallest legal target.
+        let tiny = compositor
+            .render_module_preview(&registry, "Point10 Invert", 0, 0)
+            .expect("clamped preview renders");
+        assert_eq!(tiny.len(), 4, "0×0 clamps to 1×1");
+
+        // 513 is clamped to the 512 cap on each edge (1 MiB of RGBA8).
+        let big = compositor
+            .render_module_preview(&registry, "Point10 Invert", 513, 513)
+            .expect("oversized preview renders");
+        assert_eq!(big.len(), (512 * 512 * 4) as usize);
+    }
+
+    #[test]
+    fn compositor_reset_drops_the_preview_cache() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let registry = ModuleRegistry::builtin();
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+
+        compositor
+            .render_module_preview(&registry, "Ball", 16, 16)
+            .expect("preview renders");
+        let previews = compositor.previews.as_ref().expect("previews exist");
+        assert_eq!(previews.cached_slots(), 1);
+
+        compositor.reset();
+        let previews = compositor
+            .previews
+            .as_ref()
+            .expect("previews still allocated");
+        assert_eq!(
+            previews.cached_slots(),
+            0,
+            "reset disposes cached preview instances"
         );
     }
 

@@ -10,6 +10,10 @@
 //! | [`light_tunnel`] | Light Tunnel | `scenes/LightTunnel.js` |
 //! | [`wormhole`] | Wormhole | `scenes/Wormhole.js` |
 //! | [`it_is_coming_for_you`] | It Is Coming For You | `scenes/ItIsComingForYou.js` |
+//! | [`water_ripple`] | Water Ripple | `scenes/WaterRipple.js` |
+//! | [`glass_lens`] | Glass Lens | `scenes/GlassLens.js` |
+//! | [`mycelium`] | Mycelium | `scenes/Mycelium.js` |
+//! | [`around_plus`] | Around Plus | `scenes/AroundPlus.js` |
 //!
 //! ChromaticLine lives with its shared simulation in
 //! [`crate::point10::chromatic`] ([`crate::point10::chromatic::line`]) and is
@@ -18,12 +22,16 @@
 //! [`particle_quad`] is not a scene: it is the instanced billboard pipeline
 //! ParticleField and SpiralParticles share.
 
+pub mod around_plus;
 pub mod chromatic_wave;
+pub mod glass_lens;
 pub mod it_is_coming_for_you;
 pub mod light_tunnel;
+pub mod mycelium;
 pub mod particle_field;
 pub mod particle_quad;
 pub mod spiral_particles;
 pub mod square_tunnel;
+pub mod water_ripple;
 pub mod waveform;
 pub mod wormhole;

@@ -361,6 +361,12 @@ impl Composer {
         &mut self.output
     }
 
+    /// Override the final sRGB transfer (see
+    /// [`OutputPass::set_encode_srgb`]).
+    pub fn set_encode_srgb(&mut self, encode_srgb: bool) {
+        self.output.set_encode_srgb(encode_srgb);
+    }
+
     /// The active tone mapping operator.
     pub fn tone_mapping(&self) -> ToneMapping {
         self.output.tone_mapping()

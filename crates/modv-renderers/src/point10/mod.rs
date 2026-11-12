@@ -79,6 +79,11 @@
 //! pipeline cache lives in wgpu, so re-creating a pipeline after a scene
 //! switch is cheap.
 //!
+//! From batch 3 the context also carries an optional `assets_dir`: the engine
+//! will pass `--assets-dir` there, and scenes resolve textures through
+//! [`shared::assets::AssetLoader`] (`$MODV_ASSETS_DIR`, then `assets_dir`, then
+//! the repo's own texture directory).
+//!
 //! # Not here (later wiring)
 //!
 //! Instance lifecycle, eviction, the warm cache and presentation are engine
@@ -133,6 +138,25 @@ fn fullscreen_uv(position: vec2<f32>, resolution: vec2<f32>) -> vec2<f32> {
   return position / resolution;
 }
 ";
+
+/// `timing.js: MAX_FRAME_SECONDS` — the Point10 adapter's frame clock caps a
+/// frame at 0.1 s ("a tab-suspend catch-up cannot jump the pattern").
+pub const MAX_FRAME_SECONDS: f32 = 0.1;
+
+/// Clamp a frame delta the way the Point10 adapter's frame clock does
+/// (`timing.js: createFrameClock`).
+///
+/// The JS clock also reports **0** on the first frame after a scene is
+/// activated; the engine owns that clock, so the Rust scenes only need the cap
+/// and the non-finite guard. Batch-2 scenes each carried their own copy of
+/// this; batch 3 shares it.
+pub fn frame_dt(dt: f32) -> f32 {
+    if dt.is_finite() {
+        dt.clamp(0.0, MAX_FRAME_SECONDS)
+    } else {
+        0.0
+    }
+}
 
 /// One Point10 scene, ported from the `BaseScene` class contract.
 pub trait Point10Scene {
@@ -349,6 +373,11 @@ pub struct SceneContext {
     pub height: u32,
     /// Shared unit quad (corner + uv), used by the instanced particle scenes.
     pub quad: UnitQuad,
+    /// Directory the engine passes for scene textures (the planned
+    /// `--assets-dir`). `None` in the tests and until `modv-app` wires it; the
+    /// loader then falls back to `$MODV_ASSETS_DIR` and the repo's texture
+    /// directory.
+    pub assets_dir: Option<std::path::PathBuf>,
 }
 
 impl SceneContext {
@@ -366,7 +395,21 @@ impl SceneContext {
             width: 1,
             height: 1,
             quad: UnitQuad::new(device),
+            assets_dir: None,
         }
+    }
+
+    /// Set the engine-provided asset directory (builder form, so `new` stays
+    /// source-compatible for the engine).
+    pub fn with_assets_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.assets_dir = Some(dir.into());
+        self
+    }
+
+    /// The asset loader for this context (`$MODV_ASSETS_DIR`, then
+    /// [`SceneContext::assets_dir`], then the dev fallback).
+    pub fn asset_loader(&self) -> shared::assets::AssetLoader {
+        shared::assets::AssetLoader::for_assets_dir(self.assets_dir.as_deref())
     }
 
     /// Update the logical target size.
@@ -522,8 +565,9 @@ impl UnitQuad {
 /// Order is the WS-7 port order, so the Gallery list is stable:
 /// `ChromaticLine, ChromaticWave, ParticleField, SpiralParticles, Waveform`
 /// (ChromaticLine was ported ahead of batch 1; the rest are batch 1), then the
-/// batch-2 scenes `SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou`.
-/// The remaining 16 scenes are added batch by batch.
+/// batch-2 scenes `SquareTunnel, LightTunnel, Wormhole, ItIsComingForYou`, then
+/// the batch-3 scenes `WaterRipple, GlassLens, Mycelium, AroundPlus` (inventory
+/// order 10, 11, 17, 18). The remaining 12 scenes are added batch by batch.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
         Box::new(chromatic::line::ChromaticLine::new()),
@@ -535,6 +579,10 @@ pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
         Box::new(scenes::light_tunnel::LightTunnel::new()),
         Box::new(scenes::wormhole::Wormhole::new()),
         Box::new(scenes::it_is_coming_for_you::ItIsComingForYou::new()),
+        Box::new(scenes::water_ripple::WaterRipple::new()),
+        Box::new(scenes::glass_lens::GlassLens::new()),
+        Box::new(scenes::mycelium::Mycelium::new()),
+        Box::new(scenes::around_plus::AroundPlus::new()),
     ]
 }
 
@@ -545,7 +593,7 @@ mod tests {
     #[test]
     fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 9);
+        assert_eq!(scenes.len(), 13);
 
         assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
         assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
@@ -557,6 +605,11 @@ mod tests {
         assert_eq!(scenes[6].name(), "Point10 Light Tunnel");
         assert_eq!(scenes[7].name(), "Point10 Wormhole");
         assert_eq!(scenes[8].name(), "Point10 It Is Coming For You");
+        // Batch 3, in the WS-7 inventory order (10, 11, 17, 18).
+        assert_eq!(scenes[9].name(), "Point10 Water Ripple");
+        assert_eq!(scenes[10].name(), "Point10 Glass Lens");
+        assert_eq!(scenes[11].name(), "Point10 Mycelium");
+        assert_eq!(scenes[12].name(), "Point10 Around Plus");
     }
 
     #[test]
@@ -620,6 +673,16 @@ mod tests {
         ];
         let values = read_scene_props(SCHEMA, |key| (key == "speed").then_some(3.0));
         assert_eq!(values, vec![("height", 1.0), ("speed", 3.0)]);
+    }
+
+    #[test]
+    fn frame_dt_matches_the_adapter_clock() {
+        assert_eq!(frame_dt(1.0 / 60.0), 1.0 / 60.0);
+        assert_eq!(frame_dt(0.0), 0.0);
+        assert_eq!(frame_dt(5.0), MAX_FRAME_SECONDS);
+        assert_eq!(frame_dt(-1.0), 0.0);
+        assert_eq!(frame_dt(f32::NAN), 0.0);
+        assert_eq!(frame_dt(f32::INFINITY), 0.0);
     }
 
     #[test]
