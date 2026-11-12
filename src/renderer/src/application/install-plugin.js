@@ -1,26 +1,36 @@
 import store from "./worker/store";
 import uiStore from "../ui-store";
 import { app } from "../main";
+import { camelize, getActivePluginHost } from "./plugin-host";
 
-function camelize(str) {
-  return str.replace(/(?:^\w|[A-Z]|\b\w|\s+)/g, (match, index) => {
-    if (+match === 0) {
-      return "";
-    } // or if (/\s+/.test(match)) for white spaces
-    return index === 0 ? match.toLowerCase() : match.toUpperCase();
-  });
-}
-
-export default function installPlugin(plugin) {
+/**
+ * Install an extension plugin.
+ *
+ * Legacy mode (`MODV_ENGINE=0`) keeps the original behaviour: `plugins/add`
+ * and the plugin's `store` module are registered on the renderer's mirror
+ * store, and the worker registers/hooks its own built-in plugins.
+ *
+ * Engine mode installs through the renderer plugin host instead
+ * (`plugin-host.js`): there is no worker to call `plugins/add`, so the host
+ * adds the plugin to the mirror, registers the plugin store module there and
+ * runs `init`/`shutdown`/per-frame hooks with the engine-backed store facade.
+ */
+export default async function installPlugin(plugin) {
   if (!("name" in plugin)) {
     throw new Error("Plugin requires a name");
   }
 
-  store.dispatch("plugins/add", plugin);
+  const host = getActivePluginHost();
 
-  if ("store" in plugin) {
-    const storeName = plugin.storeName || camelize(plugin.name);
-    store.registerModule(storeName, plugin.store);
+  if (host) {
+    await host.add(plugin);
+  } else {
+    store.dispatch("plugins/add", plugin);
+
+    if ("store" in plugin) {
+      const storeName = plugin.storeName || camelize(plugin.name);
+      store.registerModule(storeName, plugin.store);
+    }
   }
 
   if ("uiStore" in plugin) {
@@ -40,6 +50,8 @@ export default function installPlugin(plugin) {
   }
 
   if ("install" in plugin) {
-    plugin.install(app, store, uiStore);
+    plugin.install(app, host ? host.store : store, uiStore);
   }
+
+  return plugin;
 }

@@ -43,6 +43,12 @@ import {
   engineUnsupportedMessage,
 } from "./engine-unsupported";
 import { createPresetData } from "./worker/preset-serializer";
+import grabCanvasPlugin from "./plugins/grab-canvas";
+import {
+  createEngineStoreFacade,
+  createPluginHost,
+  setActivePluginHost,
+} from "./plugin-host";
 
 const logger = createLogger("renderer:app");
 
@@ -272,6 +278,40 @@ class ModV {
             );
           },
         };
+
+    if (this.engineMode) {
+      // Engine mode has no worker, so the renderer owns the plugin lifecycle.
+      // The host adds plugins to the mirror and runs their frame hooks; the
+      // store facade intercepts `plugins/*` so the Plugins panel drives it.
+      this._engineStore = this.engineClient.storeFacade;
+      this.pluginHost = createPluginHost({
+        engineMode: true,
+        mirrorStore: store,
+        engineStore: this._engineStore,
+        getFeatures: () => this._pluginFeatures,
+        logger,
+      });
+
+      if (this.pluginHost) {
+        setActivePluginHost(this.pluginHost);
+        this.store = createEngineStoreFacade(
+          this._engineStore,
+          this.pluginHost,
+        );
+
+        // Built-in plugins live in the worker in legacy mode; register them
+        // here instead. Grab Canvas marks itself unsupported in engine mode,
+        // so it is listed but refuses to enable.
+        this.pluginHost.add(grabCanvasPlugin).catch((error) => {
+          logger.warn("could not register the built-in plugins", {
+            message: error?.message || String(error),
+          });
+        });
+      }
+    } else {
+      this.pluginHost = null;
+      setActivePluginHost(null);
+    }
 
     if (this.engineMode) {
       // The worker drove rendering; the engine has its own native window.
@@ -738,6 +778,15 @@ class ModV {
         }
       }
 
+      if (this.pluginHost) {
+        this.pluginHost.shutdownAll().catch((error) => {
+          logger.warn("plugin shutdown failed", {
+            message: error?.message || String(error),
+          });
+        });
+        setActivePluginHost(null);
+      }
+
       this.engineClient?.dispose();
 
       try {
@@ -853,6 +902,9 @@ class ModV {
         const feature = featuresToGet[i];
         this.features[feature] = features[feature];
       }
+
+      // Engine mode: the plugin host's frame hooks read this when `tick` runs.
+      this._pluginFeatures = features;
     }
   }
 
@@ -860,8 +912,24 @@ class ModV {
     this.store.dispatch("size/setSize", { width, height });
   }
 
+  // Engine mode: plugins run here instead of in the worker. The engine
+  // composites in its own process and never yields a frame to the renderer, so
+  // `preProcessFrame` runs just before the renderer's feature/audio publish
+  // (`loop`) with the last payload it computed, and `postProcessFrame` runs
+  // just after it with the fresh one. Both are therefore one frame behind the
+  // engine's compositor; the ordering between the two hook phases is
+  // preserved. No canvas is passed to `postProcessFrame` — the engine owns the
+  // output surface.
   tick(delta) {
+    if (this.pluginHost) {
+      this.pluginHost.runPreProcessFrame(this._pluginFeatures);
+    }
+
     this.loop(delta);
+
+    if (this.pluginHost) {
+      this.pluginHost.runPostProcessFrame(this._pluginFeatures);
+    }
   }
 
   startCaptureForDevice(deviceId) {

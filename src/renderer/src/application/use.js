@@ -3,8 +3,7 @@ import installPlugin from "./install-plugin";
 export default function use(type, extension) {
   switch (type) {
     case "plugin": {
-      installPlugin(extension);
-      break;
+      return installPlugin(extension);
     }
 
     case "control": {
@@ -18,8 +17,7 @@ export default function use(type, extension) {
     // }
 
     default: {
-      installPlugin(type || extension);
-      break;
+      return installPlugin(type || extension);
     }
   }
 }

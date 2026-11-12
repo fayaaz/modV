@@ -17,8 +17,18 @@ const mappingContext = mappingCanvas.getContext("2d", {
   willReadFrequently: true,
 });
 
+// Engine mode keeps the rendered frame inside the Rust compositor: the renderer
+// has no output canvas to sample and no auxiliary output to attach the fixture
+// canvas to (`outputs/getAuxillaryOutput` is a worker action). The plugin is
+// still registered so it shows in the Plugins panel, but the engine-mode host
+// refuses to enable it and logs this reason once.
+const ENGINE_MODE_REASON =
+  "Grab Canvas samples the worker's composited output canvas and attaches its fixture canvas through outputs/getAuxillaryOutput, neither of which exists in engine mode";
+
 export default {
   name: "Grab Canvas",
+  supportsEngine: false,
+  engineModeReason: ENGINE_MODE_REASON,
   props: {
     mappingWidth: {
       type: "int",
