@@ -27,6 +27,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -110,32 +111,88 @@ fn write_failed() -> io::Error {
 /// Non-blocking Unix domain socket server.
 ///
 /// Binds the socket, accepts and de-frames clients, and writes/broadcasts
-/// frames. Dropping the server unlinks the socket file.
+/// frames. Dropping the server unlinks the socket file it created (and only
+/// that one).
 pub struct SocketServer {
     listener: UnixListener,
     clients: Vec<SocketClientConn>,
     max_clients: usize,
     next_client_id: usize,
     path: PathBuf,
+    /// Device/inode of the socket node this server bound, used by `Drop` to
+    /// avoid unlinking a socket another engine has since created at the path.
+    identity: Option<(u64, u64)>,
+}
+
+/// `(device, inode)` of the socket node at `path`, or `None` when the path is
+/// missing, a symlink or not a socket node.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+
+    if !metadata.file_type().is_socket() {
+        return None;
+    }
+
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// Whether `path` is a socket node nobody is listening on.
+///
+/// A live socket accepts the probe connection; a regular file (or a symlink)
+/// refuses with `ECONNREFUSED` but is not a socket node; anything else (a
+/// permission error, a full listen backlog, …) is treated as "not ours to
+/// replace".
+fn is_stale_socket(path: &Path) -> bool {
+    match UnixStream::connect(path) {
+        Ok(_) => false,
+        Err(error) => {
+            error.kind() == io::ErrorKind::ConnectionRefused && socket_identity(path).is_some()
+        }
+    }
 }
 
 impl SocketServer {
-    /// Bind `path`, removing a stale socket file first (spec: "removes a stale
-    /// socket file"). The listener is set non-blocking.
+    /// Bind `path`, replacing a stale socket file first (spec: "removes a stale
+    /// socket file"). The listener is set non-blocking and the node is
+    /// restricted to its owner (`0600`).
+    ///
+    /// Only a socket node that nobody is listening on is replaced. A live
+    /// socket — another engine already owns the path — is never deleted: `bind`
+    /// fails with [`io::ErrorKind::AddrInUse`] instead, as does a regular file
+    /// or symlink at the path. The engine supervisor treats `AddrInUse` as "a
+    /// live control socket already exists".
     pub fn bind(path: &Path) -> io::Result<Self> {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        match fs::symlink_metadata(path) {
+            Ok(_) => {
+                if !is_stale_socket(path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!(
+                            "{} exists and is not a stale control socket",
+                            path.display()
+                        ),
+                    ));
+                }
+                fs::remove_file(path)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
+
         let listener = UnixListener::bind(path)?;
         listener.set_nonblocking(true)?;
+        // The socket carries `engine/shutdown` and full control of the engine;
+        // do not depend on the caller's umask.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        let identity = socket_identity(path);
+
         Ok(Self {
             listener,
             clients: Vec::new(),
             max_clients: DEFAULT_MAX_CLIENTS,
             next_client_id: 0,
             path: path.to_path_buf(),
+            identity,
         })
     }
 
@@ -275,12 +332,9 @@ impl SocketServer {
             let mut out = conn.out.borrow_mut();
             if out.len() + frame.len() > MAX_PENDING_OUT_BYTES {
                 conn.dead.set(true);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "client {client} exceeded {MAX_PENDING_OUT_BYTES} pending output bytes"
-                    ),
-                ));
+                return Err(io::Error::other(format!(
+                    "client {client} exceeded {MAX_PENDING_OUT_BYTES} pending output bytes"
+                )));
             }
             out.extend_from_slice(&frame);
         }
@@ -312,9 +366,7 @@ impl SocketServer {
         let mut first_error = None;
         for client in self.clients.iter().filter(|c| !c.dead.get()) {
             if let Err(e) = self.send(client.id, KIND_EVENT, &payload) {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
+                first_error.get_or_insert(e);
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -333,8 +385,13 @@ impl SocketServer {
 
 impl Drop for SocketServer {
     fn drop(&mut self) {
-        // Best effort: do not leave a stale socket file behind.
-        let _ = fs::remove_file(&self.path);
+        // Best effort: do not leave a stale socket file behind — but only
+        // unlink the node this server bound. Another engine may have replaced
+        // the path after ours was removed, and deleting its live socket would
+        // make it unreachable without stopping it.
+        if self.identity.is_some() && socket_identity(&self.path) == self.identity {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -369,12 +426,97 @@ mod tests {
     }
 
     #[test]
-    fn bind_removes_stale_socket_file() {
+    fn bind_replaces_a_stale_socket_file() {
         let path = temp_socket_path("stale");
-        fs::write(&path, b"not a socket").expect("seed stale file");
-        let server = SocketServer::bind(&path).expect("bind over stale file");
+        // `UnixListener::bind` leaves the socket node behind when the listener
+        // is dropped, which is exactly the stale-file case.
+        let stale = UnixListener::bind(&path).expect("create stale socket node");
+        drop(stale);
+        assert!(path.exists());
+
+        let mut server = SocketServer::bind(&path).expect("bind over a stale socket");
         assert_eq!(server.paths(), path.as_path());
         assert_eq!(server.client_count(), 0);
+
+        let _client = UnixStream::connect(&path).expect("connect to the new server");
+        assert_eq!(server.poll().expect("poll").accepted, vec![0]);
+    }
+
+    #[test]
+    fn bind_refuses_to_replace_a_live_socket() {
+        let path = temp_socket_path("live");
+        let listener = UnixListener::bind(&path).expect("bind live listener");
+
+        let result = SocketServer::bind(&path);
+        let err = match result {
+            Ok(_) => panic!("must not steal a live socket"),
+            Err(error) => error,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+
+        // The path and the live listener survive: the probe connection that
+        // `bind` made is queued for it.
+        assert!(path.exists());
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking listener");
+        listener
+            .accept()
+            .expect("probe connection is queued on the live listener");
+
+        drop(listener);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bind_refuses_to_remove_a_regular_file() {
+        let path = temp_socket_path("regular");
+        fs::write(&path, b"not a socket").expect("seed stale file");
+
+        let result = SocketServer::bind(&path);
+        let err = match result {
+            Ok(_) => panic!("must not delete a plain file"),
+            Err(error) => error,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(fs::read(&path).expect("the file survives"), b"not a socket");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bind_creates_a_private_socket() {
+        let path = temp_socket_path("mode");
+        let server = SocketServer::bind(&path).expect("bind");
+        let mode = fs::metadata(&path)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the control socket must not be world-accessible"
+        );
+        drop(server);
+    }
+
+    #[test]
+    fn drop_keeps_a_socket_replaced_by_another_engine() {
+        let path = temp_socket_path("replaced");
+        let server = SocketServer::bind(&path).expect("bind");
+
+        // A second engine takes the path over while ours is still alive.
+        fs::remove_file(&path).expect("unlink our socket");
+        let replacement = UnixListener::bind(&path).expect("bind replacement");
+
+        drop(server);
+        assert!(
+            path.exists(),
+            "drop must not unlink another process's socket"
+        );
+
+        drop(replacement);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

@@ -19,14 +19,26 @@
 //!
 //! Slots are written round-robin. The sequence number acts as a seqlock: the
 //! writer bumps it to an *odd* value before writing, then to an *even* value
-//! after. Readers copy the header and pixels, then re-read the sequence; a
-//! mismatch (or an odd sequence) means the slot was overwritten mid-read and
-//! the frame is dropped — previews are never queued.
+//! after. Readers copy the header and pixels, then re-read the header; a
+//! mismatch (or an odd sequence, bad magic, or implausible geometry) means the
+//! slot was never written or was overwritten mid-read and the frame is dropped
+//! — previews are never queued.
 //!
 //! Ambiguity resolved: the spec does not pin down where the file lives when no
 //! hint is given, nor the exact on-disk name. We use `/dev/shm/modv-preview-<pid>-<nanos>`
 //! via plain `std::fs` (no `memfd`, `memmap2` or `libc` needed for a file in
 //! `tmpfs`), and tests cover the fallback. The file is unlinked on drop.
+//!
+//! # Robustness
+//!
+//! - The ring file is created `0600` (previews are fullscreen capture
+//!   contents), independent of the umask.
+//! - Fresh slots are initialised with an *invalid* magic and an odd sequence,
+//!   so an unwritten slot reads back as "no frame" instead of as a black frame
+//!   with `frameId: 0`.
+//! - A failed write poisons the slot header (no magic, odd sequence) so a
+//!   reader that catches the slot mid-failure still rejects it
+//!   deterministically, and does not count the frame as published.
 //!
 //! Note: this module writes pixels with plain `std::fs` calls (`pread`/`pwrite`
 //! via `FileExt`, not mmap) into a `tmpfs`-backed file, so there is no
@@ -35,7 +47,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,6 +55,9 @@ use serde_json::{Value, json};
 
 /// Size of the per-slot header in bytes.
 pub const HEADER_BYTES: usize = 32;
+
+/// Offset of the `sequence` field inside a slot header.
+const SEQUENCE_OFFSET: u64 = 20;
 
 /// Magic number `VMP1` little-endian (`'V' | 'M' | 'P' | '1'`).
 pub const MAGIC: u32 = 0x3150_4D56;
@@ -95,6 +110,25 @@ impl PreviewHeader {
             sequence: u32_at(20),
             frame_id: u64::from_le_bytes(buf[24..32].try_into().expect("slice")),
         }
+    }
+
+    /// Whether the header describes a frame the ring can be holding.
+    ///
+    /// A header read from the file may be stale, torn or corrupted, so the
+    /// reader checks the basic geometry (not just the size fit) before trusting
+    /// the pixel count it implies.
+    fn is_plausible(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.stride >= self.width.saturating_mul(BYTES_PER_PIXEL)
+            && matches!(self.format, FORMAT_RGBA8 | FORMAT_BGRA8)
+    }
+
+    /// Number of pixel bytes the header advertises.
+    fn pixel_bytes(&self) -> Option<usize> {
+        usize::try_from(self.stride)
+            .ok()?
+            .checked_mul(usize::try_from(self.height).ok()?)
     }
 }
 
@@ -161,7 +195,7 @@ impl PreviewRing {
     /// `stride` is `width * 4` (tightly packed; formats are 32-bit). When
     /// `path_hint` is `Some`, exactly that path is created (truncating any
     /// existing file); otherwise a unique `/dev/shm/modv-preview-<pid>-<nanos>`
-    /// is used.
+    /// is used. The file is owner-only (`0600`).
     ///
     /// Fails if `slots` or `width`/`height` is 0, or if the geometry overflows.
     pub fn create(
@@ -208,22 +242,32 @@ impl PreviewRing {
             .write(true)
             .create(true)
             .truncate(true)
+            .mode(0o600)
             .open(&path)?;
+        // `.mode` only applies to a file this call creates; tighten a path that
+        // already existed (previews are fullscreen capture contents and must
+        // not be world-readable).
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.set_len(file_len)?;
 
-        // Publish initial headers: magic, format=1 (RGBA8), sequence=0.
+        // Publish initial headers: an invalid magic and an odd sequence, so a
+        // slot that has never been written reads back as "no frame" rather than
+        // as a black frame with `frameId: 0`. `write_frame` installs the real
+        // magic with its first (odd) header.
         let format = FORMAT_RGBA8;
         let base = PreviewHeader {
             width,
             height,
             stride,
             format,
-            sequence: 0,
+            sequence: 1,
             frame_id: 0,
         };
+        let mut unwritten = base.encode();
+        unwritten[0..4].copy_from_slice(&0u32.to_le_bytes());
         for slot in 0..slots {
             let offset = u64::from(slot) * slot_bytes as u64;
-            write_all_at(&mut file, &base.encode(), offset)?;
+            write_all_at(&mut file, &unwritten, offset)?;
         }
         file.flush()?;
 
@@ -267,6 +311,12 @@ impl PreviewRing {
     /// the pixels are written and to the following even value afterwards, so a
     /// concurrent reader either sees a consistent frame or [`Ok(None)`] from
     /// [`PreviewRing::read_slot`].
+    ///
+    /// The sequence for the whole write is reserved up front: an exhausted
+    /// sequence fails before anything is written. An I/O failure mid-write
+    /// poisons the slot header (see [`PreviewRing::poison_slot`]), consumes the
+    /// reserved sequence pair and does not advance `frame_id`, so the frame is
+    /// never reported as published.
     pub fn write_frame(&mut self, pixels: &[u8]) -> io::Result<PreviewFrame> {
         let stride = self.stride();
         let expected = stride as usize * self.height as usize;
@@ -285,11 +335,15 @@ impl PreviewRing {
             u32::try_from(self.frame_id % u64::from(self.slots)).expect("slot index fits u32");
         let slot_offset = u64::from(slot) * self.slot_bytes as u64;
 
-        // Seqlock: odd while writing, even afterwards.
+        // Seqlock: odd while writing, even afterwards. Both numbers are
+        // reserved before the first byte is written.
         let seq_odd = self
             .sequence
             .checked_add(1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "sequence number exhausted"))?;
+            .ok_or_else(|| io::Error::other("sequence number exhausted"))?;
+        let seq_even = seq_odd
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("sequence number exhausted"))?;
         let frame_id = self.frame_id;
 
         let header_odd = PreviewHeader {
@@ -300,17 +354,20 @@ impl PreviewRing {
             sequence: seq_odd,
             frame_id,
         };
-        write_all_at(&mut self.file, &header_odd.encode(), slot_offset)?;
-        write_all_at(&mut self.file, pixels, slot_offset + HEADER_BYTES as u64)?;
 
-        let seq_even = seq_odd
-            .checked_add(1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "sequence number exhausted"))?;
-        let header_even = PreviewHeader {
-            sequence: seq_even,
-            ..header_odd
-        };
-        write_all_at(&mut self.file, &header_even.encode(), slot_offset)?;
+        let result = write_frame_bytes(&mut self.file, slot_offset, &header_odd, pixels, seq_even);
+
+        if let Err(error) = result {
+            // The slot may hold a half-written header (or complete pixels with
+            // an odd sequence). Poison it so readers skip it deterministically
+            // regardless of which part of the write failed.
+            self.poison_slot(slot_offset);
+            // Reserved but not published: a retry uses a fresh odd/even pair, so
+            // no reader can mistake the failed attempt's sequence for the retry.
+            self.sequence = seq_even;
+
+            return Err(error);
+        }
 
         self.sequence = seq_even;
         self.frame_id += 1;
@@ -326,6 +383,26 @@ impl PreviewRing {
         })
     }
 
+    /// Invalidate a slot header: no magic, odd sequence.
+    ///
+    /// Used when a write fails part-way through. A reader rejects the slot on
+    /// the magic check before trusting any geometry, so a torn header can never
+    /// be handed out as a frame. Best effort — if this write fails too, the odd
+    /// sequence from the failed attempt still makes readers skip it.
+    fn poison_slot(&mut self, slot_offset: u64) {
+        let header = PreviewHeader {
+            width: self.width,
+            height: self.height,
+            stride: self.stride(),
+            format: self.format,
+            sequence: 1,
+            frame_id: 0,
+        };
+        let mut buf = header.encode();
+        buf[0..4].copy_from_slice(&0u32.to_le_bytes());
+        let _ = write_all_at(&mut self.file, &buf, slot_offset);
+    }
+
     /// Read one slot with the seqlock double-read protocol.
     ///
     /// This is a *static* helper: it takes the ring file path and re-opens it,
@@ -334,8 +411,12 @@ impl PreviewRing {
     ///
     /// Returns:
     /// - `Ok(None)` when the slot holds no valid frame — bad magic, an odd
-    ///   sequence (a write is in flight), or the sequence changed between the
-    ///   two reads (the slot was overwritten mid-read).
+    ///   sequence (a write is in flight or the slot was poisoned), implausible
+    ///   geometry, or a header that changed between the two reads (the slot was
+    ///   overwritten mid-read).
+    /// - `Err(InvalidInput)` when `slot` is outside the ring or `slot_bytes` is
+    ///   smaller than a header (an unchecked `slot * slot_bytes` used to read
+    ///   past the file).
     /// - `Err(InvalidData)` when the slot geometry cannot hold the pixels the
     ///   header advertises.
     /// - `Ok(Some((header, pixels)))` with the header and pixel copy otherwise.
@@ -351,7 +432,24 @@ impl PreviewRing {
             ));
         }
         let mut file = File::open(path)?;
-        let offset = u64::from(slot) * slot_bytes as u64;
+        let file_len = file.metadata()?.len();
+        let offset = u64::from(slot)
+            .checked_mul(slot_bytes as u64)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "slot offset overflows u64")
+            })?;
+
+        // Bound the slot against the ring: never pread past the end of the
+        // file, which would ship uninitialised memory to a caller.
+        let in_range = offset
+            .checked_add(HEADER_BYTES as u64)
+            .is_some_and(|end| end <= file_len);
+        if !in_range {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("slot {slot} is outside the {file_len}-byte ring"),
+            ));
+        }
 
         let mut header_buf = [0u8; HEADER_BYTES];
         read_exact_at(&mut file, &mut header_buf, offset)?;
@@ -360,17 +458,17 @@ impl PreviewRing {
             return Ok(None);
         }
         let header = PreviewHeader::decode(&header_buf);
-        if header.sequence % 2 != 0 {
-            // Write in flight.
+        if !header.sequence.is_multiple_of(2) {
+            // Write in flight (or poisoned).
+            return Ok(None);
+        }
+        if !header.is_plausible() {
             return Ok(None);
         }
 
-        let pixels_len = usize::try_from(header.stride)
-            .ok()
-            .and_then(|stride| stride.checked_mul(header.height as usize))
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "stride x height overflows")
-            })?;
+        let pixels_len = header.pixel_bytes().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "stride x height overflows")
+        })?;
         if HEADER_BYTES + pixels_len > slot_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -381,11 +479,11 @@ impl PreviewRing {
         let mut pixels = vec![0u8; pixels_len];
         read_exact_at(&mut file, &mut pixels, offset + HEADER_BYTES as u64)?;
 
-        // Seqlock second read: the sequence must not have changed.
-        let mut seq_buf = [0u8; 4];
-        read_exact_at(&mut file, &mut seq_buf, offset + 20)?;
-        let sequence_after = u32::from_le_bytes(seq_buf);
-        if sequence_after != header.sequence {
+        // Seqlock second read: the whole header must be unchanged, not just the
+        // sequence — a torn header with the same sequence must not be accepted.
+        let mut after = [0u8; HEADER_BYTES];
+        read_exact_at(&mut file, &mut after, offset)?;
+        if after != header_buf {
             return Ok(None);
         }
 
@@ -419,6 +517,26 @@ fn unique_shm_path() -> PathBuf {
 fn write_all_at(file: &mut File, buf: &[u8], offset: u64) -> io::Result<()> {
     // pread/pwrite-style: no shared file cursor, safe to interleave with reads.
     file.write_all_at(buf, offset)
+}
+
+/// The three writes of one frame: the odd header (the seqlock bump and the new
+/// geometry/frame id), the pixels, then the even sequence that publishes it.
+///
+/// The publish step rewrites only the 4-byte sequence field. Rewriting the whole
+/// header there would leave a torn header plausible: a partially written
+/// geometry or `frame_id` with an already-even sequence could be accepted with
+/// pixels from the previous frame. A torn 4-byte sequence is either odd or
+/// different from the reader's first read, so the frame is dropped.
+fn write_frame_bytes(
+    file: &mut File,
+    slot_offset: u64,
+    header_odd: &PreviewHeader,
+    pixels: &[u8],
+    seq_even: u32,
+) -> io::Result<()> {
+    write_all_at(file, &header_odd.encode(), slot_offset)?;
+    write_all_at(file, pixels, slot_offset + HEADER_BYTES as u64)?;
+    write_all_at(file, &seq_even.to_le_bytes(), slot_offset + SEQUENCE_OFFSET)
 }
 
 fn read_exact_at(file: &mut File, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -470,6 +588,160 @@ mod tests {
             .expect("slot b holds a frame");
         assert_eq!(header_b.frame_id, 1);
         assert_eq!(pixels_b, second);
+    }
+
+    #[test]
+    fn create_restricts_the_ring_file_to_the_owner() {
+        // Preview frames are fullscreen capture contents; nobody but the owner
+        // may read them (R-21a).
+        let ring = PreviewRing::create(None, 3, 8, 8).expect("create ring");
+        let mode = std::fs::metadata(ring.path())
+            .expect("ring metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn unwritten_slots_hold_no_frame() {
+        // A fresh ring must not read back as a black frame (R-21b): the initial
+        // headers carry an invalid magic *and* an odd sequence.
+        let ring = PreviewRing::create(None, 3, 8, 8).expect("create ring");
+        let slot_bytes = HEADER_BYTES + 8 * 4 * 8;
+
+        for slot in 0..3 {
+            assert!(
+                PreviewRing::read_slot(ring.path(), slot_bytes, slot)
+                    .expect("read unwritten slot")
+                    .is_none(),
+                "slot {slot} must read as unwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn read_slot_rejects_an_out_of_range_slot() {
+        let mut ring = PreviewRing::create(None, 3, 8, 8).expect("create ring");
+        let slot_bytes = HEADER_BYTES + 8 * 4 * 8;
+        ring.write_frame(&vec![1u8; 8 * 4 * 8]).expect("write");
+
+        for slot in [3u32, 4, 1_000, u32::MAX] {
+            let error = PreviewRing::read_slot(ring.path(), slot_bytes, slot)
+                .expect_err("out-of-range slot must be rejected");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidInput,
+                "slot {slot} must be out of range"
+            );
+        }
+
+        // The bounds are exact: the last slot is readable.
+        let last = PreviewRing::read_slot(ring.path(), slot_bytes, 2).expect("read last slot");
+        assert!(last.is_none(), "slot 2 has not been written yet");
+    }
+
+    #[test]
+    fn read_slot_rejects_an_invalid_header_geometry() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "modv-ipc-test-geometry-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let slot_bytes = HEADER_BYTES + 16;
+        // `stride` smaller than `width * 4` cannot describe the frame.
+        let header = PreviewHeader {
+            width: 8,
+            height: 1,
+            stride: 8,
+            format: FORMAT_RGBA8,
+            sequence: 2,
+            frame_id: 1,
+        };
+        let mut bytes = header.encode().to_vec();
+        bytes.extend_from_slice(&[0u8; 16]);
+        std::fs::write(&path, &bytes).expect("write slot file");
+
+        assert!(matches!(
+            PreviewRing::read_slot(&path, slot_bytes, 0),
+            Ok(None)
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_failed_write_reports_an_error_and_publishes_no_frame() {
+        let mut ring = PreviewRing::create(None, 3, 8, 8).expect("create ring");
+        let path = ring.path().to_path_buf();
+        let slot_bytes = HEADER_BYTES + 8 * 4 * 8;
+        let pixels = vec![5u8; 8 * 4 * 8];
+
+        ring.write_frame(&pixels).expect("write slot 0");
+
+        // A read-only descriptor makes every `pwrite` fail; the frame must not
+        // be counted as published, and its reserved sequence pair is not
+        // reused by the retry.
+        ring.file = File::open(&path).expect("reopen read-only");
+        let sequence_before = ring.sequence;
+        let frame_id_before = ring.frame_id;
+        assert!(ring.write_frame(&pixels).is_err());
+        assert_eq!(ring.sequence, sequence_before + 2);
+        assert_eq!(ring.frame_id, frame_id_before);
+        assert!(
+            PreviewRing::read_slot(&path, slot_bytes, 1)
+                .expect("read")
+                .is_none(),
+            "a failed write must not leave a readable frame"
+        );
+
+        // The ring keeps working once the descriptor is writable again.
+        ring.file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("reopen read-write");
+        ring.write_frame(&pixels).expect("write after failure");
+        assert!(
+            PreviewRing::read_slot(&path, slot_bytes, 1)
+                .expect("read")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_poisoned_slot_reads_as_empty_and_recovers() {
+        let mut ring = PreviewRing::create(None, 3, 8, 8).expect("create ring");
+        let path = ring.path().to_path_buf();
+        let slot_bytes = HEADER_BYTES + 8 * 4 * 8;
+        let pixels = vec![7u8; 8 * 4 * 8];
+
+        ring.write_frame(&pixels).expect("write slot 0");
+        assert!(
+            PreviewRing::read_slot(&path, slot_bytes, 0)
+                .expect("read")
+                .is_some()
+        );
+
+        // A torn header must be detectable even if the sequence happened to be
+        // left even: the poison header has no magic.
+        ring.poison_slot(0);
+        assert!(
+            PreviewRing::read_slot(&path, slot_bytes, 0)
+                .expect("read poisoned")
+                .is_none()
+        );
+
+        // Round-robin: two more frames reuse slot 0 and republish it.
+        ring.write_frame(&pixels).expect("write slot 1");
+        ring.write_frame(&pixels).expect("write slot 2");
+        let frame = ring.write_frame(&pixels).expect("write slot 0 again");
+        assert_eq!(frame.slot, 0);
+        assert!(
+            PreviewRing::read_slot(&path, slot_bytes, 0)
+                .expect("read")
+                .is_some()
+        );
     }
 
     #[test]

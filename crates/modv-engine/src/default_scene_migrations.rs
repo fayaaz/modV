@@ -65,10 +65,12 @@
 //!   preserves `currentSceneId`, the Scene's timing override and playlist
 //!   references across the bump; `seeded_names` still maps old → name so
 //!   seeding cannot add a duplicate.
-//! - A **removal** deletes every seeded Scene carrying the retired name and
-//!   drops the name from `seeded_names`. A removed name that still exists in
-//!   the current defaults would be re-seeded, so a rule must only retire names
-//!   that left the data (guarded by the consistency test).
+//! - A **removal** deletes the first seeded Scene carrying the retired name
+//!   (the JS removes one Scene per rule, by id) and drops the name from
+//!   `seeded_names`. Another same-named Scene — a seeded duplicate, a user
+//!   Scene, or an import — is kept. A removed name that still exists in the
+//!   current defaults would be re-seeded, so a rule must only retire names that
+//!   left the data (guarded by the consistency test).
 //! - A rename whose target name is already carried by another Scene is
 //!   **skipped** (reported in [`MigrationReport::skipped`]), never merged or
 //!   overwritten.
@@ -319,7 +321,16 @@ fn apply_rename(
     report.renamed.push((actual_old, new_name.to_string()));
 }
 
-/// Delete every seeded Scene called `name` and drop it from `seeded_names`.
+/// Delete the first seeded Scene called `name` and stop treating the name as
+/// seeded.
+///
+/// The JS removal path removes **one** Scene per rule — the id
+/// `getDefaultScenesToRemove` reported — and then deletes the name from its
+/// `seededKeys` set (`scenes.js:3028-3047`). Removing every same-named Scene
+/// would delete an unrelated seeded duplicate as well. Dropping *all*
+/// `seeded_names` entries for the name (not just the first) keeps a second run
+/// from retiring the surviving duplicate: the JS never runs a removal twice for
+/// the same bump, but the engine may re-apply a migration on a failed upgrade.
 fn apply_removal(
     scenes: &mut Vec<Value>,
     seeded_names: &mut Vec<String>,
@@ -334,28 +345,18 @@ fn apply_removal(
         return;
     }
 
-    let mut removed: Option<String> = None;
-
-    scenes.retain(|scene| {
-        let Some(name) = scene.get("name").and_then(Value::as_str) else {
-            return true;
-        };
-
-        if scene_key(name) != key {
-            return true;
-        }
-
-        // Only seeded Scenes are retired; a same-named user Scene survives.
-        if removed.is_none() {
-            removed = Some(name.to_string());
-        }
-        false
-    });
-
-    let Some(actual) = removed else {
+    // Only seeded Scenes are retired; a same-named user Scene is kept, and
+    // exactly one duplicate is removed.
+    let Some(index) = scenes
+        .iter()
+        .position(|scene| scene_name(scene).is_some_and(|scene| scene_key(scene) == key))
+    else {
         report.skipped.push(name.to_string());
         return;
     };
+
+    let actual = scene_name(&scenes[index]).unwrap_or(name).to_string();
+    scenes.remove(index);
 
     seeded_names.retain(|seeded| scene_key(seeded) != key);
     report.removed.push(actual);
@@ -793,7 +794,10 @@ mod tests {
     }
 
     #[test]
-    fn removes_duplicate_seeded_scenes_and_reports_the_name_once() {
+    fn removes_one_of_two_duplicate_seeded_scenes_and_keeps_the_other() {
+        // The JS removal path removes **one** Scene (by id) per rule
+        // (`scenes.js:3028-3047`) and splices one `seededDefaultScenes` entry.
+        // A duplicate seeded Scene must not be collateral damage.
         let mut scenes = vec![
             scene("Old Retired Scene", "first-id"),
             scene("Old Retired Scene", "second-id"),
@@ -811,9 +815,43 @@ mod tests {
             &migration(&[], &["Old Retired Scene"]),
         );
 
-        assert_eq!(names(&scenes), vec!["Smoke Room".to_string()]);
-        assert_eq!(seeded, vec!["Smoke Room".to_string()]);
+        // Exactly one duplicate is gone; the survivor keeps its payload.
+        assert_eq!(
+            scenes
+                .iter()
+                .map(|scene| scene["id"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["second-id", "smoke-id"]
+        );
         assert_eq!(report.removed, vec!["Old Retired Scene".to_string()]);
+        // The retired name is no longer seeded, so the survivor is not removed
+        // by a re-run (see `a_removal_is_idempotent_with_duplicate_seeded_scenes`).
+        assert_eq!(seeded, vec!["Smoke Room".to_string()]);
+    }
+
+    #[test]
+    fn a_removal_is_idempotent_with_duplicate_seeded_scenes() {
+        let mut scenes = vec![
+            scene("Old Retired Scene", "first-id"),
+            scene("Old Retired Scene", "second-id"),
+        ];
+        let mut seeded = vec![
+            "Old Retired Scene".to_string(),
+            "Old Retired Scene".to_string(),
+        ];
+        let migration = migration(&[], &["Old Retired Scene"]);
+
+        let first = apply_default_scene_migrations(&mut scenes, &mut seeded, &migration);
+        assert_eq!(first.removed, vec!["Old Retired Scene".to_string()]);
+        assert_eq!(scenes.len(), 1);
+
+        // Re-running the same migration must not eat the surviving duplicate.
+        let second = apply_default_scene_migrations(&mut scenes, &mut seeded, &migration);
+        assert!(second.removed.is_empty());
+        assert_eq!(second.skipped, vec!["Old Retired Scene".to_string()]);
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0]["id"], json!("second-id"));
+        assert!(seeded.is_empty());
     }
 
     #[test]

@@ -79,7 +79,6 @@
 //! Line numbers refer to the tree at commit `8a512b6e` (branch `rust-hybrid`).
 
 use indexmap::IndexMap;
-use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -225,8 +224,70 @@ impl TweenDescriptor {
     }
 
     /// Serialize back to the preset shape.
+    ///
+    /// Non-finite numeric fields are omitted rather than serialised: a
+    /// `duration` of `Infinity` (what `update_bpm(0.0)` computes) has no JSON
+    /// representation, and emitting `null` or `{}` would either fail the
+    /// reload or drop the descriptor — and, through the set-level serialiser,
+    /// every other tween with it (R-5). The rest of the descriptor (its `id`,
+    /// `data`, easing, ...) is kept, so the entry survives a round trip and
+    /// only the corrupt field falls back to its `create_tween` default.
+    ///
+    /// A non-finite value inside `data` omits the whole `data` field for the
+    /// same reason: channels are positional, so dropping a channel would shift
+    /// the rest.
     pub fn to_json(&self) -> Value {
-        serde_json::to_value(self).unwrap_or_else(|_| Value::Object(Map::new()))
+        let mut map = Map::new();
+        map.insert("id".to_string(), Value::String(self.id.clone()));
+        if self.presence.data
+            && let Some(data) = finite_grid(&self.data)
+        {
+            map.insert("data".to_string(), data);
+        }
+        if self.presence.duration
+            && let Some(value) = finite_number(self.duration)
+        {
+            map.insert("duration".to_string(), value);
+        }
+        if self.presence.direction {
+            map.insert(
+                "direction".to_string(),
+                Value::String(self.direction.clone()),
+            );
+        }
+        if self.presence.easing {
+            map.insert("easing".to_string(), Value::String(self.easing.clone()));
+        }
+        if self.presence.looping {
+            map.insert("loop".to_string(), Value::Bool(self.looping));
+        }
+        if self.presence.use_bpm {
+            map.insert("useBpm".to_string(), Value::Bool(self.use_bpm));
+        }
+        if self.presence.bpm_division
+            && let Some(value) = finite_number(self.bpm_division)
+        {
+            map.insert("bpmDivision".to_string(), value);
+        }
+        if self.presence.duration_as_total_time {
+            map.insert(
+                "durationAsTotalTime".to_string(),
+                Value::Bool(self.duration_as_total_time),
+            );
+        }
+        if let Some(is_gallery) = self.is_gallery {
+            map.insert("isGallery".to_string(), Value::Bool(is_gallery));
+        }
+        if self.presence.steps
+            && let Some(value) = finite_number(self.steps)
+        {
+            map.insert("steps".to_string(), value);
+        }
+        for (key, value) in &self.extra {
+            map.insert(key.clone(), value.clone());
+        }
+
+        Value::Object(map)
     }
 }
 
@@ -268,44 +329,33 @@ impl Serialize for MinimalF64Row<'_> {
     }
 }
 
+/// A finite number in the minimal `JSON.stringify` form, or `None` for
+/// `NaN`/`±Infinity`, which JSON cannot represent.
+fn finite_number(value: f64) -> Option<Value> {
+    if value.is_finite() {
+        serde_json::to_value(MinimalF64(value)).ok()
+    } else {
+        None
+    }
+}
+
+/// [`finite_number`] for the whole `data` grid: `None` when any value is
+/// non-finite (channels are positional, so a dropped channel would shift the
+/// rest).
+fn finite_grid(data: &[Vec<f64>]) -> Option<Value> {
+    if data.iter().flatten().all(|value| value.is_finite()) {
+        serde_json::to_value(MinimalF64Grid(data)).ok()
+    } else {
+        None
+    }
+}
+
 impl Serialize for TweenDescriptor {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("id", &self.id)?;
-        if self.presence.data {
-            map.serialize_entry("data", &MinimalF64Grid(&self.data))?;
-        }
-        if self.presence.duration {
-            map.serialize_entry("duration", &MinimalF64(self.duration))?;
-        }
-        if self.presence.direction {
-            map.serialize_entry("direction", &self.direction)?;
-        }
-        if self.presence.easing {
-            map.serialize_entry("easing", &self.easing)?;
-        }
-        if self.presence.looping {
-            map.serialize_entry("loop", &self.looping)?;
-        }
-        if self.presence.use_bpm {
-            map.serialize_entry("useBpm", &self.use_bpm)?;
-        }
-        if self.presence.bpm_division {
-            map.serialize_entry("bpmDivision", &MinimalF64(self.bpm_division))?;
-        }
-        if self.presence.duration_as_total_time {
-            map.serialize_entry("durationAsTotalTime", &self.duration_as_total_time)?;
-        }
-        if let Some(is_gallery) = self.is_gallery {
-            map.serialize_entry("isGallery", &is_gallery)?;
-        }
-        if self.presence.steps {
-            map.serialize_entry("steps", &MinimalF64(self.steps))?;
-        }
-        for (key, value) in &self.extra {
-            map.serialize_entry(key, value)?;
-        }
-        map.end()
+        // One implementation: [`TweenDescriptor::to_json`] is the finite-only
+        // shape, and it is infallible, so a serde caller can never end up with
+        // a descriptor that serialises as `{}` (R-5).
+        self.to_json().serialize(serializer)
     }
 }
 
@@ -716,7 +766,11 @@ fn build_frames_with_seek(
         for frame in 1..frames_required {
             frames.push(sample(frame));
         }
-        return (frames, 0);
+        // `tweens.js:129` restores the seek position for both branches, not
+        // just the looped one: a rebuild must not snap a one-shot tween back
+        // to frame 0.
+        let restored = restored_frame(frames.len(), seek);
+        return (frames, restored);
     }
 
     let mut frames = Vec::with_capacity(frames_required * 2);
@@ -936,7 +990,10 @@ pub enum TweenError {
     /// `{ tweens: ... }` wrapper.
     #[error("tween document is not an array or an id-keyed object")]
     InvalidShape,
-    /// A descriptor did not decode.
+    /// A descriptor did not decode. [`TweenSet::load_from_json`] and
+    /// [`TweenSet::replace_from_json`] skip such an entry (and report it)
+    /// instead of failing the document, so this only comes back from the
+    /// single-descriptor [`TweenSet::upsert_json`].
     #[error("failed to decode tween `{id}`: {message}")]
     Decode {
         /// The descriptor id (or its array index / map key).
@@ -1060,6 +1117,13 @@ impl TweenSet {
     /// - the live worker root (`{ tweens: { "<id>": ... } }`).
     ///
     /// A `null` document clears the set.
+    ///
+    /// Decoding is **per entry**: a descriptor that does not decode is skipped
+    /// and reported, and the rest are kept. The JS created tweens one at a time
+    /// and lets the survivors live, and unknown easings already fall back to
+    /// `linear` rather than failing the load, so one corrupt Scene/preset entry
+    /// must not empty the whole runtime (R-9). A document that is not a tween
+    /// container at all is still [`TweenError::InvalidShape`].
     pub fn load_from_json(value: &Value, fps: f64, bpm: f64) -> Result<Self, TweenError> {
         let mut set = Self::new();
         set.replace_from_json(value, fps, bpm)?;
@@ -1067,32 +1131,54 @@ impl TweenSet {
     }
 
     /// [`TweenSet::load_from_json`] into an existing set.
+    ///
+    /// The previous set survives a malformed document (nothing is cleared
+    /// until the document shape is known); an undecodable entry is skipped and
+    /// reported (see [`TweenSet::load_from_json`]).
     pub fn replace_from_json(
         &mut self,
         value: &Value,
         fps: f64,
         bpm: f64,
     ) -> Result<(), TweenError> {
+        let entries = tween_entries(value)?;
         self.tweens.clear();
 
-        let entries = tween_entries(value)?;
         for (key, entry) in entries {
-            let descriptor = decode_descriptor(&entry, key.as_deref())
-                .map_err(|(id, message)| TweenError::Decode { id, message })?;
-            self.insert_descriptor(descriptor, fps, bpm);
+            match decode_descriptor(&entry, key.as_deref()) {
+                Ok(descriptor) => self.insert_descriptor(descriptor, fps, bpm),
+                Err((id, message)) => {
+                    eprintln!("engine: WARN skipping an undecodable tween `{id}`: {message}")
+                }
+            }
         }
 
         Ok(())
     }
 
-    /// Serialize the set back to the preset array of descriptors.
+    /// Serialize the set back to the preset array of descriptors, in document
+    /// order.
+    ///
+    /// Each descriptor is serialised on its own. One that cannot be serialised
+    /// is skipped and reported instead of collapsing the array (the old
+    /// `{}`-per-entry fallback lost every BPM tween from `state.tweens` when a
+    /// single `duration` became `Infinity`, R-5). A non-finite *numeric* field
+    /// does not reach that path: [`TweenDescriptor::to_json`] omits it and the
+    /// descriptor keeps its identity, data and settings.
     pub fn to_json(&self) -> Value {
-        Value::Array(
-            self.tweens
-                .values()
-                .map(|tween| tween.descriptor().to_json())
-                .collect(),
-        )
+        let mut entries = Vec::with_capacity(self.tweens.len());
+
+        for tween in self.tweens.values() {
+            match serde_json::to_value(tween.descriptor()) {
+                Ok(entry) => entries.push(entry),
+                Err(error) => eprintln!(
+                    "engine: WARN skipping tween `{}` while serialising: {error}",
+                    tween.id()
+                ),
+            }
+        }
+
+        Value::Array(entries)
     }
 }
 
@@ -1509,6 +1595,61 @@ mod tests {
         assert_eq!(runtime.fps(), 20.0);
     }
 
+    #[test]
+    fn rebuild_preserves_the_position_of_a_non_looping_tween() {
+        // `buildFrames` restores `frames[id] = Math.floor(len * seek)` for the
+        // loop *and* the no-loop branch (`tweens.js:129`), so a BPM/fps
+        // rebuild must not snap a one-shot tween back to frame 0.
+        let mut tween = linear_tween();
+        tween.use_bpm = true;
+        tween.bpm_division = 32.0;
+        let mut runtime = TweenRuntime::new(tween, 60.0, 120.0);
+        // ((3600 / 120) * 32) / 2 rows = 480 ms → round(28.8) = 29 frames.
+        assert_eq!(runtime.frames().len(), 29);
+
+        runtime.set_frame(14);
+
+        // Same tempo: the position is unchanged.
+        runtime.update_bpm(120.0);
+        assert_eq!(runtime.frames().len(), 29);
+        assert_eq!(runtime.frame(), 14);
+
+        // Half the tempo doubles the leg: floor(58 frames * 14/29) = 28.
+        runtime.update_bpm(60.0);
+        assert_eq!(runtime.frames().len(), 58);
+        assert_eq!(runtime.frame(), 28);
+
+        // floor(58 * 28/58) = 28 again — the rebuild does not drift.
+        runtime.update_bpm(60.0);
+        assert_eq!(runtime.frame(), 28);
+    }
+
+    #[test]
+    fn rebuild_keeps_a_wall_clock_non_looping_tween_on_its_position() {
+        let mut runtime = TweenRuntime::new(linear_tween(), 10.0, 120.0);
+        assert_eq!(runtime.frames().len(), 5);
+
+        runtime.set_frame(3);
+        runtime.rebuild(20.0, 120.0);
+
+        // 500 ms leg at 20 fps → 10 frames; floor(10 * 3/5) = 6, not 0.
+        assert_eq!(runtime.frames().len(), 10);
+        assert_eq!(runtime.frame(), 6);
+    }
+
+    #[test]
+    fn restored_frame_clamps_the_seek_fraction() {
+        assert_eq!(restored_frame(29, 0.0), 0);
+        assert_eq!(restored_frame(29, 0.5), 14);
+        // A full or bogus fraction is clamped into the new frame vector rather
+        // than indexing past it.
+        assert_eq!(restored_frame(29, 1.0), 28);
+        assert_eq!(restored_frame(29, -0.5), 0);
+        assert_eq!(restored_frame(29, f64::NAN), 0);
+        assert_eq!(restored_frame(29, f64::INFINITY), 0);
+        assert_eq!(restored_frame(0, 0.5), 0);
+    }
+
     // ————————————————— descriptors —————————————————
 
     #[test]
@@ -1695,10 +1836,126 @@ mod tests {
             TweenSet::load_from_json(&json!("nope"), 60.0, 120.0).unwrap_err(),
             TweenError::InvalidShape
         );
-        assert!(matches!(
-            TweenSet::load_from_json(&json!([{"data": [[0], [1]]}]), 60.0, 120.0),
-            Err(TweenError::Decode { .. })
-        ));
+        // A descriptor without an `id` is skipped like any other undecodable
+        // entry (the JS creates per tween and lets the rest survive, R-9).
+        assert!(
+            TweenSet::load_from_json(&json!([{"data": [[0], [1]]}]), 60.0, 120.0)
+                .expect("load")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tween_set_serialises_a_non_finite_descriptor_without_collapsing_the_others() {
+        // R-5: `beats/SET_BPM 0` stored `Infinity` in a BPM tween's `duration`.
+        // `serde_json` refuses a non-finite float, so `to_value` failed and
+        // `to_json` used to emit `{}` for the descriptor — and the set-level
+        // fallback wiped every tween from `state.tweens`.
+        let good = default_link_tween("in-good", Some(&json!(8)));
+        let good_descriptor = descriptor_from(&good);
+
+        let mut corrupt = TweenDescriptor::new("in-bad", vec![vec![0.0], vec![1.0]]);
+        corrupt.duration = f64::INFINITY;
+        corrupt.easing = "easeInOutSine".to_string();
+
+        let mut set = TweenSet::new();
+        set.insert_descriptor(good_descriptor, 60.0, 120.0);
+        set.insert_descriptor(corrupt, 60.0, 120.0);
+
+        let value = set.to_json();
+        let entries = value.as_array().expect("array");
+        assert_eq!(entries.len(), 2, "{value}");
+        // The healthy descriptor is untouched ...
+        assert_eq!(entries[0], good);
+
+        // ... and the corrupt one keeps everything that is representable,
+        // omitting only the non-finite field (a reload restores the default).
+        let corrupt_json = entries[1].as_object().expect("object");
+        assert_eq!(corrupt_json["id"], json!("in-bad"));
+        assert_eq!(corrupt_json["data"], json!([[0], [1]]));
+        assert_eq!(corrupt_json["easing"], json!("easeInOutSine"));
+        assert!(!corrupt_json.contains_key("duration"), "{value}");
+
+        // The document still loads as a set.
+        let reloaded = TweenSet::load_from_json(&value, 60.0, 120.0).expect("reload");
+        assert_eq!(
+            reloaded.ids().collect::<Vec<_>>(),
+            vec!["in-good", "in-bad"]
+        );
+        assert_eq!(
+            reloaded
+                .get("in-bad")
+                .expect("corrupt descriptor survives")
+                .descriptor()
+                .duration,
+            1000.0
+        );
+    }
+
+    #[test]
+    fn tween_set_load_skips_undecodable_entries_and_keeps_the_rest() {
+        // R-9: one bad descriptor used to fail the whole document, emptying
+        // the runtime while the offender stayed in `state.tweens`. The JS
+        // creates per tween (and unknown easings already fall back to linear),
+        // so the rest must survive.
+        let document = json!([
+            {"id": "good-1", "data": [[0], [1]], "useBpm": false},
+            "not a descriptor",
+            {"id": "bad-data", "data": "nope"},
+            {"id": "good-2", "data": [[0], [2]], "easing": "easeInOutSine"}
+        ]);
+
+        let set = TweenSet::load_from_json(&document, 60.0, 120.0).expect("load");
+        assert_eq!(set.ids().collect::<Vec<_>>(), vec!["good-1", "good-2"]);
+        assert_eq!(
+            set.to_json(),
+            json!([
+                {"id": "good-1", "data": [[0], [1]], "useBpm": false},
+                {"id": "good-2", "data": [[0], [2]], "easing": "easeInOutSine"}
+            ])
+        );
+
+        // The id-keyed live-worker shape is just as lenient.
+        let set = TweenSet::load_from_json(
+            &json!({
+                "tweens": {
+                    "a": {"id": "a", "data": [[0], [1]]},
+                    "b": {"id": "b", "data": "nope"}
+                }
+            }),
+            60.0,
+            120.0,
+        )
+        .expect("load");
+        assert_eq!(set.ids().collect::<Vec<_>>(), vec!["a"]);
+
+        // A document that is not a tween container is still an error: there is
+        // nothing to be lenient about.
+        assert_eq!(
+            TweenSet::load_from_json(&json!(42), 60.0, 120.0).unwrap_err(),
+            TweenError::InvalidShape
+        );
+    }
+
+    #[test]
+    fn tween_set_round_trip_is_stable_when_an_entry_is_skipped() {
+        let document = json!([
+            {"id": "kept", "data": [[0], [1]], "bpmDivision": 8, "useBpm": true},
+            {"id": "dropped", "duration": "nope"}
+        ]);
+
+        let first = TweenSet::load_from_json(&document, 60.0, 120.0)
+            .expect("load")
+            .to_json();
+        let second = TweenSet::load_from_json(&first, 60.0, 120.0)
+            .expect("reload")
+            .to_json();
+
+        assert_eq!(
+            first,
+            json!([{"id": "kept", "data": [[0], [1]], "bpmDivision": 8, "useBpm": true}])
+        );
+        assert_eq!(first, second);
     }
 
     #[test]

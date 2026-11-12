@@ -29,9 +29,18 @@
 //!
 //! Line numbers refer to the tree at commit `8a512b6e` (branch `rust-hybrid`).
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::engine_state::{EngineState, GALLERY_GROUP_NAME, Group};
+
+/// Upper bound on a captured row index.
+///
+/// Alias of [`crate::scene_rows::MAX_SCENE_ROWS`]: the performance grid and the
+/// capture path share one bound, so a `sceneRow` the grid rejects is never
+/// materialised by a capture either.
+pub use crate::scene_rows::MAX_SCENE_ROWS as MAX_CAPTURED_ROWS;
 
 /// A Scene's `groups` array: a snapshot per row, `None` for a row hole.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -88,9 +97,33 @@ fn group_snapshot(group: &Group) -> Value {
     }
 }
 
-/// `fillRowHoles` (`scene-capture.js:18-26`): every unset row becomes `None`.
-fn rows_from_sparse(rows: Vec<Option<Value>>) -> SceneGroups {
-    SceneGroups { groups: rows }
+/// `fillRowHoles` (`scene-capture.js:18-26`): every unset row becomes `None`,
+/// materialised up to the last row that was actually captured.
+///
+/// The JS kept a sparse array; the engine builds the rows sparsely too (a
+/// `BTreeMap`) so a corrupt `sceneRow` cannot size an allocation, then
+/// materialises only `0..=last_row`.
+fn rows_from_sparse(rows: BTreeMap<usize, Value>) -> SceneGroups {
+    let Some(last_row) = rows.keys().next_back().copied() else {
+        return SceneGroups::default();
+    };
+
+    let mut groups = vec![None; last_row + 1];
+
+    for (row, group) in rows {
+        if let Some(slot) = groups.get_mut(row) {
+            *slot = Some(group);
+        }
+    }
+
+    SceneGroups { groups }
+}
+
+/// Record a snapshot at `row`, ignoring an out-of-range index.
+fn insert_row(rows: &mut BTreeMap<usize, Value>, row: usize, group: Value) {
+    if row < MAX_CAPTURED_ROWS {
+        rows.insert(row, group);
+    }
 }
 
 /// `buildCapturedGroups` (`scene-capture.js:35-61`).
@@ -106,7 +139,7 @@ pub fn build_captured_groups(scene_id: &str, groups: &[Group]) -> Option<SceneGr
             group.scene_id.as_deref() == Some(scene_id)
                 && group.transition_ghost != Some(true)
                 && !is_gallery_group(group)
-                && group.scene_row.is_some()
+                && group.scene_row.is_some_and(|row| row < MAX_CAPTURED_ROWS)
         })
         .collect();
 
@@ -119,17 +152,12 @@ pub fn build_captured_groups(scene_id: &str, groups: &[Group]) -> Option<SceneGr
         return None;
     }
 
-    let max_row = captured
-        .iter()
-        .filter_map(|group| group.scene_row)
-        .max()
-        .unwrap_or(0);
-    let mut rows: Vec<Option<Value>> = vec![None; max_row + 1];
+    let mut rows: BTreeMap<usize, Value> = BTreeMap::new();
 
     for group in captured {
         // The filter above guarantees the row.
         if let Some(row) = group.scene_row {
-            rows[row] = Some(group_snapshot(group));
+            insert_row(&mut rows, row, group_snapshot(group));
         }
     }
 
@@ -150,18 +178,18 @@ pub fn build_captured_groups_from_live(groups: &[Group]) -> Option<SceneGroups> 
         return None;
     }
 
-    let mut rows: Vec<Option<Value>> = Vec::new();
+    let mut rows: BTreeMap<usize, Value> = BTreeMap::new();
 
     for (index, group) in captured.iter().enumerate() {
         // `Number.isFinite(group.sceneRow) && group.sceneRow >= 0
-        //   ? Math.trunc(group.sceneRow) : i`
-        let row = group.scene_row.unwrap_or(index);
+        //   ? Math.trunc(group.sceneRow) : i`; a `sceneRow` past the bound is
+        // treated like a missing one and falls back to the live index.
+        let row = group
+            .scene_row
+            .filter(|row| *row < MAX_CAPTURED_ROWS)
+            .unwrap_or(index);
 
-        if rows.len() <= row {
-            rows.resize(row + 1, None);
-        }
-
-        rows[row] = Some(group_snapshot(group));
+        insert_row(&mut rows, row, group_snapshot(group));
     }
 
     Some(rows_from_sparse(rows))
@@ -188,13 +216,13 @@ pub fn scene_has_groups(scene: &Value) -> bool {
 pub fn collect_scene_groups(scene: &Value, live_groups: &[Group]) -> Option<CollectedSceneGroups> {
     let scene_id = scene.get("id").and_then(Value::as_str).unwrap_or_default();
 
-    if !scene_id.is_empty() {
-        if let Some(stamped) = build_captured_groups(scene_id, live_groups) {
-            return Some(CollectedSceneGroups {
-                groups: stamped.groups,
-                from_live: false,
-            });
-        }
+    if !scene_id.is_empty()
+        && let Some(stamped) = build_captured_groups(scene_id, live_groups)
+    {
+        return Some(CollectedSceneGroups {
+            groups: stamped.groups,
+            from_live: false,
+        });
     }
 
     if scene_has_groups(scene) {
@@ -222,6 +250,8 @@ pub fn can_capture_scene(scene: &Value, live_groups: &[Group]) -> bool {
 /// The returned array is padded with `None` to that height when the grid is
 /// taller than the stamped rows, so a capture keeps the column's row shape.
 /// Pass `0` for "derive the height from the stamped rows" (the JS behaviour).
+/// The height is clamped to [`MAX_CAPTURED_ROWS`] for the same reason the row
+/// indexes are: `get_row_count` derives it from a JSON `sceneRow`.
 pub fn capture_live_state(
     state: &EngineState,
     scene_id: &str,
@@ -234,6 +264,8 @@ pub fn capture_live_state(
 
     let mut captured =
         build_captured_groups(scene_id, &state.groups).ok_or(CaptureError::SceneNotApplied)?;
+
+    let row_count = row_count.min(MAX_CAPTURED_ROWS);
 
     if captured.groups.len() < row_count {
         captured.groups.resize(row_count, None);
@@ -342,15 +374,55 @@ mod tests {
     }
 
     #[test]
-    fn build_captured_groups_orders_by_row_and_leaves_holes() {
-        // scene-capture.test.js:67-80
+    fn build_captured_groups_stops_at_the_last_captured_row() {
+        // scene-capture.test.js:67-80 — rows 0 and 2 capture, row 1 is a hole
+        // and no row 3+ is invented.
         let live = [
-            stamped("g2", "Row 1", "s1", 2),
             stamped("g0", "Row 0", "s1", 0),
+            stamped("g2", "Row 2", "s1", 2),
         ];
         let captured = build_captured_groups("s1", &live).unwrap();
 
+        assert_eq!(captured.groups.len(), 3);
         assert_eq!(ids(&captured), vec![Some("g0"), None, Some("g2")]);
+    }
+
+    #[test]
+    fn build_captured_groups_ignores_an_out_of_range_scene_row() {
+        // `sceneRow` comes from JSON; a corrupt/hostile value must not size an
+        // allocation (`vec![None; row + 1]` used to abort the process).
+        let live = [
+            stamped("g0", "Row 0", "s1", 0),
+            stamped("bad", "Bad", "s1", usize::MAX),
+        ];
+        let captured = build_captured_groups("s1", &live).unwrap();
+
+        assert_eq!(ids(&captured), vec![Some("g0")]);
+
+        // A Scene whose only stamped Group has a bogus row is not capturable.
+        let only_bad = [stamped("bad", "Bad", "s1", usize::MAX)];
+        assert!(build_captured_groups("s1", &only_bad).is_none());
+
+        // The 32-bit hostile value from the review is rejected the same way.
+        let wide = [stamped("bad", "Bad", "s1", 4_294_967_295)];
+        assert!(build_captured_groups("s1", &wide).is_none());
+    }
+
+    #[test]
+    fn max_captured_rows_bounds_the_array() {
+        let live = [stamped("last", "Last", "s1", MAX_CAPTURED_ROWS)];
+        assert!(
+            build_captured_groups("s1", &live).is_none(),
+            "a row index at the bound is out of range"
+        );
+
+        let live = [stamped("edge", "Edge", "s1", MAX_CAPTURED_ROWS - 1)];
+        let captured = build_captured_groups("s1", &live).unwrap();
+        assert_eq!(captured.groups.len(), MAX_CAPTURED_ROWS);
+        assert_eq!(
+            captured.groups[MAX_CAPTURED_ROWS - 1].as_ref().unwrap()["id"],
+            json!("edge")
+        );
     }
 
     #[test]
@@ -435,6 +507,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(ids(&captured), vec![Some("g0"), Some("g1")]);
+    }
+
+    #[test]
+    fn build_captured_groups_from_live_falls_back_for_a_hostile_scene_row() {
+        let mut bad = live_group("bad", "Bad");
+        bad.scene_row = Some(usize::MAX);
+        let captured = build_captured_groups_from_live(&[bad]).unwrap();
+
+        // The layer is still captured, at its live index, instead of sizing a
+        // `usize::MAX` array.
+        assert_eq!(ids(&captured), vec![Some("bad")]);
     }
 
     #[test]
@@ -579,6 +662,14 @@ mod tests {
         assert_eq!(captured.groups.len(), 4);
         assert_eq!(captured.groups[0].as_ref().unwrap()["id"], json!("g0"));
         assert!(captured.groups[1..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn capture_live_state_clamps_a_hostile_grid_height() {
+        let state = state_with(vec![stamped("g0", "Background", "s1", 0)]);
+        let captured = capture_live_state(&state, "s1", usize::MAX, false).unwrap();
+
+        assert_eq!(captured.groups.len(), MAX_CAPTURED_ROWS);
     }
 
     #[test]

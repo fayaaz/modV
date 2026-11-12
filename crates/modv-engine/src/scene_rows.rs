@@ -38,6 +38,17 @@ use serde_json::Value;
 use crate::engine_state::GALLERY_GROUP_NAME;
 use crate::scene_timing::clamp_cell_dwell_numeric;
 
+/// Upper bound on a performance-grid row index or row count.
+///
+/// `sceneRow` comes from JSON, so a hostile or corrupt document can carry
+/// `"sceneRow": 4294967295` (or `usize::MAX`). The JS used sparse arrays and
+/// never allocated; the engine materialises rows, so both the grid height
+/// ([`get_row_count`]) and the capture path
+/// ([`crate::scene_capture::MAX_CAPTURED_ROWS`], an alias of this constant)
+/// clamp to this bound. A real performance grid is a handful of rows, so 1024
+/// leaves ample headroom.
+pub const MAX_SCENE_ROWS: usize = 1024;
+
 /// `isGalleryGroup` (`scene-rows.js:5-6`): the Group is the internal Gallery.
 pub fn is_gallery_group(group: &Value) -> bool {
     group.get("name").and_then(Value::as_str) == Some(GALLERY_GROUP_NAME)
@@ -317,6 +328,11 @@ pub fn assign_scene_row_indexes(groups: &[Value], row_names: &[String]) -> Vec<O
 /// excluded), and the live Groups' stamped `sceneRow`/count. Transition ghosts
 /// and the Gallery Group never contribute; a corrupted/`null` entry is skipped
 /// rather than panicking.
+///
+/// The result is clamped to [`MAX_SCENE_ROWS`]: `sceneRow` is document data,
+/// so `"sceneRow": 4294967295` would otherwise report a 4-billion-row grid and
+/// make every caller that materialises rows (the capture path, the
+/// performance advance loops) allocate or iterate from it (R-15).
 pub fn get_row_count(scenes: &[Value], live_groups: &[Value], row_names: &[String]) -> usize {
     let mut row_count = row_names.len();
 
@@ -353,7 +369,7 @@ pub fn get_row_count(scenes: &[Value], live_groups: &[Value], row_names: &[Strin
         row_count = row_count.max(scene_row as usize);
     }
 
-    row_count.max(live_count)
+    row_count.max(live_count).min(MAX_SCENE_ROWS)
 }
 
 /// `getRowLabel` (`scene-rows.js:280-321`): the explicit row name, else the
@@ -1108,6 +1124,50 @@ mod tests {
             ),
             3
         );
+    }
+
+    #[test]
+    fn row_count_clamps_a_hostile_scene_row() {
+        // R-15: `sceneRow` comes from JSON, so `row + 1` used to size the grid
+        // (and the capture path's row vector) from the raw value — a snapshot
+        // with `"sceneRow": 4294967295` asked for a >100 GB allocation.
+        for hostile in [json!(u32::MAX), json!(usize::MAX), json!(1e300)] {
+            let live = [group_with("H", json!(["h"]), json!({"sceneRow": hostile}))];
+            assert_eq!(
+                get_row_count(&[], &live, &[]),
+                MAX_SCENE_ROWS,
+                "sceneRow {hostile}"
+            );
+        }
+
+        // Named rows are clamped to the same grid bound.
+        assert_eq!(
+            get_row_count(&[], &[], &vec!["row".to_string(); MAX_SCENE_ROWS + 8]),
+            MAX_SCENE_ROWS
+        );
+
+        // Ordinary, zero, negative and absent rows are unchanged.
+        assert_eq!(
+            get_row_count(
+                &[],
+                &[group_with("A", json!(["a"]), json!({"sceneRow": 0}))],
+                &[]
+            ),
+            1
+        );
+        assert_eq!(
+            get_row_count(
+                &[],
+                &[group_with("N", json!(["n"]), json!({"sceneRow": -5}))],
+                &[]
+            ),
+            1
+        );
+        assert_eq!(
+            get_row_count(&[], &[group_with("M", json!(["m"]), json!({}))], &[]),
+            1
+        );
+        assert_eq!(get_row_count(&[], &[], &[]), 0);
     }
 
     // ————————————————— normalizeRowNames —————————————————
