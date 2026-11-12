@@ -124,16 +124,22 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [x] Performance runtime: start/stop/tick, per-row dwell, crossfade ghosts,
       row-fade blending assigned to both group ids, Fade for manual changes,
       event-driven deltas
-- [ ] Scene-preview frames for the UI hover previews (≥ 25 fps) — engine
-      `preview/scene` endpoint + Scenes.vue engine branch in flight
+- [x] Scene hover previews via `preview/scene`: an isolated compositor renders
+      one Scene row (fresh ids, saved props) at the requested size, cached per
+      `(sceneId,row,width,height)` and invalidated by `scene_list_revision`
+      (~1.1 ms warm at 240×135); Scenes.vue polls at ~30 fps and blits with
+      `putImageData` (legacy worker path unchanged)
 - [x] Gallery/output previews in the UI: the main panel blits the composited
       preview ring; gallery tiles poll `preview/module`, which the supervisor
       queues (`Reply::Deferred`) and the window loop answers up to 4/frame
       from an isolated LRU-cached module instance (shader/2D/Point10/ISF)
 - [ ] Scene hover previews through `preview/scene` (in flight)
-- [ ] ISF shader scene transitions (Fade is the runtime transition for now)
-- [ ] Rename/removal migration for default Scenes on version bumps (engine
-      migration table + tests in flight; app hydration call pending)
+- [ ] ISF shader scene transitions (Fade is the runtime transition for now;
+      a documented behaviour approximation, not a regression)
+- [x] Rename/removal migration for default Scenes: version-keyed rules,
+      seeded-only renames (id/payload preserved) and removals, collision and
+      idempotency handling, applied before seeding; the production table is
+      empty until the first rename ships with a bump
 
 ## M6 — Media — partial
 
@@ -151,7 +157,15 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [x] Engine-side input-link evaluation: getter/state/mutation links,
       smoothing, min/max, meta inputs, `inputs/*` actions, 10 Hz deltas
 - [ ] Engine-owned capture wiring (AudioFeed + source selection in the engine
-      loop; the renderer pump stays as the default source until then)
+      loop; `--audio-source renderer|pipewire|input:<device>`, in flight; the
+      renderer pump remains the default)
+- [x] Tween runtime (WS-12a): `TweenDescriptor`/`TweenRuntime`/`TweenSet` port
+      `buildFrames` exactly (BPM durations, Math.round frame counts,
+      loop/alternate, steps, 41 penner easings verified against anime.js);
+      Input Links resolve tween paths read-then-advance, `beats/SET_BPM`
+      rebuilds durations and `fps/SET_FPS` rebuilds frames
+- [ ] Expression assignments (`new Function` in the JS) and JS plugins: a
+      documented M7 gap until a sandboxed evaluator/ABI lands
 - [ ] Camera/screen/video capture (GStreamer)
 
 ## M7 — Parity and release — pending
