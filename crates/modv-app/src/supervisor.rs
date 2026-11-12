@@ -181,7 +181,7 @@ impl EngineSupervisor {
     }
 
     /// Broadcast every queued `{ type, payload }` record as `state/delta`.
-    fn broadcast_deltas(&mut self, store: &mut Store) {
+    pub(crate) fn broadcast_deltas(&mut self, store: &mut Store) {
         for mutation in store.drain_deltas() {
             let event = Event::new(
                 "state/delta",

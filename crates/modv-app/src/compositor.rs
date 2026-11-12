@@ -101,11 +101,19 @@
 //!   nothing while `DrawContext::input_texture` is `None` — exactly what the
 //!   JS does when the video/texture source is missing. Media inputs land with
 //!   M6.
-//! * **No transition ghosts or scene transitions.** A row fade keeps the old
-//!   group alive with `transitionGhost: true`; M2/M3 treats such a group as an
-//!   ordinary group. The alpha-cull exception in `loop.js:257-266` is
-//!   implemented as `transition_ghost == Some(true)` so the check has the right
-//!   shape, but there is no row-transition state to consult yet (M5 adds it).
+//! * **Row crossfades (M5c).** A row fade keeps the old group alive with
+//!   `transitionGhost: true`. The compositor renders both halves even when
+//!   their alpha would be culled (the transition-group exception,
+//!   `loop.js:257-266`), blends them with `modv_render::frame_graph`'s
+//!   `RowFade` pass, and assigns the blend to **both** group ids so a later
+//!   row of the same frame inherits the crossfade (`loop.js:498-537`). The
+//!   ghost itself is never composited to main and never becomes `last_canvas`;
+//!   the incoming group composites the blend instead.
+//! * **Whole-scene Fade is per-group alpha.** `applySceneNow`'s Fade branch
+//!   keeps the outgoing groups as ordinary (non-ghost) layers and crossfades
+//!   every group's alpha; the compositor's normal `group.alpha` composite is
+//!   therefore the whole-scene fade. Shader/ISF transitions are WS-4 (the
+//!   frame graph keeps the `SceneTransition` hook).
 //! * **The Gallery group is inert.** In JS the Gallery group renders its
 //!   preview modules into an auxiliary canvas (the hovered item's) and the
 //!   loop skips everything when that canvas is absent (`loop.js:332-338`,
@@ -203,6 +211,63 @@ pub const PREVIEW_HEIGHT: u32 = 180;
 /// `:390`).
 const ALPHA_CULL: f64 = 0.001;
 
+/// One in-flight row crossfade, handed to the compositor for this frame
+/// (`rowTransitions[row]`, `scenes.js:2502-2512`).
+///
+/// The runtime updates the Groups' alphas; the compositor additionally blends
+/// the outgoing ghost and incoming Group textures so later rows inherit the
+/// crossfade instead of just the incoming half (`loop.js:498-537`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowFadeInfo {
+    /// Row index.
+    pub row: usize,
+    /// The incoming Group id.
+    pub group_id: String,
+    /// The outgoing ghost Group id.
+    pub ghost_group_id: String,
+    /// The ghost's starting alpha.
+    pub from_alpha: f64,
+    /// The incoming Group's target alpha.
+    pub target_alpha: f64,
+    /// Transition progress in `[0, 1]`.
+    pub progress: f64,
+}
+
+/// Per-frame row-fade bookkeeping.
+///
+/// `by_group` maps both halves' Group ids to their row so the alpha-cull
+/// exemption and the main composite can find the fade; `sources` is the "two
+/// ids" assignment (`loop.js:530-535`) — once both halves have rendered, both
+/// ids resolve to the same blended texture for inheritance, so a later row
+/// samples the crossfade rather than just the incoming canvas.
+#[derive(Default)]
+struct RowFadeState {
+    by_row: HashMap<usize, RowFadeInfo>,
+    by_group: HashMap<String, usize>,
+    sources: HashMap<String, TextureId>,
+    blended: HashSet<usize>,
+    halves: HashMap<usize, (Option<TextureId>, Option<TextureId>)>,
+}
+
+impl RowFadeState {
+    fn from_frame(frame: &FrameInfo) -> Self {
+        let mut by_row = HashMap::new();
+        let mut by_group = HashMap::new();
+        for fade in &frame.row_fades {
+            by_row.insert(fade.row, fade.clone());
+            by_group.insert(fade.group_id.clone(), fade.row);
+            by_group.insert(fade.ghost_group_id.clone(), fade.row);
+        }
+        Self {
+            by_row,
+            by_group,
+            sources: HashMap::new(),
+            blended: HashSet::new(),
+            halves: HashMap::new(),
+        }
+    }
+}
+
 /// Everything a frame needs besides the state itself.
 #[derive(Clone, Debug, Default)]
 pub struct FrameInfo {
@@ -219,6 +284,8 @@ pub struct FrameInfo {
     /// read the bands via [`FrameInfo::shader_audio`], 2D modules receive the
     /// whole frame in `ModuleContext`/`DrawContext`.
     pub audio: AudioFrame,
+    /// Row crossfades running this frame (empty when performance is idle).
+    pub row_fades: Vec<RowFadeInfo>,
 }
 
 impl FrameInfo {
@@ -351,6 +418,8 @@ pub struct Compositor {
     module_output: Option<OutputTexture>,
     /// Ids of the groups that have a texture registered in [`TextureSurfaces`].
     group_targets: HashSet<String>,
+    /// Row-fade blend targets keyed by row index (`loop.js:498-537`).
+    row_fade_targets: HashMap<usize, OutputTexture>,
     /// Pipeline slot per active module id.
     slots: HashMap<String, usize>,
     /// Modules whose slot creation failed; skipped without retrying each frame.
@@ -448,6 +517,7 @@ impl Compositor {
             module_input: None,
             module_output: None,
             group_targets: HashSet::new(),
+            row_fade_targets: HashMap::new(),
             slots: HashMap::new(),
             failed_modules: HashSet::new(),
             two_d: HashMap::new(),
@@ -519,6 +589,9 @@ impl Compositor {
         self.module_output = None;
         self.surfaces.remove(&TextureId::from(MAIN_TEXTURE_ID));
         self.surfaces.remove(&module_output_id());
+        for row in std::mem::take(&mut self.row_fade_targets).into_keys() {
+            self.surfaces.remove(&row_fade_texture_id(row));
+        }
     }
 
     /// Render one frame from `state`.
@@ -533,6 +606,19 @@ impl Compositor {
         self.ensure_output_textures();
         self.prune(state);
 
+        // Drop blend targets for rows that stopped fading.
+        let live_rows: HashSet<usize> = frame.row_fades.iter().map(|fade| fade.row).collect();
+        let stale_rows: Vec<usize> = self
+            .row_fade_targets
+            .keys()
+            .copied()
+            .filter(|row| !live_rows.contains(row))
+            .collect();
+        for row in stale_rows {
+            self.row_fade_targets.remove(&row);
+            self.surfaces.remove(&row_fade_texture_id(row));
+        }
+
         // The frame graph clears whatever is registered as `main` at the start
         // of every `execute()`. Group passes must not pay that cost, so main is
         // unregistered while groups render and re-registered for the final
@@ -540,13 +626,14 @@ impl Compositor {
         // one this frame presents.
         let main_texture = self.surfaces.remove(&main_id());
         let mut rendered: HashSet<String> = HashSet::new();
-        let groups = self.render_groups(state, frame, &mut rendered);
+        let mut fades = RowFadeState::from_frame(frame);
+        let groups = self.render_groups(state, frame, &mut rendered, &mut fades);
         if let Some(texture) = main_texture {
             self.surfaces.insert(main_id(), texture);
         }
         groups?;
 
-        self.compose_main(state)?;
+        self.compose_main(state, &fades)?;
         Ok(())
     }
 
@@ -556,6 +643,7 @@ impl Compositor {
         state: &EngineState,
         frame: &FrameInfo,
         rendered: &mut HashSet<String>,
+        fades: &mut RowFadeState,
     ) -> Result<(), CompositorError> {
         let order = state.group_index_render_order();
 
@@ -572,10 +660,11 @@ impl Compositor {
                 continue;
             }
 
-            // `loop.js:257-266`: a fading group may dip below the alpha cull;
-            // M2 has no row transitions yet, so `transitionGhost` is the only
-            // (currently unreachable) exception shape.
-            let is_transition_group = group.transition_ghost == Some(true);
+            // `loop.js:257-266`: a fading Group can dip below the alpha cull
+            // at the start/end of its fade. Keep rendering both halves so the
+            // inherited row canvas (and the blend) has both.
+            let fade_row = fades.by_group.get(&group.id).copied();
+            let is_transition_group = group.transition_ghost == Some(true) || fade_row.is_some();
 
             if group.enabled == GROUP_DISABLED
                 || group.modules.is_empty()
@@ -614,7 +703,14 @@ impl Compositor {
                     state.resolve_inherit_source(&group.inherit_from, position, &rendered_map)
                 {
                     if source.id != group.id {
-                        let source_id = self.group_target(&source.id);
+                        // Both halves of a row crossfade resolve to the same
+                        // blended texture; a ghost is never the inheritable
+                        // Group itself (`loop.js:530-535`).
+                        let source_id = fades
+                            .sources
+                            .get(&source.id)
+                            .cloned()
+                            .unwrap_or_else(|| self.group_target(&source.id));
                         self.composite(source_id, target_id.clone(), 1.0, RenderBlendMode::Normal)?;
                     }
                 }
@@ -624,6 +720,40 @@ impl Compositor {
             let module_ids = group.modules.clone();
             for module_id in module_ids {
                 self.render_module(state, group, &module_id, &target_id, frame)?;
+            }
+
+            // `loop.js:498-537`: while this row crossfades, blend the outgoing
+            // ghost and the incoming Group into the row's fade target. The
+            // caller assigns the blend to *both* Group ids so a later row (or
+            // an explicit inheritFrom target) samples the crossfade, not just
+            // the incoming canvas.
+            if let Some(row) = fade_row {
+                let fade_target = self.row_fade_target(row);
+                let entry = fades.halves.entry(row).or_default();
+                if group.transition_ghost == Some(true) {
+                    entry.0 = Some(target_id.clone());
+                } else {
+                    entry.1 = Some(target_id.clone());
+                }
+                if let (Some(from), Some(to)) = (entry.0.clone(), entry.1.clone()) {
+                    if let Some(fade) = fades.by_row.get(&row).cloned() {
+                        self.row_fade(
+                            &from,
+                            &to,
+                            &fade_target,
+                            fade.progress,
+                            fade.from_alpha,
+                            fade.target_alpha,
+                        )?;
+                        fades.blended.insert(row);
+                        fades
+                            .sources
+                            .insert(fade.group_id.clone(), fade_target.clone());
+                        fades
+                            .sources
+                            .insert(fade.ghost_group_id.clone(), fade_target);
+                    }
+                }
             }
 
             // `loop.js:538-557`: only a visible, fully-enabled, non-ghost group
@@ -1132,7 +1262,11 @@ impl Compositor {
     }
 
     /// Main composite (`loop.js:555-663`).
-    fn compose_main(&mut self, state: &EngineState) -> Result<(), CompositorError> {
+    fn compose_main(
+        &mut self,
+        state: &EngineState,
+        fades: &RowFadeState,
+    ) -> Result<(), CompositorError> {
         let order = state.group_index_render_order();
         let mut graph = FrameGraph::new();
 
@@ -1145,16 +1279,45 @@ impl Compositor {
             if group.name == GALLERY_GROUP_NAME {
                 continue;
             }
-            if group.enabled != GROUP_ENABLED || group.modules.is_empty() || !(group.alpha > 0.0) {
+            // A row-transition ghost only exists for the crossfade; the blend
+            // carries its outgoing contribution to main (`loop.js:498-537`).
+            if group.transition_ghost == Some(true) {
+                continue;
+            }
+            if group.enabled != GROUP_ENABLED || group.modules.is_empty() {
                 continue;
             }
 
-            let source = self.group_target(&group.id);
-            let blend = self.render_blend_mode(&group.composite_operation);
+            // Once both halves rendered, the blended texture stands in for
+            // the incoming Group: it already has the eased alphas baked in.
+            let blended_row = fades
+                .by_group
+                .get(&group.id)
+                .copied()
+                .filter(|row| fades.blended.contains(row));
+
+            let (source, alpha, blend) = match blended_row {
+                Some(row) => (
+                    row_fade_texture_id(row),
+                    1.0,
+                    self.render_blend_mode(&group.composite_operation),
+                ),
+                None => {
+                    if !(group.alpha > 0.0) {
+                        continue;
+                    }
+                    (
+                        self.group_target(&group.id),
+                        group.alpha,
+                        self.render_blend_mode(&group.composite_operation),
+                    )
+                }
+            };
+
             graph.push(PassNode::Composite {
                 source,
                 target: main_id(),
-                alpha: group.alpha,
+                alpha,
                 blend,
             });
         }
@@ -1200,6 +1363,20 @@ impl Compositor {
         self.clear_texture(&texture.texture, "group-allocate");
         self.surfaces.insert(id.clone(), texture.texture);
         self.group_targets.insert(group_id.to_string());
+        id
+    }
+
+    /// A row's crossfade blend target, allocated on demand and registered for
+    /// the graph (`loop.js:498-537`; one per fading row).
+    fn row_fade_target(&mut self, row: usize) -> TextureId {
+        let id = row_fade_texture_id(row);
+        if self.row_fade_targets.contains_key(&row) {
+            return id;
+        }
+        let (width, height) = self.size;
+        let texture = self.create_output_texture(&format!("modv-row-fade-{row}"), width, height);
+        self.surfaces.insert(id.clone(), texture.texture.clone());
+        self.row_fade_targets.insert(row, texture);
         id
     }
 
@@ -1388,6 +1565,31 @@ impl Compositor {
             target,
             alpha,
             blend,
+        });
+        self.executor.execute(&graph, &mut self.surfaces)?;
+        Ok(())
+    }
+
+    /// Run one `RowFade` node through the frame graph executor
+    /// (`renderRowFade`, `worker/row-transition.js:71-115`). The blended
+    /// result lands in `target`, which the caller assigns to both Group ids.
+    fn row_fade(
+        &mut self,
+        from: &TextureId,
+        to: &TextureId,
+        target: &TextureId,
+        progress: f64,
+        from_alpha: f64,
+        to_alpha: f64,
+    ) -> Result<(), CompositorError> {
+        let mut graph = FrameGraph::new();
+        graph.push(PassNode::RowFade {
+            from: from.clone(),
+            to: to.clone(),
+            target: target.clone(),
+            progress,
+            from_alpha,
+            to_alpha,
         });
         self.executor.execute(&graph, &mut self.surfaces)?;
         Ok(())
@@ -1790,6 +1992,11 @@ fn group_texture_id(group_id: &str) -> TextureId {
     TextureId::from(format!("group:{group_id}"))
 }
 
+/// The frame-graph texture id of a row's crossfade blend target.
+fn row_fade_texture_id(row: usize) -> TextureId {
+    TextureId::from(format!("row-fade:{row}"))
+}
+
 /// The frame-graph texture id of a 2D module's canvas.
 fn two_d_texture_id(module_id: &str) -> TextureId {
     TextureId::from(format!("two-d:{module_id}"))
@@ -1892,6 +2099,7 @@ mod tests {
             frame_index: 0,
             date: [2026.0, 10.0, 4.0, 0.0],
             audio: AudioFrame::default(),
+            row_fades: Vec::new(),
         }
     }
 
@@ -2269,6 +2477,123 @@ mod tests {
             lit_pixels(&first),
             lit_pixels(&second),
             "inheriting at alpha 1 copies the first group's pixels exactly"
+        );
+    }
+
+    #[test]
+    fn row_crossfade_blends_both_halves_and_drops_the_ghost_after() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+        let mut compositor = Compositor::new(&engine.device, &engine.queue);
+        compositor.resize(SIZE, SIZE);
+
+        let ball_props = json!({
+            "amount": 12,
+            "speed": 2.0,
+            "wrap": false,
+            "size": 4,
+            "intensity": 15,
+            "soundType": false,
+            "color": { "value": [255.0, 255.0, 255.0] },
+        });
+
+        let mut state = EngineState::new();
+        // The incoming row is still at alpha 0 (the runtime exempts it from
+        // the alpha cull via the active row fade) and draws nothing.
+        let mut incoming = group_with(
+            "incoming",
+            "Effects",
+            &["module-to"],
+            GROUP_ENABLED,
+            0.0,
+            true,
+            true,
+            json!(-1),
+        );
+        incoming.scene_row = Some(0);
+        // The outgoing ghost keeps the old visuals alive at its fade alpha.
+        let mut ghost = group_with(
+            "ghost",
+            "Effects",
+            &["module-ghost"],
+            GROUP_ENABLED,
+            0.5,
+            true,
+            true,
+            json!(-1),
+        );
+        ghost.scene_row = Some(0);
+        ghost.transition_ghost = Some(true);
+        // A later row inherits the row's canvas: it must see the *blend*, not
+        // the transparent incoming half.
+        let mut follower = group_with(
+            "follower",
+            "Foreground",
+            &["module-follow"],
+            GROUP_ENABLED,
+            1.0,
+            true,
+            true,
+            json!(-1),
+        );
+        follower.scene_row = Some(1);
+        state.groups.push(incoming);
+        state.groups.push(ghost);
+        state.groups.push(follower);
+        state.modules.insert(
+            "module-ghost".to_string(),
+            two_d_module("module-ghost", "Ball", ball_props),
+        );
+        state.modules.insert(
+            "module-to".to_string(),
+            two_d_module("module-to", "Texture 2D", json!({})),
+        );
+        state.modules.insert(
+            "module-follow".to_string(),
+            two_d_module("module-follow", "Texture 2D", json!({})),
+        );
+
+        let mut frame = frame_info();
+        frame.row_fades.push(RowFadeInfo {
+            row: 0,
+            group_id: "incoming".to_string(),
+            ghost_group_id: "ghost".to_string(),
+            from_alpha: 1.0,
+            target_alpha: 1.0,
+            progress: 0.5,
+        });
+
+        compositor
+            .render_frame(&state, &frame)
+            .expect("mid-fade frame renders");
+
+        let main = compositor.read_main_rgba8().expect("main reads back");
+        assert!(
+            lit_pixels(&main) > 0,
+            "the outgoing half must be visible mid-fade"
+        );
+        let follower_pixels = read_group_texture(&compositor, "follower");
+        assert!(
+            lit_pixels(&follower_pixels) > 0,
+            "the next row inherits the blended crossfade"
+        );
+        assert_eq!(
+            lit_pixels(&follower_pixels),
+            lit_pixels(&main),
+            "both Group ids resolve to the same blend"
+        );
+
+        // Fade finished: the ghost is gone and the incoming row is empty.
+        state.groups.retain(|group| group.id != "ghost");
+        compositor
+            .render_frame(&state, &frame_info())
+            .expect("post-fade frame renders");
+        let main = compositor.read_main_rgba8().expect("main reads back");
+        assert_eq!(
+            lit_pixels(&main),
+            0,
+            "the outgoing contribution disappears with the ghost"
         );
     }
 

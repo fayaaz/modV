@@ -43,29 +43,31 @@
 //! ## `applyScene` (`scenes.js:2529-2815`)
 //!
 //! Groups and Modules are rebuilt with **fresh ids** so the previous Groups
-//! could be crossfaded out. M5b has no crossfade yet (M5c), so the previously
-//! applied Scene's Groups — stamped with its `sceneId` — are removed in the
-//! same action, while the Gallery group and Groups that belong to no Scene
-//! survive. Row positions follow the Scene document (`sceneRow`, named rows
-//! resolved through [`modv_engine::scene_rows::assign_scene_row_indexes`]) and
-//! `null` row holes leave the live row untouched.
+//! can be crossfaded out. While performance mode is running the outgoing
+//! Scene-stamped Groups stay in the layer stack for `transitionSeconds` and
+//! fade against the incoming set (the Fade branch of `applySceneNow`); when
+//! performance is stopped the change applies immediately (shader transitions
+//! are WS-4). Groups that belong to no Scene survive either way. Row
+//! positions follow the Scene document (`sceneRow`, named rows resolved
+//! through [`modv_engine::scene_rows::assign_scene_row_indexes`]) and `null`
+//! row holes leave the live row untouched.
 //!
 //! ## Known simplifications (documented, not silent)
 //!
-//! - **No crossfade ghosts.** `applySceneNow` keeps the outgoing Groups alive
-//!   for a shader/fade transition and only removes them once it completes;
-//!   M5b removes them immediately. The transition machinery is M5c.
-//! - **Clock/`startPerformance`/`tick` are M5c.** `setPerformanceEnabled` only
-//!   stores the flag and config. `scenes/startPerformance`,
-//!   `scenes/stopPerformance`, `scenes/tick`, `scenes/nextScene`,
-//!   `scenes/applySceneRow` and `scenePreview/*` keep the existing
-//!   log-once no-op until the runtime loop lands.
+//! - **Shader/ISF scene transitions are WS-4.** The allowed-transition list
+//!   is only consulted during performance mode, where every change is a Fade
+//!   (`scene-transition-pick.js`). A shader name is mapped to Fade, which is
+//!   the JS `fallbackToFade` behaviour.
+//! - **Performance runtime lives in [`crate::performance`].**
+//!   `scenes/startPerformance`, `scenes/stopPerformance`, `scenes/tick`,
+//!   `scenes/nextScene` and the row-level apply are wired there; partial-Scene
+//!   previews (`scenePreview/*`) remain M5d.
 //! - **Default-scene rename/removal migration is not applied.** Seeding uses
 //!   [`modv_engine::default_scenes::get_scenes_to_seed`] exactly; the
 //!   `get_default_scenes_to_replace`/`_to_remove` migration requires building
 //!   the replacement documents through the same snapshot path and is deferred
-//!   to M5c with the rest of the performance-state work.
-//! - **Scene preview frames are M5c/M5d.** Nothing here touches the preview
+//!   with the rest of the performance-state work.
+//! - **Scene preview frames are M5d.** Nothing here touches the preview
 //!   ring.
 //! - **No meyda smoothing id.** `createBassLink` asks
 //!   `meyda/getSmoothingId` for the feature smoothing argument; the engine has
@@ -101,12 +103,14 @@ use modv_engine::scene_link_defaults::{
     is_auto_link_excluded,
 };
 use modv_engine::scene_rows::{
-    assign_scene_row_indexes, get_row_count, matches_row_name, normalize_row_names,
-    row_family_is_shared, strict_matches_row_name,
+    assign_scene_row_indexes, get_row_count, get_row_group_index, is_row_cell_empty,
+    matches_row_name, normalize_row_names, row_family_is_shared, strict_matches_row_name,
 };
 use modv_engine::scene_timing::{
-    normalize_performance_timing, normalize_scene_timing, to_finite_number,
+    normalize_performance_timing, normalize_scene_timing, normalize_transition_duration,
+    to_finite_number,
 };
+use modv_engine::scene_transition_pick::{FADE_TRANSITION, NONE_TRANSITION};
 use modv_engine::scenes_playlist::{
     ImportMode, export_playlist, generate_scene_id, import_playlist_with,
     normalize_performance_data, normalize_transition_list,
@@ -264,6 +268,22 @@ struct ParsedStoredScenes {
     defaults_version: i64,
     defaults_seeded: bool,
     seeded_default_scenes: Vec<String>,
+}
+
+/// What a row-level Scene apply did, so the performance runtime can record the
+/// crossfade (`applySceneRowNow`, `scenes.js:2247-2523`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RowApplyOutcome {
+    /// The incoming (live) Group id.
+    pub group_id: String,
+    /// The outgoing Group kept alive as a fading ghost, when the row faded.
+    pub ghost_group_id: Option<String>,
+    /// The ghost's starting alpha.
+    pub from_alpha: f64,
+    /// The incoming Group's target alpha.
+    pub target_alpha: f64,
+    /// Crossfade duration (`transitionSeconds`).
+    pub duration: f64,
 }
 
 impl Store {
@@ -528,10 +548,31 @@ impl Store {
             .unwrap_or_default();
         let row_indexes = assign_scene_row_indexes(&group_snapshots, &row_names);
 
-        // `applySceneNow` finishes any in-flight transition first; there is no
-        // transition machinery yet (M5c), so the previous Scene's Groups are
-        // simply released here.
-        self.remove_applied_scene_groups(&scene_id);
+        // `applySceneNow` finishes any in-flight transition first, then keeps
+        // the outgoing Groups alive when the change crossfades
+        // (`scenes.js:2538-2568`).
+        self.complete_all_row_transitions();
+        self.complete_whole_scene_transition();
+
+        let old_groups: Vec<Group> = self
+            .state
+            .groups
+            .iter()
+            .filter(|group| {
+                // Every Scene-stamped Group is managed by the Scene system,
+                // including rows applied one-by-one in performance mode.
+                // Groups that belong to no Scene (a hand-built "Free" layer)
+                // survive, matching the M5b replacement rule.
+                group.name != GALLERY_GROUP_NAME
+                    && group.transition_ghost != Some(true)
+                    && group.scene_id.is_some()
+            })
+            .cloned()
+            .collect();
+        let old_ids: HashSet<String> = old_groups.iter().map(|group| group.id.clone()).collect();
+        self.state
+            .groups
+            .retain(|group| !old_ids.contains(&group.id));
 
         let mut input_map: HashMap<String, String> = HashMap::new();
         let mut created: Vec<CreatedGroup> = Vec::new();
@@ -600,6 +641,10 @@ impl Store {
                     .map(|old| (old, created.group.id.clone()))
             })
             .collect();
+        let created_alphas: Vec<(String, f64)> = created
+            .iter()
+            .map(|created| (created.group.id.clone(), created.group.alpha))
+            .collect();
         for created_group in created {
             self.insert_group_at_row(created_group.group);
         }
@@ -608,9 +653,52 @@ impl Store {
         // (`scenes.js:2679-2703`).
         self.remap_scene_inherit(&group_snapshots, &id_map);
 
-        // The final layer stack, authoritative for the mirror (the JS
-        // `groups/orderByIds` action commits `REPLACE_GROUPS`).
-        self.emit_group_order();
+        // A manual change during performance crossfades, exactly like
+        // `applySceneNow`'s Fade branch: the outgoing Groups stay in the
+        // stack for `transitionSeconds` with their own alpha while the
+        // incoming set fades in. While performance mode is stopped the engine
+        // still applies immediately: shader/ISF transitions are WS-4, and the
+        // allowed-transition list only describes those (documented deviation;
+        // `None` is also the JS instant-switch behaviour).
+        let transition_name = if self.performance.enabled {
+            self.pick_scene_transition_name()
+        } else {
+            crate::scene_ops::NONE_TRANSITION.to_string()
+        };
+        let fade = transition_name == FADE_TRANSITION && !old_groups.is_empty();
+        if fade {
+            let mut from = Vec::new();
+            for mut group in old_groups {
+                // The ghost reuses the outgoing Modules but not the Group
+                // control inputs, which belong to the replaced Group.
+                for (_, key) in GROUP_CONTROL_INPUTS {
+                    if let Some(input_id) = group_input_id(&group, *key) {
+                        self.remove_input(&input_id);
+                    }
+                    set_group_input_id(&mut group, *key, None);
+                }
+                from.push((group.id.clone(), group.alpha));
+                self.state.groups.push(group);
+            }
+            for (group_id, _) in &created_alphas {
+                if let Some(group) = self.state.find_group_mut(group_id) {
+                    group.alpha = 0.0;
+                }
+                self.deltas.push(
+                    "groups/UPDATE_GROUP",
+                    json!({ "groupId": group_id, "data": { "alpha": 0.0 } }),
+                );
+            }
+            self.emit_group_order();
+            self.begin_whole_scene_transition(from, created_alphas, FADE_TRANSITION.to_string());
+        } else {
+            for group in old_groups {
+                self.release_group(group);
+            }
+            // The final layer stack, authoritative for the mirror (the JS
+            // `groups/orderByIds` action commits `REPLACE_GROUPS`).
+            self.emit_group_order();
+        }
 
         self.restore_scene_inputs(&scene, &input_map);
         self.applied_scene_id = Some(scene_id.clone());
@@ -621,8 +709,224 @@ impl Store {
         // (`scenes.js:4156-4158`).
         self.deltas.push("scenes/SET_ACTIVE_ROWS", active_rows);
 
+        // A whole-scene change rebuilds every row; re-seed the dwell runtimes
+        // with the new Groups so the next tick does not treat them as stale
+        // (`resetAllRowRuntime`, `scenes.js:2792-2799`).
+        if self.performance.enabled {
+            let row_count = self.performance_row_count();
+            for row in 0..row_count {
+                let live = self.find_live_row_group(row);
+                let scene_id_for_row = live
+                    .as_ref()
+                    .and_then(|group| group.scene_id.clone())
+                    .or_else(|| Some(scene_id.clone()));
+                let group_id = live.as_ref().map(|group| group.id.clone());
+                self.reset_row_runtime(row, scene_id_for_row, group_id);
+            }
+        }
+
         self.persist_best_effort();
         Ok(json!({ "sceneId": scene_id }))
+    }
+
+    /// The row-level half of `applyScene` (`applySceneRowNow`,
+    /// `scenes.js:2250-2525`): replaces the Group at one row only, keeping the
+    /// other rows untouched, and optionally keeps the outgoing Group alive as
+    /// a `transitionGhost` for the crossfade.
+    pub(crate) fn apply_scene_row_now(
+        &mut self,
+        scene_id: &str,
+        row: usize,
+        fade: bool,
+    ) -> Option<RowApplyOutcome> {
+        let raw = self
+            .scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.get("id").and_then(Value::as_str) == Some(scene_id))?
+            .clone();
+        let scene = modv_engine::scenes_playlist::normalize_scene_document(&raw)?;
+        let row_names = normalize_row_names(self.scenes.performance.get("rowNames"));
+        if is_row_cell_empty(&scene, row, &row_names) {
+            return None;
+        }
+        let snapshot_index = get_row_group_index(&scene, row, &row_names)?;
+        let snapshot = scene
+            .get("groups")
+            .and_then(Value::as_array)?
+            .get(snapshot_index)?
+            .as_object()?
+            .clone();
+
+        self.complete_whole_scene_transition();
+        self.complete_row_transition(row);
+
+        let old_group = self.find_live_row_group(row);
+        let old_modules = old_group
+            .as_ref()
+            .map(|group| group.modules.clone())
+            .unwrap_or_default();
+        let from_alpha = old_group.as_ref().map(|group| group.alpha).unwrap_or(0.0);
+        let target_alpha = snapshot.get("alpha").and_then(Value::as_f64).unwrap_or(1.0);
+        let fade = fade && old_group.is_some() && !old_modules.is_empty() && target_alpha > 0.0;
+        let duration =
+            normalize_transition_duration(self.scenes.performance.get("transitionSeconds"));
+
+        let mut input_map: HashMap<String, String> = HashMap::new();
+        let mut new_group = self.build_live_group(&snapshot, scene_id, row, &mut input_map);
+        new_group.inherit_from = self.remap_row_inherit(&scene, &snapshot);
+
+        let module_snapshots = scene
+            .get("modules")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut new_modules = Vec::new();
+        let module_keys = snapshot
+            .get("modules")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for key in module_keys {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            let Some(module_snapshot) = module_snapshots.get(key) else {
+                continue;
+            };
+            if let Some(module_id) = self.build_live_module(module_snapshot, &mut input_map) {
+                new_modules.push(module_id);
+            }
+        }
+
+        let group_id = new_group.id.clone();
+        let ghost_group_id = if let Some(old) = old_group {
+            let old_index = self
+                .state
+                .groups
+                .iter()
+                .position(|group| group.id == old.id)?;
+
+            // The replaced Group's control inputs are stale; the incoming
+            // Group owns fresh ones and the ghost needs none.
+            for (_, key) in GROUP_CONTROL_INPUTS {
+                if let Some(input_id) = group_input_id(&old, *key) {
+                    self.remove_input(&input_id);
+                }
+            }
+            self.deltas
+                .push("groups/REMOVE_GROUP", json!({ "id": old.id }));
+
+            new_group.modules = new_modules.clone();
+            new_group.alpha = if fade { 0.0 } else { target_alpha };
+            self.deltas.push(
+                "groups/ADD_GROUP",
+                json!({ "group": json_value(&new_group) }),
+            );
+            self.state.groups[old_index] = new_group.clone();
+
+            if fade {
+                let ghost = Group {
+                    id: crate::ids::uuid_v4(),
+                    name: old.name.clone(),
+                    hidden: old.hidden,
+                    modules: old.modules.clone(),
+                    enabled: old.enabled,
+                    alpha: from_alpha,
+                    inherit: old.inherit,
+                    inherit_from: old.inherit_from.clone(),
+                    pipeline: old.pipeline,
+                    clearing: old.clearing,
+                    composite_operation: old.composite_operation.clone(),
+                    scene_id: old.scene_id.clone(),
+                    scene_row: Some(row),
+                    transition_ghost: Some(true),
+                    draw_to_canvas_id: old.draw_to_canvas_id.clone(),
+                    alpha_input_id: None,
+                    enabled_input_id: None,
+                    clearing_input_id: None,
+                    inherit_input_id: None,
+                    composite_operation_input_id: None,
+                    pipeline_input_id: None,
+                    extra: old.extra.clone(),
+                };
+                let ghost_id = ghost.id.clone();
+                self.state.groups.insert(old_index + 1, ghost.clone());
+                self.deltas
+                    .push("groups/ADD_GROUP", json!({ "group": json_value(&ghost) }));
+                Some(ghost_id)
+            } else {
+                None
+            }
+        } else {
+            new_group.modules = new_modules.clone();
+            new_group.alpha = target_alpha;
+            self.insert_group_at_row(new_group.clone());
+            self.deltas.push(
+                "groups/ADD_GROUP",
+                json!({ "group": json_value(&new_group) }),
+            );
+            None
+        };
+
+        // Without a ghost nothing references the outgoing Modules any more.
+        if ghost_group_id.is_none() {
+            for module_id in &old_modules {
+                let still_used = self
+                    .state
+                    .groups
+                    .iter()
+                    .any(|group| group.modules.iter().any(|id| id == module_id));
+                if !still_used {
+                    self.drop_active_module(module_id);
+                }
+            }
+        }
+
+        self.restore_scene_inputs(&scene, &input_map);
+
+        // `groups/orderByIds` (`scenes.js:2515-2520`): the mirror's layer
+        // stack follows the live row order, with a fading ghost after its
+        // incoming Group.
+        self.emit_group_order();
+
+        self.deltas.push(
+            "scenes/SET_ACTIVE_ROW",
+            json!({ "rowIndex": row, "sceneId": scene_id, "groupId": group_id }),
+        );
+        if row == 0 {
+            self.set_current_scene(scene_id);
+        }
+
+        Some(RowApplyOutcome {
+            group_id,
+            ghost_group_id,
+            from_alpha,
+            target_alpha,
+            duration,
+        })
+    }
+
+    /// Map a Scene document's `inheritFrom` target onto the live Group at the
+    /// target row (`scenes.js:2450-2480`, `sceneGroupIdMap`).
+    fn remap_row_inherit(&self, scene: &Value, snapshot: &Map<String, Value>) -> InheritFrom {
+        let Some(target) = snapshot.get("inheritFrom").and_then(Value::as_str) else {
+            return InheritFrom::Previous(-1);
+        };
+        let Some(index) = scene
+            .get("groups")
+            .and_then(Value::as_array)
+            .and_then(|groups| {
+                groups
+                    .iter()
+                    .position(|group| group.get("id").and_then(Value::as_str) == Some(target))
+            })
+        else {
+            return InheritFrom::Previous(-1);
+        };
+        self.find_live_row_group(index)
+            .map(|group| InheritFrom::Group(group.id))
+            .unwrap_or(InheritFrom::Previous(-1))
     }
 
     /// `scenes/captureLiveStateToScene` (`scenes.js:1956-2057`).
@@ -935,7 +1239,6 @@ impl Store {
     }
 
     /// `scenes/setRowNames` (`scenes.js:3376-3397`).
-    ///
     /// Naming/reordering a row also remaps the live Groups so the grid and the
     /// layer stack snap into place (`remapRowGroupsForNames`, `scenes.js:1247-1315`).
     pub fn set_row_names(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
@@ -989,6 +1292,10 @@ impl Store {
                     .unwrap_or_else(|| value.as_f64().map(|number| number != 0.0).unwrap_or(false))
             })
             .unwrap_or(false);
+        self.performance.enabled = enabled;
+        if !enabled {
+            self.performance.rows.clear();
+        }
         self.set_performance_value("enabled", Value::Bool(enabled));
         self.persist_best_effort();
         Ok(Value::Bool(enabled))
@@ -997,7 +1304,7 @@ impl Store {
     // ————————————————— internals —————————————————
 
     /// `true` when performance mode is running (`state.performance.enabled`).
-    fn performance_enabled(&self) -> bool {
+    pub(crate) fn performance_enabled(&self) -> bool {
         self.scenes
             .performance
             .get("enabled")
@@ -1078,35 +1385,8 @@ impl Store {
             .push("groups/REPLACE_GROUPS", json!({ "groups": value }));
     }
 
-    /// Release every Group stamped with `scene_id` (and, when it is the Scene
-    /// being re-applied, the incoming Scene's own Groups too).
-    fn remove_applied_scene_groups(&mut self, scene_id: &str) {
-        let previous = self.applied_scene_id.clone();
-        let removable: HashSet<String> = [previous, Some(scene_id.to_string())]
-            .into_iter()
-            .flatten()
-            .collect();
-
-        let group_ids: Vec<String> = self
-            .state
-            .groups
-            .iter()
-            .filter(|group| {
-                group.name != GALLERY_GROUP_NAME
-                    && group
-                        .scene_id
-                        .as_ref()
-                        .is_some_and(|id| removable.contains(id))
-            })
-            .map(|group| group.id.clone())
-            .collect();
-        for group_id in group_ids {
-            self.remove_live_group(&group_id);
-        }
-    }
-
     /// `groups/removeGroup` + `cleanUpGroupResources` (`groups.js:204-244`).
-    fn remove_live_group(&mut self, group_id: &str) {
+    pub(crate) fn remove_live_group(&mut self, group_id: &str) {
         let Some(index) = self
             .state
             .groups
@@ -1116,7 +1396,13 @@ impl Store {
             return;
         };
         let group = self.state.groups.remove(index);
+        self.release_group(group);
+    }
 
+    /// Release a Group already detached from `state.groups`: drop Modules no
+    /// other Group still references, remove its control inputs and emit the
+    /// mirror's `REMOVE_GROUP`.
+    fn release_group(&mut self, group: Group) {
         for module_id in &group.modules {
             let still_used = self
                 .state
@@ -1531,7 +1817,7 @@ impl Store {
     fn scene_active_rows(&self, scene_id: &str) -> Value {
         let mut rows = Map::new();
         for group in &self.state.groups {
-            if group.scene_id.as_deref() != Some(scene_id) {
+            if group.scene_id.as_deref() != Some(scene_id) || group.transition_ghost == Some(true) {
                 continue;
             }
             let Some(row) = group.scene_row else {
@@ -1546,7 +1832,7 @@ impl Store {
     }
 
     /// Active rows implied by every live Scene-stamped Group.
-    fn live_scene_rows(&self) -> Value {
+    pub(crate) fn live_scene_rows(&self) -> Value {
         let mut rows = Map::new();
         for group in &self.state.groups {
             let Some(scene_id) = &group.scene_id else {
@@ -1555,6 +1841,9 @@ impl Store {
             let Some(row) = group.scene_row else {
                 continue;
             };
+            if group.transition_ghost == Some(true) {
+                continue;
+            }
             rows.insert(
                 row.to_string(),
                 json!({ "sceneId": scene_id, "groupId": group.id }),
@@ -1567,7 +1856,7 @@ impl Store {
         self.set_performance_value("currentSceneId", json!(scene_id));
     }
 
-    fn set_performance_value(&mut self, key: &str, value: Value) {
+    pub(crate) fn set_performance_value(&mut self, key: &str, value: Value) {
         if !self.scenes.performance.is_object() {
             self.scenes.performance = default_performance();
         }
@@ -1682,7 +1971,7 @@ impl Store {
         }
     }
 
-    fn persist_best_effort(&self) {
+    pub(crate) fn persist_best_effort(&self) {
         if let Err(error) = self.persist_scenes() {
             eprintln!("engine: WARN could not save the Scene list: {error}");
         }

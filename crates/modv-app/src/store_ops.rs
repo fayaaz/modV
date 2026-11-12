@@ -62,8 +62,8 @@
 //! * **Unknown actions are accepted.** The renderer fires boot-time and
 //!   UI actions the engine does not implement yet; those log once and return
 //!   `Ok(null)`, exactly like the M1 supervisor did. The Scene actions live in
-//!   [`crate::scene_ops`] (WS-8 / M5b); the performance runtime
-//!   (`scenes/tick`, transitions, previews) is still no-op until M5c/M5d.
+//!   [`crate::scene_ops`] (WS-8 / M5b) and the performance runtime in
+//!   [`crate::performance`] (M5c); Scene hover previews remain M5d.
 
 use std::collections::HashSet;
 use std::fs;
@@ -134,6 +134,10 @@ pub struct Store {
     pub(crate) scenes_path: Option<std::path::PathBuf>,
     /// The Scene this store last applied (`applySceneNow`'s active Scene).
     pub(crate) applied_scene_id: Option<String>,
+    /// Performance-mode runtime: per-row dwells, row crossfades and the
+    /// whole-scene fade (`scenes.js` module-level `rowRuntime`,
+    /// `rowTransitions` and `transition`).
+    pub(crate) performance: crate::performance::PerformanceRuntime,
     /// The current audio frame handed to modules and shader uniforms.
     ///
     /// Filled by `meyda/SET_BANDS` from the renderer's audio pump (see
@@ -165,6 +169,14 @@ impl Store {
         let scenes_path = state_path
             .and_then(std::path::Path::parent)
             .map(|parent| parent.join(crate::scene_ops::SCENES_STORAGE_FILENAME));
+        // Seed the performance picks from the wall clock, matching the JS
+        // `Math.random()` call sites. Tests replace this with a fixed seed.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        let mut performance = crate::performance::PerformanceRuntime::default();
+        performance.rng = crate::performance::Rng::seeded(seed);
         Self {
             state: EngineState::new(),
             deltas: DeltaStream::new(),
@@ -172,6 +184,7 @@ impl Store {
             scenes: crate::scene_ops::ScenesState::default(),
             scenes_path,
             applied_scene_id: None,
+            performance,
             audio: AudioFrame::default(),
             warned: HashSet::new(),
         }
@@ -242,6 +255,47 @@ impl Store {
             "scenes/setPerformanceEnabled" => self.set_performance_enabled(params),
             "scenes/applyScene" => self.apply_scene_action(params),
             "scenes/captureLiveStateToScene" => self.capture_live_state_to_scene(params),
+            // ————————————————— Performance runtime (WS-8 / M5c) ————————
+            "scenes/startPerformance" => self.start_performance(),
+            "scenes/stopPerformance" => self.stop_performance(),
+            "scenes/tick" => {
+                let delta = params.get("delta").and_then(Value::as_f64).unwrap_or(0.0);
+                self.tick_scenes(delta)
+            }
+            "scenes/applySceneRow" => {
+                let Some(scene_id) = params.get("sceneId").and_then(Value::as_str) else {
+                    return Ok(Value::Null);
+                };
+                let Some(row) = params
+                    .get("rowIndex")
+                    .or_else(|| params.get("row"))
+                    .and_then(Value::as_u64)
+                else {
+                    return Ok(Value::Null);
+                };
+                let outcome = self.apply_scene_row_transition(scene_id, row as usize)?;
+                Ok(outcome
+                    .map(|outcome| {
+                        json!({
+                            "sceneId": scene_id,
+                            "rowIndex": row,
+                            "groupId": outcome.group_id,
+                            "ghostGroupId": outcome.ghost_group_id,
+                        })
+                    })
+                    .unwrap_or(Value::Null))
+            }
+            "scenes/nextScene" => {
+                let scene_id = self.pick_next_whole_scene();
+                match scene_id {
+                    Some(scene_id) => {
+                        let mut params = Map::new();
+                        params.insert("sceneId".to_string(), json!(scene_id));
+                        self.apply_scene_action(&params)
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
             "scenes/persistScenes" => {
                 if let Err(error) = self.persist_scenes() {
                     eprintln!("engine: WARN could not save the Scene list: {error}");

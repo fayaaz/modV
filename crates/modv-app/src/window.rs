@@ -9,11 +9,14 @@
 //!
 //! M2 removed the M0 `ChromaticLine`/`SyntheticSine` demo from this path: the
 //! window now renders whatever the store describes (an empty state presents
-//! the near-black clear). The demo scene remains in `modv-renderers` for M4.
-//! `--audio-fixture` is still parsed for the M0 headless/report path but has no
-//! effect here — M3 takes the audio frame from the store, where the renderer's
-//! audio pump writes it (`meyda/SET_BANDS`); the engine itself does no analysis
-//! yet (WS-9 / M6).
+//! the near-black clear). `--audio-fixture` is still parsed for the M0
+//! headless/report path but has no effect here — M3 takes the audio frame from
+//! the store, where the renderer's audio pump writes it (`meyda/SET_BANDS`);
+//! the engine itself does no analysis yet (WS-9 / M6).
+//!
+//! Each frame also dispatches `scenes/tick` with the real frame delta before
+//! rendering (`worker/loop.js:94-111`), but only while performance mode is
+//! running or a crossfade is active, so idle frames stay cheap.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,7 +30,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::cli::Cli;
-use crate::compositor::{Compositor, FrameInfo};
+use crate::compositor::{Compositor, FrameInfo, RowFadeInfo};
 use crate::report::{AdapterSummary, report_json};
 use crate::store_ops::Store;
 use crate::supervisor::EngineSupervisor;
@@ -253,6 +256,22 @@ impl WindowedApp {
             }
         }
 
+        // 1b. Advance the Scene/performance state machine before rendering
+        // (`loop.js:94-111`). Cheap when idle: `scenes_tick_due` is false
+        // unless performance mode runs or a crossfade is active.
+        if self.store.scenes_tick_due() {
+            let delta = dt_duration.as_secs_f64() * 1000.0;
+            if let Err(error) = self
+                .store
+                .dispatch("scenes/tick", serde_json::json!({ "delta": delta }))
+            {
+                eprintln!("engine: WARN scenes/tick failed: {error}");
+            }
+            if let Some(supervisor) = &mut self.supervisor {
+                supervisor.broadcast_deltas(&mut self.store);
+            }
+        }
+
         let frame_info = FrameInfo {
             time_seconds: self.start.elapsed().as_secs_f32(),
             frame_index: self.frames_done,
@@ -262,6 +281,20 @@ impl WindowedApp {
             // holds the latest frame. There is no engine-side analysis yet
             // (WS-9 / M6); wave/FFT/features stay zeroed.
             audio: self.store.audio().clone(),
+            row_fades: self
+                .store
+                .performance_runtime()
+                .row_transitions
+                .values()
+                .map(|transition| RowFadeInfo {
+                    row: transition.row,
+                    group_id: transition.group_id.clone(),
+                    ghost_group_id: transition.ghost_group_id.clone(),
+                    from_alpha: transition.from_alpha,
+                    target_alpha: transition.target_alpha,
+                    progress: transition.progress(),
+                })
+                .collect(),
         };
 
         // 2. Render the state into the compositor's main texture.

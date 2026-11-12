@@ -10,6 +10,7 @@ mod fixtures;
 mod headless;
 mod ids;
 mod module_registry;
+mod performance;
 mod report;
 mod scene_ops;
 mod store_ops;
