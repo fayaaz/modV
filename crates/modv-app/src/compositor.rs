@@ -818,9 +818,13 @@ pub struct Compositor {
     failed_isf: HashSet<String>,
     /// Uploaded video frames keyed by media source id (WS-10).
     media_textures: HashMap<String, MediaTexture>,
-    /// Media source ids in start order — the list the Webcam module's 1-based
-    /// `camera` prop indexes (`media-inputs.js:150-158`).
+    /// Media source ids in start order (all kinds; textures are uploaded for
+    /// every source).
     media_order: Vec<String>,
+    /// Camera-like source ids in start order — the list the Webcam module's
+    /// 1-based `camera` prop indexes (`media-inputs.js:150-158`). Files are
+    /// excluded; screen nodes count as cameras.
+    media_camera_order: Vec<String>,
     /// One-shot log keys (unknown blend mode, skipped module type, ...).
     warned: HashSet<String>,
     /// Isolated gallery-thumbnail renderer (`preview/module`), created on the
@@ -979,6 +983,7 @@ impl Compositor {
             failed_isf: HashSet::new(),
             media_textures: HashMap::new(),
             media_order: Vec::new(),
+            media_camera_order: Vec::new(),
             warned: HashSet::new(),
             previews: None,
             scene_previews: None,
@@ -1092,6 +1097,10 @@ impl Compositor {
             self.media_order.clear();
             self.media_order.extend_from_slice(media.ids());
         }
+        let cameras = media.camera_ids();
+        if self.media_camera_order != cameras {
+            self.media_camera_order = cameras;
+        }
         {
             let order = &self.media_order;
             self.media_textures
@@ -1125,7 +1134,8 @@ impl Compositor {
 
     /// The texture the Webcam module should draw this frame.
     ///
-    /// `camera` indexes the start order ([`MediaHub::select_source_id`]); an
+    /// `camera` indexes the camera-only start order
+    /// ([`MediaHub::camera_ids`] / [`MediaHub::select_source_id`]); an
     /// index with no source falls back to the first, and no running source
     /// yields `None` (the module then draws nothing, like `Webcam.js:40-47`).
     fn media_input<'a>(
@@ -1675,7 +1685,7 @@ impl Compositor {
             // textures), so the module instance's canvas stays independently
             // mutable.
             let webcam_source = (module.module_name == "Webcam")
-                .then(|| Self::media_input(&self.media_order, &self.media_textures, props))
+                .then(|| Self::media_input(&self.media_camera_order, &self.media_textures, props))
                 .flatten();
             let mut draw = DrawContext {
                 canvas,

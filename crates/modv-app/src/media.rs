@@ -499,6 +499,27 @@ impl MediaHub {
         }
     }
 
+    /// Camera-like sources in start order: the list the Webcam module's
+    /// 1-based `camera` prop indexes. Files are not webcams, so they are
+    /// excluded; screen nodes are treated like cameras (the legacy renderer
+    /// puts screen sources in the same `selectedVideoSources` order).
+    pub fn camera_ids(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|id| {
+                self.entries.get(*id).is_some_and(|entry| {
+                    matches!(
+                        entry.config.kind,
+                        VideoSourceKind::Camera { .. }
+                            | VideoSourceKind::Screen { .. }
+                            | VideoSourceKind::TestPattern { .. }
+                    )
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Resolve the Webcam module's 1-based `camera` index against `order`.
     ///
     /// Port of `selectWebcamSource` (`media-inputs.js:150-158`): indexes below
