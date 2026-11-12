@@ -22,7 +22,7 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
   spread 0.42 (`MODV_AUDIO_FIXTURE=… cargo test -p modv-media --test
   audio_stream_fixture`).
 - Packaged-engine smoke (CDP, `MODV_ENGINE=1`): the Gallery renders all **424**
-  registered modules (37 shader + 15 2D + 21 Point10 + 351 ISF) with engine
+  registered modules (37 shader + 15 2D + 25 Point10 + 351 ISF) with engine
   thumbnails; Scene hover previews paint the hovered cell; BPM tweens animate
   (Chromantic Line `smoothing` 0.252 → 0.209 over 0.9 s); the status bar shows
   live FPS/size and the detected BPM.
@@ -89,9 +89,10 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       naga-validated (24 tests)
 - [x] ISF: parser/upgrader, ES→desktop-450 preprocessor with the full macro
       set, naga GLSL→WGSL translator, overrides hook, multi-pass runtime with
-      PERSISTENT/FLOAT buffers; corpus report — **344/351 fragments translate
-      without an override (98.0 %)**, 35/36 vertex sidecars (7 overrides
-      pending, documented in `docs/isf-corpus-report.md`)
+      PERSISTENT/FLOAT buffers; corpus report — **351/351 fragments and 36/36
+      vertex sidecars translate (100 %) with no overrides**, including hoisted
+      global initialisers, sampler parameters, fall-through returns and matrix
+      varyings (`docs/isf-corpus-report.md`)
 - [x] ISF modules registered in the engine: corpus bundled as `resources/isf`,
       discovered via `--isf-dir`, props/meta synthesised, compositor rendering
       with per-frame uniforms + group-canvas image inputs (351 registered)
@@ -206,11 +207,10 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
   hooks) are likewise renderer-only.
 - Custom/third-party ISF transitions are not available: the six native
   transitions are ported, the picker filters unknown names to Fade.
-- 7 of 351 ISF corpus shaders still need translation overrides
-  (`docs/isf-corpus-report.md`); the embedding/fingerprint/validation
-  machinery is in place but the 7 `.wgsl` files themselves are not written,
-  so those shaders log once and render nothing. The corpus gate now asserts a
-  checked-in baseline (≥95 %) instead of only `translated > 0`.
+- The ISF corpus translates 351/351 fragments and 36/36 vertex sidecars with
+  no overrides; the override mechanism (embedded, fingerprinted, validated)
+  remains for third-party shaders. The corpus gate asserts a checked-in
+  baseline (100 %).
 - The packaged engine links `libpipewire-0.3` for system-audio capture; the
   AppImage relies on the host providing it (standard on current distros). The
   `.deb` depends on the distro's package set; `MODV_ENGINE=0` (the default)
