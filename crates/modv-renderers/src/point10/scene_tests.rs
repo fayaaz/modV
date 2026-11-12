@@ -1046,6 +1046,30 @@ fn rolling_fire_renders() {
     );
 }
 
+/// R-34: the JS analyser exists in silence, so RollingFire keeps animating
+/// (emitter, sim steps, spin) instead of freezing. Exercise the GPU path, not
+/// just `update()`: two consecutive silent frames must differ.
+#[test]
+fn rolling_fire_advances_without_audio() {
+    let mut scene =
+        crate::point10::scenes::rolling_fire::RollingFire::with_grid(volume_test_grid());
+    let silent = BandPayload::silent(44_100.0);
+    let Some(frames) =
+        render_owned_chain_frames(&mut scene, VOLUME_SIZE, VOLUME_WARMUP + 2, &silent, &silent)
+    else {
+        return;
+    };
+
+    assert!(
+        any_lit(&frames.before),
+        "silent RollingFire produced an empty frame"
+    );
+    assert_ne!(
+        frames.before, frames.after,
+        "silent RollingFire froze: the volume/ball must keep advancing with zero bands"
+    );
+}
+
 /// RollingFire must render a real raymarched fire volume around the lava
 /// sphere, keep the transparent-overlay contract and react to the music.
 #[test]
