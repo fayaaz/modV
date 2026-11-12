@@ -75,8 +75,9 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
       app via CDP (engine-created group + Point10 Invert → 100% white preview)
 - [ ] 2D modules render through the engine compositor (facade exists, wiring)
 - [ ] three/Cube renderer
-- [ ] mirror parity: Rust delta stream replayed into the JS mirror store
-      yields a deep-equal preset
+- [x] mirror parity: Rust delta stream replayed into the JS mirror store
+      yields a deep-equal preset (tests/unit/engine-mirror.test.js +
+      modv-engine --emit-fixtures; 19 scripted mutations)
 
 ## M3 — 2D modules
 
