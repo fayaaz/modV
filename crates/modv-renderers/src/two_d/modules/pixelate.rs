@@ -4,7 +4,8 @@
 //! The JS keeps a scratch `OffscreenCanvas` (`:44-60`); here the module owns a
 //! scratch [`Canvas`] created in `init`. `imageSmoothingEnabled = false`
 //! (`:47`, `:83`) maps to [`Canvas::set_image_smoothing`], which selects the
-//! nearest-neighbour sampler.
+//! nearest-neighbour sampler. The group canvas is read through
+//! [`Canvas::snapshot`] (frame N samples frame N-1), never as the live target.
 
 use crate::two_d::Canvas;
 use crate::two_d::modules::{
@@ -107,9 +108,12 @@ impl TwoDModule for Pixelate {
         // `Pixelate.js:82-94`: the source canvas is downscaled into the
         // scratch's top-left `w × h` region (the JS 9-argument `drawImage`
         // with the destination size, not a source crop), with smoothing off.
+        // The source is a snapshot of the canvas as of the last submitted
+        // frame — sampling the live target would be undefined.
+        let snapshot = ctx.canvas.snapshot();
         scratch.clear_all();
         scratch.set_image_smoothing(false);
-        scratch.draw_image(ctx.canvas.view(), 0.0, 0.0, w, h);
+        scratch.draw_image(&snapshot, 0.0, 0.0, w, h);
         scratch.submit();
 
         // `Pixelate.js:95-105`: blow the scratch's `w × h` corner back up,

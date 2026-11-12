@@ -521,6 +521,12 @@ pub fn transpose_rotation(m: &Mat4) -> Mat4 {
 pub fn perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     let f = 1.0 / (fov_y_radians * 0.5).tan();
     let range = near - far;
+    // three's `makePerspective` (GL clip space). `AroundPlus` uses this matrix
+    // for its own screen-space water maths as well as the camera, and its
+    // existing projection lands inside wgpu's [0, 1] depth range for the
+    // scene's geometry; leaving the GL shape keeps the JS matrix parity that
+    // its tests pin. See `cube_mesh::perspective` for the wgpu-remapped
+    // variant used by the cube scenes.
     [
         [f / aspect, 0.0, 0.0, 0.0],
         [0.0, f, 0.0, 0.0],

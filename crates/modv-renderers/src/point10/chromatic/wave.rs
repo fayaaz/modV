@@ -32,7 +32,7 @@ use super::{
 };
 use crate::point10::audio_bridge::{AUDIO_SAMPLES, AudioBridge, P10Audio};
 use crate::point10::{
-    FULLSCREEN_TRIANGLE_WGSL, SceneContext, SceneMeta, SceneProp, read_scene_props,
+    FULLSCREEN_TRIANGLE_WGSL, SceneContext, SceneMeta, SceneProp, frame_dt, read_scene_props,
     scene_props_with_levers,
 };
 
@@ -310,10 +310,10 @@ impl crate::point10::Point10Scene for ChromaticWave {
     }
 
     fn update(&mut self, dt: f32, audio: &AudioBridge) {
-        // `BaseScene.update`: `this.time += dt`.
-        if dt.is_finite() && dt > 0.0 {
-            self.time += dt;
-        }
+        // `BaseScene.update`: `this.time += dt`, with the adapter's 0.1 s
+        // catch-up cap (a tab-suspend frame cannot jump the wave clock).
+        let frame_dt = frame_dt(dt);
+        self.time += frame_dt;
         self.p9.update(dt, audio);
 
         // Append the genuinely new samples (the analyser's tail) so the
@@ -467,6 +467,19 @@ mod tests {
             "unexpected texel range {:?}",
             (red.iter().min(), red.iter().max())
         );
+    }
+
+    #[test]
+    fn time_is_capped_at_a_tenth_of_a_second() {
+        let mut wave = ChromaticWave::new();
+        wave.update(4.0, &AudioBridge::new());
+        assert!(
+            (wave.time - crate::point10::MAX_FRAME_SECONDS).abs() < 1e-6,
+            "a catch-up frame must not jump the clock (got {})",
+            wave.time
+        );
+        wave.update(1.0 / 60.0, &AudioBridge::new());
+        assert!((wave.time - (crate::point10::MAX_FRAME_SECONDS + 1.0 / 60.0)).abs() < 1e-5);
     }
 
     #[test]

@@ -37,7 +37,9 @@
 //!   borrow, and sampling the resolve target in the same pass is a wgpu
 //!   validation error. [`Canvas::draw_image_self`] /
 //!   [`Canvas::draw_image_self_region`] take a snapshot of the canvas at that
-//!   point in the command list (see `submit`).
+//!   point in the command list (see `submit`); a module that copies the canvas
+//!   into its own scratch ([`Canvas::snapshot`]) samples the snapshot of the
+//!   last submitted frame instead of the live target.
 //! * Text needs more state than colours: [`Canvas::set_text_size`],
 //!   [`Canvas::set_text_family`], [`Canvas::set_text_bold`],
 //!   [`Canvas::set_text_align`], [`Canvas::set_text_baseline`],
@@ -53,7 +55,7 @@ use std::num::NonZeroU64;
 use bytemuck::{Pod, Zeroable};
 
 use crate::two_d::path::{
-    Affine, Path, rect_geometry, stroke_geometry, transformed_bounds, triangulate_subpath,
+    Affine, Circle, Path, rect_geometry, stroke_geometry, transformed_bounds, triangulate_subpath,
 };
 use crate::two_d::text::{RasterisedText, TextEngine, TextStyle};
 
@@ -126,11 +128,14 @@ struct ClipUniform {
 @group(0) @binding(2) var<uniform> clip: ClipUniform;
 
 fn clipped(p: vec2<f32>) -> bool {
-    if (clip.kind == 1u) {
+    // `kind` is a bitmask: 1 = rect, 2 = circle. Canvas `clip()` intersects
+    // with the current region, so both tests may be active at once.
+    if (clip.kind & 1u) != 0u {
         if (p.x < clip.rect.x || p.y < clip.rect.y || p.x > clip.rect.z || p.y > clip.rect.w) {
             return true;
         }
-    } else if (clip.kind == 2u) {
+    }
+    if (clip.kind & 2u) != 0u {
         let radius = max(clip.circle.zw, vec2<f32>(1e-6, 1e-6));
         let d = (p - clip.circle.xy) / radius;
         if (dot(d, d) > 1.0) {
@@ -196,11 +201,11 @@ impl Vertex {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct ClipUniform {
-    /// `[min_x, min_y, max_x, max_y]` for `kind == 1`.
+    /// `[min_x, min_y, max_x, max_y]` when bit 0 of `kind` is set.
     rect: [f32; 4],
-    /// `[cx, cy, radius_x, radius_y]` for `kind == 2`.
+    /// `[cx, cy, radius_x, radius_y]` when bit 1 of `kind` is set.
     circle: [f32; 4],
-    /// 0 = no clip, 1 = rect, 2 = ellipse.
+    /// Bitmask: 0 = no clip, 1 = rect, 2 = ellipse, 3 = both.
     kind: u32,
     /// Padding to 16-byte alignment.
     pad: [u32; 3],
@@ -213,6 +218,63 @@ impl ClipUniform {
         kind: 0,
         pad: [0; 3],
     };
+}
+
+/// The accumulated clip region.
+///
+/// Canvas 2D's `clip()` **intersects** with the current clip, so the facade
+/// keeps the tightest rectangle and the tightest circle rather than replacing
+/// the previous shape. The shader tests the rectangle and the circle together
+/// (see `ClipUniform::kind`); a second circle is approximated by the smaller
+/// one, which is exact for the nested circles `clip()` normally produces.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ClipState {
+    /// Intersection of every rectangular clip, if any.
+    rect: Option<[f32; 4]>,
+    /// The tightest circular clip, if any.
+    circle: Option<Circle>,
+}
+
+impl ClipState {
+    /// Intersect with an axis-aligned rectangle.
+    fn intersect_rect(&mut self, [x0, y0, x1, y1]: [f32; 4]) {
+        self.rect = Some(match self.rect {
+            Some([ax0, ay0, ax1, ay1]) => [ax0.max(x0), ay0.max(y0), ax1.min(x1), ay1.min(y1)],
+            None => [x0, y0, x1, y1],
+        });
+    }
+
+    /// Intersect with a circle. Its bounding box joins the rect intersection,
+    /// so a later rectangular clip still bounds the region.
+    fn intersect_circle(&mut self, circle: Circle) {
+        self.intersect_rect([
+            circle.cx - circle.r,
+            circle.cy - circle.r,
+            circle.cx + circle.r,
+            circle.cy + circle.r,
+        ]);
+        self.circle = Some(match self.circle {
+            Some(previous) if previous.r <= circle.r => previous,
+            _ => circle,
+        });
+    }
+
+    /// The current region as a single [`ClipShape`], for diagnostics/tests.
+    ///
+    /// Returns the circle when both a circle and a rect are active; the rect
+    /// is its bounding box in that case (it never clips more than the circle).
+    fn shape(&self) -> Option<ClipShape> {
+        if let Some(circle) = self.circle {
+            Some(ClipShape::Circle {
+                cx: circle.cx,
+                cy: circle.cy,
+                r: circle.r.abs(),
+            })
+        } else {
+            self.rect
+                .map(|[x0, y0, x1, y1]| ClipShape::Rect { x0, y0, x1, y1 })
+        }
+    }
 }
 
 /// Which pipeline a command uses.
@@ -260,7 +322,7 @@ struct State {
     line_width: f32,
     global_alpha: f32,
     smoothing: bool,
-    clip: Option<ClipShape>,
+    clip: ClipState,
     text: TextStyle,
 }
 
@@ -273,7 +335,7 @@ impl Default for State {
             line_width: 1.0,
             global_alpha: 1.0,
             smoothing: true,
-            clip: None,
+            clip: ClipState::default(),
             text: TextStyle::default(),
         }
     }
@@ -347,6 +409,11 @@ impl Canvas {
 
         let (texture, view, msaa_texture, msaa_view, snapshot_texture, snapshot_view) =
             create_targets(device, width, height);
+        // wgpu does not zero-initialise allocations: without this the first
+        // frame samples undefined pixels (and a self-sampling module reads
+        // garbage). The JS canvas starts transparent black.
+        zero_fill_texture(queue, &texture, width, height);
+        zero_fill_texture(queue, &snapshot_texture, width, height);
 
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("modV 2d canvas linear sampler"),
@@ -466,6 +533,37 @@ impl Canvas {
         &self.view
     }
 
+    /// Snapshot the canvas content as of its **last `submit`** and return a
+    /// view of it.
+    ///
+    /// This is the cross-canvas half of the self-sampling path. A module that
+    /// copies the canvas into its own scratch ([`Canvas::draw_image`] with the
+    /// canvas as the source) cannot bind [`Canvas::view`]: that texture is the
+    /// one the group writes this frame, so sampling it is undefined. It samples
+    /// this snapshot instead — frame N therefore reads frame N-1's content,
+    /// never the live target (the `drawImage(canvas, …)` semantics, like
+    /// [`Canvas::draw_image_self`]). Pending commands are deliberately not
+    /// flushed; the snapshot is a copy of the last submitted texture.
+    pub fn snapshot(&mut self) -> wgpu::TextureView {
+        let extent = wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: 1,
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("modV 2d canvas snapshot"),
+            });
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            self.snapshot_texture.as_image_copy(),
+            extent,
+        );
+        self.queue.submit(Some(encoder.finish()));
+        self.snapshot_view.clone()
+    }
+
     /// Whether font discovery failed, in which case text silently does not
     /// draw. Tests use this to skip the text assertions on fontless systems.
     pub fn text_unavailable(&self) -> bool {
@@ -474,7 +572,7 @@ impl Canvas {
 
     /// Resize the canvas. Content is discarded, like assigning to
     /// `canvas.width` in JS.
-    pub fn resize(&mut self, device: &wgpu::Device, _queue: &wgpu::Queue, width: u32, height: u32) {
+    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         assert!(width > 0 && height > 0, "canvas size must be non-zero");
         if width == self.width && height == self.height {
             return;
@@ -483,6 +581,10 @@ impl Canvas {
         self.height = height;
         let (texture, view, msaa_texture, msaa_view, snapshot_texture, snapshot_view) =
             create_targets(device, width, height);
+        // A resized canvas is a fresh allocation: zero it so the next frame
+        // cannot sample undefined pixels (`canvas.width = …` clears in JS).
+        zero_fill_texture(queue, &texture, width, height);
+        zero_fill_texture(queue, &snapshot_texture, width, height);
         self.texture = texture;
         self.view = view;
         self.msaa_texture = msaa_texture;
@@ -519,12 +621,12 @@ impl Canvas {
     }
 
     /// Canvas `clearRect`.
+    ///
+    /// Erases as transparent black with a `Replace` draw (not by dropping the
+    /// commands recorded so far this frame), so earlier draws survive outside
+    /// the rect and the current clip still applies.
     pub fn clear_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
         if !(width > 0.0) || !(height > 0.0) {
-            return;
-        }
-        if self.is_full_clear(x, y, width, height) {
-            self.clear_all();
             return;
         }
         self.push_solid_rect(
@@ -535,22 +637,6 @@ impl Canvas {
             [0.0, 0.0, 0.0, 0.0],
             CommandKind::Replace,
         );
-    }
-
-    /// Whether a rect covers the whole canvas under an identity transform.
-    fn is_full_clear(&self, x: f32, y: f32, width: f32, height: f32) -> bool {
-        let transform = self.state.transform;
-        let identity = (transform.a - 1.0).abs() < 1e-6
-            && transform.b.abs() < 1e-6
-            && transform.c.abs() < 1e-6
-            && (transform.d - 1.0).abs() < 1e-6
-            && transform.e.abs() < 1e-6
-            && transform.f.abs() < 1e-6;
-        identity
-            && x <= 0.5
-            && y <= 0.5
-            && x + width >= self.width as f32 - 0.5
-            && y + height >= self.height as f32 - 0.5
     }
 
     /// Push the current state (canvas `save`).
@@ -633,23 +719,25 @@ impl Canvas {
     ///
     /// A single full-turn arc clips to its circle (analytic, exact); every
     /// other path clips to its transformed axis-aligned bounds, as the plan
-    /// specifies for the rect-only minimum.
+    /// specifies for the rect-only minimum. Like Canvas2D, the new shape
+    /// **intersects** with the current clip region instead of replacing it.
     pub fn clip(&mut self) {
         if let Some(circle) = self.path.sole_circle() {
-            self.state.clip = Some(ClipShape::Circle {
+            self.state.clip.intersect_circle(Circle {
                 cx: circle.cx,
                 cy: circle.cy,
                 r: circle.r.abs(),
             });
         } else if let Some([x0, y0, x1, y1]) = self.path.bounds() {
-            self.state.clip = Some(ClipShape::Rect { x0, y0, x1, y1 });
+            self.state.clip.intersect_rect([x0, y0, x1, y1]);
         }
     }
 
-    /// Rectangular clip (the plan's minimum clip shape).
+    /// Rectangular clip (the plan's minimum clip shape), intersected with the
+    /// current region like [`Canvas::clip`].
     pub fn clip_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
         let [x0, y0, x1, y1] = transformed_bounds(x, y, width, height, &self.state.transform);
-        self.state.clip = Some(ClipShape::Rect { x0, y0, x1, y1 });
+        self.state.clip.intersect_rect([x0, y0, x1, y1]);
     }
 
     /// Canvas `fill` — fills the current path.
@@ -1053,7 +1141,7 @@ impl Canvas {
 
     /// The current clip shape, if any.
     pub fn clip_shape(&self) -> Option<ClipShape> {
-        self.state.clip
+        self.state.clip.shape()
     }
 
     fn effective(&self, colour: Rgba) -> Rgba {
@@ -1079,40 +1167,29 @@ impl Canvas {
     }
 
     fn clip_uniform(&self) -> ClipUniform {
-        let Some(clip) = self.state.clip else {
-            return ClipUniform::NONE;
-        };
-        match clip {
-            ClipShape::Rect { x0, y0, x1, y1 } => {
-                let ax = self.to_ndc([x0, y0]);
-                let bx = self.to_ndc([x1, y1]);
-                ClipUniform {
-                    rect: [
-                        ax[0].min(bx[0]),
-                        ax[1].min(bx[1]),
-                        ax[0].max(bx[0]),
-                        ax[1].max(bx[1]),
-                    ],
-                    circle: [0.0; 4],
-                    kind: 1,
-                    pad: [0; 3],
-                }
-            }
-            ClipShape::Circle { cx, cy, r } => {
-                let centre = self.to_ndc([cx, cy]);
-                ClipUniform {
-                    rect: [0.0; 4],
-                    circle: [
-                        centre[0],
-                        centre[1],
-                        (r / self.width as f32) * 2.0,
-                        (r / self.height as f32) * 2.0,
-                    ],
-                    kind: 2,
-                    pad: [0; 3],
-                }
-            }
+        let mut uniform = ClipUniform::NONE;
+        if let Some([x0, y0, x1, y1]) = self.state.clip.rect {
+            let ax = self.to_ndc([x0, y0]);
+            let bx = self.to_ndc([x1, y1]);
+            uniform.rect = [
+                ax[0].min(bx[0]),
+                ax[1].min(bx[1]),
+                ax[0].max(bx[0]),
+                ax[1].max(bx[1]),
+            ];
+            uniform.kind |= 1;
         }
+        if let Some(circle) = self.state.clip.circle {
+            let centre = self.to_ndc([circle.cx, circle.cy]);
+            uniform.circle = [
+                centre[0],
+                centre[1],
+                (circle.r.abs() / self.width as f32) * 2.0,
+                (circle.r.abs() / self.height as f32) * 2.0,
+            ];
+            uniform.kind |= 2;
+        }
+        uniform
     }
 
     fn push_triangles(
@@ -1564,6 +1641,33 @@ type Targets = (
     wgpu::Texture,
     wgpu::TextureView,
 );
+
+/// Zero-fill a freshly created RGBA8 texture.
+///
+/// `queue.write_texture` does not require `COPY_BYTES_PER_ROW_ALIGNMENT`
+/// padding (`copy_buffer_to_texture` does), but using the 256-byte stride
+/// keeps the upload valid on every backend and costs at most 256 bytes per
+/// row for the small canvases this facade creates.
+fn zero_fill_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, width: u32, height: u32) {
+    let unpadded = width as usize * 4;
+    let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    let zeros = vec![0u8; padded * height as usize];
+    queue.write_texture(
+        texture.as_image_copy(),
+        &zeros,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded as u32),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
 
 fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
     let size = wgpu::Extent3d {

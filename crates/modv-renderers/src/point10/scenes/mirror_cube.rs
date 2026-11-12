@@ -716,12 +716,7 @@ impl Point10Scene for MirrorCube {
         self.time += dt;
         self.audio.update(dt, audio);
 
-        let drive = mirror_cube_drive(
-            self.audio.band(-1, 1, 0, 0.1),
-            dt,
-            self.perm,
-            self.spin_scale,
-        );
+        let drive = mirror_cube_drive(self.audio.beat(0.1), dt, self.perm, self.spin_scale);
         self.perm = drive.perm;
         self.rotation = [
             drive.rotation[0].to_radians(),
@@ -1048,7 +1043,7 @@ mod tests {
     fn update_drives_the_rotation_and_the_camera() {
         let mut scene = MirrorCube::new();
         let mut payload = BandPayload::silent(44_100.0);
-        payload.lanes[3] = 0.4; // damping lane 1 of the bass band (beat(0.1))
+        payload.beat = 0.4; // `p9audio.beat(0.1)` kick envelope
         payload.lanes[4] = 0.3; // damping lane 1 of the mid band (camera)
         payload.byte_frequency_data = vec![0; 1024];
         payload.freq_mag = [0.5; crate::point10::audio_bridge::AUDIO_SAMPLES];

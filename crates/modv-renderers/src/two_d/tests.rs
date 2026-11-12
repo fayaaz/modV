@@ -481,6 +481,162 @@ fn draw_image_self_snapshots_current_content() {
 }
 
 #[test]
+fn canvas_starts_transparent() {
+    // wgpu does not zero-initialise textures; the facade must, or the first
+    // frame samples undefined pixels (and self-sampling modules read garbage).
+    let Some(canvas) = canvas(SIZE, SIZE) else {
+        return;
+    };
+    assert!(
+        !any_opaque(&canvas),
+        "a fresh canvas must be transparent black"
+    );
+}
+
+#[test]
+fn snapshot_samples_the_previous_submit_not_pending_commands() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let mut canvas = Canvas::new(&device, &queue, SIZE, SIZE);
+
+    // Frame N-1: opaque red.
+    canvas.begin_frame();
+    canvas.set_fill_style([1.0, 0.0, 0.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, SIZE as f32, SIZE as f32);
+    canvas.submit();
+
+    // Frame N: a blue fill is recorded but not submitted. The snapshot must
+    // still hold frame N-1 (red), never the live target being written.
+    canvas.begin_frame();
+    canvas.set_fill_style([0.0, 0.0, 1.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, SIZE as f32, SIZE as f32);
+    let snapshot = canvas.snapshot();
+
+    let mut probe = Canvas::new(&device, &queue, SIZE, SIZE);
+    probe.begin_frame();
+    probe.draw_image(&snapshot, 0.0, 0.0, SIZE as f32, SIZE as f32);
+    probe.submit();
+    assert_close(
+        pixel(&probe, 32, 32),
+        [255, 0, 0, 255],
+        1,
+        "snapshot must hold frame N-1",
+    );
+
+    // The live canvas, once the pending command is submitted, is blue.
+    canvas.submit();
+    assert_close(
+        pixel(&canvas, 32, 32),
+        [0, 0, 255, 255],
+        1,
+        "live canvas after submit",
+    );
+}
+
+#[test]
+fn active_clip_intersects_rectangles() {
+    let Some(mut canvas) = canvas(SIZE, SIZE) else {
+        return;
+    };
+    canvas.begin_frame();
+    canvas.save();
+    // First clip: x 0..48. Second: x 0..32 — Canvas2D intersects, so the
+    // result is x 0..32, not the replacement 0..32 over the full height.
+    canvas.clip_rect(0.0, 0.0, 48.0, 48.0);
+    canvas.clip_rect(0.0, 0.0, 32.0, SIZE as f32);
+    canvas.set_fill_style([1.0, 1.0, 0.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, SIZE as f32, SIZE as f32);
+    canvas.restore();
+    canvas.submit();
+
+    assert_close(
+        pixel(&canvas, 16, 16),
+        [255, 255, 0, 255],
+        1,
+        "inside union",
+    );
+    assert_close(
+        pixel(&canvas, 40, 16),
+        [0, 0, 0, 0],
+        1,
+        "outside the second clip",
+    );
+    assert_close(
+        pixel(&canvas, 16, 56),
+        [0, 0, 0, 0],
+        1,
+        "outside the first clip",
+    );
+}
+
+#[test]
+fn active_clip_intersects_a_circle_with_a_rect() {
+    let Some(mut canvas) = canvas(SIZE, SIZE) else {
+        return;
+    };
+    canvas.begin_frame();
+    canvas.save();
+    // Rect covers the top half; the circle is centred on the boundary, so
+    // only its upper half may draw.
+    canvas.clip_rect(0.0, 0.0, SIZE as f32, 32.0);
+    canvas.begin_path();
+    canvas.arc(32.0, 32.0, 20.0, 0.0, std::f32::consts::TAU, true);
+    canvas.clip();
+    canvas.set_fill_style([0.0, 1.0, 1.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, SIZE as f32, SIZE as f32);
+    canvas.restore();
+    canvas.submit();
+
+    assert_close(
+        pixel(&canvas, 32, 16),
+        [0, 255, 255, 255],
+        1,
+        "inside both clips",
+    );
+    assert_close(
+        pixel(&canvas, 32, 24),
+        [0, 255, 255, 255],
+        1,
+        "upper circle half",
+    );
+    assert_close(
+        pixel(&canvas, 32, 40),
+        [0, 0, 0, 0],
+        1,
+        "circle half below the rect",
+    );
+    assert_close(
+        pixel(&canvas, 8, 16),
+        [0, 0, 0, 0],
+        1,
+        "inside the rect but outside the circle",
+    );
+}
+
+#[test]
+fn full_viewport_clear_rect_erases_earlier_draws() {
+    let Some(mut canvas) = canvas(SIZE, SIZE) else {
+        return;
+    };
+    canvas.begin_frame();
+    canvas.set_fill_style([0.0, 0.0, 1.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, SIZE as f32, SIZE as f32);
+    canvas.set_fill_style([1.0, 0.0, 0.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, 32.0, 32.0);
+    // A full-viewport clearRect must erase via a Replace draw, not drop the
+    // commands recorded before it (which would also be fine here, but a bug
+    // would show up as retained red).
+    canvas.clear_rect(0.0, 0.0, SIZE as f32, SIZE as f32);
+    canvas.submit();
+
+    assert!(
+        !any_opaque(&canvas),
+        "a full-viewport clearRect must erase earlier same-frame draws"
+    );
+}
+
+#[test]
 fn fill_text_draws_or_reports_unavailable() {
     let Some(mut canvas) = canvas(SIZE, SIZE) else {
         return;
@@ -527,6 +683,10 @@ fn resize_clears_and_changes_dimensions() {
 
     canvas.resize(&device, &queue, 32, 48);
     assert_eq!((canvas.width(), canvas.height()), (32, 48));
+    assert!(
+        !any_opaque(&canvas),
+        "resize must zero-initialise the new texture immediately"
+    );
     canvas.submit();
     assert!(!any_opaque(&canvas), "resize discards content like JS");
 }
@@ -1027,6 +1187,97 @@ fn smoke_waveform() {
 #[test]
 fn smoke_grid_stretch() {
     smoke("Grid Stretch", &[], true, None);
+}
+
+/// Run one module over a canvas seeded with a red/blue half-and-half frame
+/// (submitted before the module's frame) and return the resulting pixels.
+fn self_sampling_output(module_name: &str, overrides: &[(&str, Value)]) -> Option<Vec<u8>> {
+    let (device, queue) = gpu()?;
+    let mut module = all_modules()
+        .into_iter()
+        .find(|module| module.meta().name == module_name)
+        .unwrap_or_else(|| panic!("{module_name} is registered"));
+
+    let mut canvas = Canvas::new(&device, &queue, MODULE_SIZE, MODULE_SIZE);
+    // Frame N-1: left half red, right half blue.
+    canvas.begin_frame();
+    canvas.set_fill_style([1.0, 0.0, 0.0, 1.0]);
+    canvas.fill_rect(0.0, 0.0, MODULE_SIZE as f32 / 2.0, MODULE_SIZE as f32);
+    canvas.set_fill_style([0.0, 0.0, 1.0, 1.0]);
+    canvas.fill_rect(
+        MODULE_SIZE as f32 / 2.0,
+        0.0,
+        MODULE_SIZE as f32 / 2.0,
+        MODULE_SIZE as f32,
+    );
+    canvas.submit();
+
+    let mut props = default_props(&module.props());
+    if let Some(object) = props.as_object_mut() {
+        for (key, value) in overrides {
+            object.insert((*key).to_owned(), value.clone());
+        }
+    }
+    let audio = AudioFrame::synthetic();
+    let mut module_context = ModuleContext {
+        canvas_width: MODULE_SIZE,
+        canvas_height: MODULE_SIZE,
+        delta: 1234.5,
+        audio: &audio,
+        frame: 1,
+        props: &props,
+        device: &device,
+        queue: &queue,
+    };
+    module.init(&mut module_context);
+    module.resize(&mut module_context);
+    module.update(&mut module_context);
+
+    canvas.begin_frame();
+    {
+        let mut draw_context = DrawContext {
+            canvas: &mut canvas,
+            props: &props,
+            audio: &audio,
+            delta: 1234.5,
+            frame: 1,
+            device: &device,
+            queue: &queue,
+            input_texture: None,
+            input_size: None,
+            is_gallery: false,
+        };
+        module.draw(&mut draw_context);
+    }
+    canvas.submit();
+    Some(canvas.read_pixels())
+}
+
+/// The three self-sampling modules must read the **snapshot** of the canvas
+/// (frame N-1), not the live target they are writing. A red/blue seeded frame
+/// therefore survives their draw; an undefined live read would not.
+#[test]
+fn self_sampling_modules_render_the_snapshot() {
+    let cases: &[(&str, &[(&str, Value)])] = &[
+        ("Pixelate", &[]),
+        ("Grid Stretch", &[("intensity", json!(0))]),
+        ("Buffer", &[("bufferOpacity", json!(1.0))]),
+    ];
+    for (name, overrides) in cases {
+        let Some(pixels) = self_sampling_output(name, overrides) else {
+            return;
+        };
+        let red = pixels
+            .chunks(4)
+            .any(|p| p[3] > 200 && p[0] > 200 && p[1] < 60 && p[2] < 60);
+        let blue = pixels
+            .chunks(4)
+            .any(|p| p[3] > 200 && p[2] > 200 && p[0] < 60 && p[1] < 60);
+        assert!(
+            red && blue,
+            "{name} did not reproduce the seeded frame (red: {red}, blue: {blue})"
+        );
+    }
 }
 
 #[test]

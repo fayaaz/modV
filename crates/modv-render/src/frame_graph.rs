@@ -252,6 +252,16 @@ pub enum GraphError {
         /// The offending format.
         format: wgpu::TextureFormat,
     },
+    /// A texture is missing a usage the pass needs (e.g. `COPY_DST` on a
+    /// composite target, which is written with `copy_texture_to_texture`).
+    MissingUsage {
+        /// Which pass failed.
+        pass: &'static str,
+        /// The usages the pass requires.
+        required: wgpu::TextureUsages,
+        /// The usages the texture was created with.
+        actual: wgpu::TextureUsages,
+    },
 }
 
 impl fmt::Display for GraphError {
@@ -269,6 +279,16 @@ impl fmt::Display for GraphError {
             }
             Self::FormatNotSampleable { pass, format } => {
                 write!(f, "{pass}: format {format:?} cannot be sampled")
+            }
+            Self::MissingUsage {
+                pass,
+                required,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "{pass}: texture usage {actual:?} is missing required {required:?}"
+                )
             }
         }
     }
@@ -583,6 +603,16 @@ impl Executor {
         let src_texture = self.texture_of(surfaces, source, pass)?;
         let dst_texture = self.texture_of(surfaces, target, pass)?;
         self.check_same_size(src_texture, dst_texture, pass)?;
+        self.check_usage(src_texture, wgpu::TextureUsages::TEXTURE_BINDING, pass)?;
+        self.check_usage(
+            dst_texture,
+            // The blend pass renders into a scratch and the result is written
+            // with `copy_texture_to_texture`, which requires COPY_DST.
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            pass,
+        )?;
         self.check_format(
             src_texture.format(),
             wgpu::TextureUsages::TEXTURE_BINDING,
@@ -714,6 +744,30 @@ impl Executor {
                     b.width(),
                     b.height()
                 ),
+            })
+        }
+    }
+
+    /// Verify a texture was created with every usage the pass requires.
+    ///
+    /// The format check alone cannot catch this: an `Rgba8Unorm` texture can
+    /// be created with any subset of the format's allowed usages, and wgpu
+    /// reports a missing one as an **uncaptured** validation error (which
+    /// panics under the default handler) rather than a `Result`.
+    fn check_usage(
+        &self,
+        texture: &wgpu::Texture,
+        required: wgpu::TextureUsages,
+        pass: &'static str,
+    ) -> Result<(), GraphError> {
+        let actual = texture.usage();
+        if actual.contains(required) {
+            Ok(())
+        } else {
+            Err(GraphError::MissingUsage {
+                pass,
+                required,
+                actual,
             })
         }
     }

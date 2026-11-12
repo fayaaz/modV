@@ -6,6 +6,8 @@
 //! so the last row/column samples one slice past the canvas edge; the facade's
 //! clamp-to-edge sampler matches the browser's edge extension closely enough
 //! for that off-canvas strip (most of which lands outside the canvas anyway).
+//! The canvas is read through [`Canvas::snapshot`] (frame N samples frame
+//! N-1), never as the live texture the group is writing.
 
 use crate::two_d::Canvas;
 use crate::two_d::modules::{
@@ -98,13 +100,17 @@ impl TwoDModule for GridStretch {
             return;
         }
 
+        // `drawImage(canvas, …)`: sample a snapshot of the canvas as of the
+        // last submitted frame, never the live texture the group writes.
+        let snapshot = ctx.canvas.snapshot();
+
         // Inclusive loops (JS `for (var i = countX; i >= 0; i--)`).
         for i in (0..=count_x).rev() {
             for j in (0..=count_y).rev() {
                 let source_x = i as f32 * slice_width;
                 let source_y = j as f32 * slice_height;
                 scratch.draw_image_region(
-                    ctx.canvas.view(),
+                    &snapshot,
                     source_x / width,
                     source_y / height,
                     slice_width / width,

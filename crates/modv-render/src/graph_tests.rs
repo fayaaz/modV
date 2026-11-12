@@ -43,6 +43,18 @@ fn try_engine() -> Option<Engine> {
 /// Create a solid texture filled with `rgba` (premultiplied, as the
 /// compositor stores them).
 fn solid_texture(engine: &Engine, rgba: [u8; 4]) -> wgpu::Texture {
+    texture_with_usage(
+        engine,
+        rgba,
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+    )
+}
+
+/// A solid texture created with an explicit usage set.
+fn texture_with_usage(engine: &Engine, rgba: [u8; 4], usage: wgpu::TextureUsages) -> wgpu::Texture {
     let texture = engine.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("modv-test-solid"),
         size: wgpu::Extent3d {
@@ -54,33 +66,32 @@ fn solid_texture(engine: &Engine, rgba: [u8; 4]) -> wgpu::Texture {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::COPY_DST,
+        usage,
         view_formats: &[],
     });
-    let pixel = rgba;
-    let data: Vec<u8> = pixel.repeat((SIZE * SIZE) as usize);
-    engine.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(SIZE * 4),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width: SIZE,
-            height: SIZE,
-            depth_or_array_layers: 1,
-        },
-    );
+    // A texture created without COPY_DST cannot be uploaded to; the test that
+    // needs one never reads its contents (the executor rejects it first).
+    if usage.contains(wgpu::TextureUsages::COPY_DST) {
+        engine.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba.repeat((SIZE * SIZE) as usize),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SIZE * 4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     texture
 }
 
@@ -316,6 +327,43 @@ fn composite_size_mismatch_reports_error() {
         .execute(&graph, &mut surfaces)
         .expect_err("size mismatch must error");
     assert!(format!("{error}").contains("64x64"));
+}
+
+/// The composite writes its destination with `copy_texture_to_texture`, which
+/// needs `COPY_DST`. A destination created without it must be rejected by the
+/// validator *before* the wgpu call (which would otherwise raise an
+/// uncaptured validation error).
+#[test]
+fn composite_rejects_a_destination_without_copy_dst() {
+    let Some(engine) = try_engine() else {
+        return;
+    };
+    let mut surfaces = TextureSurfaces::new();
+    insert_surfaces(&engine, &mut surfaces, &[("src", RED)]);
+    let dst = texture_with_usage(
+        &engine,
+        BLUE,
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+    );
+    surfaces.insert(id("dst"), dst);
+
+    let graph = FrameGraph {
+        nodes: vec![PassNode::Composite {
+            source: id("src"),
+            target: id("dst"),
+            alpha: 1.0,
+            blend: BlendMode::Normal,
+        }],
+    };
+    let mut executor = Executor::new(&engine.device, &engine.queue);
+    let error = executor
+        .execute(&graph, &mut surfaces)
+        .expect_err("a destination without COPY_DST must be rejected");
+    let message = format!("{error}");
+    assert!(message.contains("COPY_DST"), "{message}");
+    assert!(message.contains("composite"), "{message}");
 }
 
 /// Module nodes are documented no-ops until M3/M4 and the executor must not

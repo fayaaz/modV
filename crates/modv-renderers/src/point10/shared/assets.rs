@@ -270,6 +270,10 @@ pub fn upload(
     });
 
     for (level, (level_width, level_height, pixels)) in levels.iter().enumerate() {
+        // Every mip's rows are padded to WebGPU's 256-byte copy alignment:
+        // `bytes_per_row = width * 4` violates it for the small levels
+        // (2x2, 1x1, …) and makes the upload a validation error.
+        let (data, bytes_per_row) = padded_mip_rows(*level_width, *level_height, pixels);
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -277,10 +281,10 @@ pub fn upload(
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            pixels,
+            &data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(level_width * 4),
+                bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(*level_height),
             },
             wgpu::Extent3d {
@@ -386,6 +390,24 @@ pub fn mip_chain(width: u32, height: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>
     }
 
     levels
+}
+
+/// Pad one mip level's rows to `COPY_BYTES_PER_ROW_ALIGNMENT`.
+///
+/// Returns the padded pixel bytes and the row stride to pass as
+/// `bytes_per_row` (always a multiple of 256). The texel data itself is
+/// unchanged; the trailing bytes of each row are zero.
+fn padded_mip_rows(width: u32, height: u32, pixels: &[u8]) -> (Vec<u8>, u32) {
+    let unpadded = width as usize * 4;
+    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    let padded = unpadded.div_ceil(alignment) * alignment;
+    let mut data = vec![0_u8; padded * height as usize];
+    for row in 0..height as usize {
+        let source = &pixels[row * unpadded..(row + 1) * unpadded];
+        let target = &mut data[row * padded..row * padded + unpadded];
+        target.copy_from_slice(source);
+    }
+    (data, padded as u32)
 }
 
 /// One box-filter step.
@@ -548,5 +570,71 @@ mod tests {
             ColourSpace::Linear.format(),
             wgpu::TextureFormat::Rgba8Unorm
         );
+    }
+
+    #[test]
+    fn every_mip_upload_stride_is_256_aligned_and_keeps_its_content() {
+        let image = DecodedImage {
+            width: 4,
+            height: 4,
+            // Distinct values per texel so a mis-copied row is visible.
+            rgba: (0..4 * 4 * 4).map(|value| value as u8).collect(),
+        };
+        let levels = mip_chain(image.width, image.height, &image.rgba);
+        assert_eq!(levels.len(), 3, "4x4 -> 2x2 -> 1x1");
+        for (width, height, pixels) in &levels {
+            let (data, stride) = padded_mip_rows(*width, *height, pixels);
+            assert_eq!(
+                stride % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT,
+                0,
+                "mip {width}x{height} stride {stride} is not 256-aligned"
+            );
+            assert_eq!(data.len(), stride as usize * *height as usize);
+            let unpadded = *width as usize * 4;
+            for row in 0..*height as usize {
+                assert_eq!(
+                    &data[row * stride as usize..row * stride as usize + unpadded],
+                    &pixels[row * unpadded..(row + 1) * unpadded],
+                    "mip {width}x{height} row {row} content changed"
+                );
+                assert!(
+                    data[row * stride as usize + unpadded..(row + 1) * stride as usize]
+                        .iter()
+                        .all(|byte| *byte == 0),
+                    "padding must be zero"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn small_mips_upload_without_validation_errors() {
+        // A 4x4 image has 2x2 and 1x1 mips, whose natural `width * 4` stride
+        // used to violate WebGPU's `bytes_per_row` alignment.
+        let Some((device, queue)) = crate::point10::test_support::gpu() else {
+            return;
+        };
+        let image = DecodedImage {
+            width: 4,
+            height: 4,
+            rgba: vec![200_u8; 4 * 4 * 4],
+        };
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let loaded = upload(
+            &device,
+            &queue,
+            "mip-alignment-test",
+            &image,
+            ColourSpace::Linear,
+            Wrap::Clamp,
+            false,
+        );
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        let error = crate::point10::test_support::block_on(scope.pop());
+        assert!(error.is_none(), "mip upload validation error: {error:?}");
+        assert_eq!((loaded.width, loaded.height), (4, 4));
+        assert_eq!(loaded.texture.mip_level_count(), 3);
     }
 }

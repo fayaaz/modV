@@ -33,8 +33,13 @@
 //! * the fragment returns `vec4(c * 5.0, blur)`, and the pipeline is normal
 //!   alpha blending (`SrcAlpha`, `OneMinusSrcAlpha`), so empty pixels stay at
 //!   alpha 0;
-//! * the composer's bloom combine adds the bloom colour and alpha, but the
-//!   bloom of an empty pixel is 0, so the background survives as alpha 0.
+//! * the composer's bloom combine adds the bloom colour; the scene keeps its
+//!   own alpha ([`Composer::set_preserve_bloom_alpha`]) so the transparent
+//!   clear survives as alpha 0. This is a deliberate deviation: the JS's
+//!   plain `UnrealBloomPass` also adds bloom alpha, but in this port that
+//!   writes non-zero alpha across the whole frame even with
+//!   `threshold: 0.5`, which would break the explicit transparent-background
+//!   requirement (`it_is_coming_for_you_keeps_the_background_transparent`).
 //!
 //! A lavapipe test (`scene_tests::it_is_coming_for_you_keeps_the_background_transparent`)
 //! asserts exactly that: some pixels are alpha 0 while the object pixels are
@@ -89,8 +94,8 @@ use crate::point10::postfx::{Composer, ToneMapping};
 use crate::point10::shared::p9_glsl::P9_COMMON_WGSL;
 use crate::point10::shared::random::seeded_rand;
 use crate::point10::{
-    HDR_FORMAT, Point10Scene, SceneContext, SceneMeta, SceneProp, UnitQuad, read_scene_props,
-    scene_props_with_levers,
+    HDR_FORMAT, Point10Scene, SceneContext, SceneMeta, SceneProp, UnitQuad, frame_dt,
+    read_scene_props, scene_props_with_levers,
 };
 
 /// `ItIsComingForYou.js: export const INSTANCE_COUNT = 30000`.
@@ -409,11 +414,12 @@ impl Point10Scene for ItIsComingForYou {
         let mut composer =
             Composer::new(&device, &queue, self.size.0, self.size.1, ctx.target_format);
         composer.enable_bloom(BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD);
-        // The cloud is deliberately background-free (transparent clear). The
-        // additive bloom stage would otherwise write bloom alpha across the
-        // whole frame and turn that transparent background into a veil; keep
-        // the scene's own alpha (Boxy's preserveBloomAlpha semantics, the same
-        // mechanism Wormhole uses).
+        // Deliberate deviation: the JS does **not** call `preserveBloomAlpha`,
+        // so its additive bloom also adds bloom alpha to lit pixels. Our bloom
+        // combine still gives *every* pixel non-zero alpha (the transparency
+        // test fails with the raw JS arithmetic), so the port keeps the
+        // scene's own alpha to preserve the explicit transparent-background
+        // requirement. Colour is unchanged (additive bloom RGB either way).
         composer.set_preserve_bloom_alpha(true);
         composer.output_mut().set_tone_mapping(ToneMapping::None);
 
@@ -436,10 +442,10 @@ impl Point10Scene for ItIsComingForYou {
     }
 
     fn update(&mut self, dt: f32, audio: &AudioBridge) {
-        // `super.update(dt, audioData)` -> `this.time += dt`, always.
-        if dt.is_finite() && dt > 0.0 {
-            self.time += dt;
-        }
+        // `super.update(dt, audioData)` -> `this.time += dt`, with the
+        // adapter's 0.1 s catch-up cap every other scene uses.
+        let dt = frame_dt(dt);
+        self.time += dt;
         self.audio.update(dt, audio);
 
         let drive = it_is_coming_drive(
@@ -784,6 +790,40 @@ mod tests {
         assert_eq!(scene.speed_scale, 4.0);
         assert_eq!(scene.glow_scale, 2.0);
         assert_eq!(scene.bloom_scale, 0.0);
+    }
+
+    #[test]
+    fn time_is_capped_at_a_tenth_of_a_second() {
+        let mut scene = ItIsComingForYou::new();
+        let bridge = AudioBridge::new();
+        scene.update(4.0, &bridge);
+        assert!(
+            (scene.time() - crate::point10::MAX_FRAME_SECONDS).abs() < 1e-6,
+            "a catch-up frame must not jump the clock (got {})",
+            scene.time()
+        );
+        scene.update(1.0 / 60.0, &bridge);
+        assert!((scene.time() - (crate::point10::MAX_FRAME_SECONDS + 1.0 / 60.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn bloom_keeps_the_scene_alpha_for_the_transparent_background() {
+        // Deviation from `ItIsComingForYou.js` (which uses a plain
+        // `UnrealBloomPass`): the additive bloom alpha would write non-zero
+        // alpha across the whole frame in this port, losing the module's
+        // layer alpha. The scene therefore keeps `preserveBloomAlpha`.
+        let Some((device, queue)) = crate::point10::test_support::gpu() else {
+            return;
+        };
+        let mut scene = ItIsComingForYou::new();
+        let mut ctx = SceneContext::new(&device, &queue, HDR_FORMAT);
+        ctx.resize(64, 64);
+        scene.init(&mut ctx);
+        let composer = &scene.gpu.as_ref().expect("gpu resources").composer;
+        assert!(
+            composer.preserve_bloom_alpha(),
+            "the transparent-background requirement needs the scene alpha preserved"
+        );
     }
 
     #[test]

@@ -14,7 +14,8 @@
 //!
 //! `bufferId`'s JS default is a function (a `Date.now()` string); a JSON prop
 //! cannot hold a function, so the default is `""` and the module behaves like
-//! the JS fallback name (`"Buffer"`).
+//! the JS fallback name (`"Buffer"`). The canvas is read through
+//! [`Canvas::snapshot`] (frame N samples frame N-1), never as the live target.
 
 use crate::two_d::Canvas;
 use crate::two_d::modules::{
@@ -145,9 +146,12 @@ impl TwoDModule for Buffer {
         if should_capture {
             let width = ctx.canvas.width();
             let height = ctx.canvas.height();
-            // `bufferContext.drawImage(canvas, 0, 0, bufferCanvas.width, bufferCanvas.height)`
+            // `bufferContext.drawImage(canvas, 0, 0, bufferCanvas.width, bufferCanvas.height)`.
+            // The canvas is sampled through a snapshot: the live texture is the
+            // frame the group is writing, so reading it directly is undefined.
+            let snapshot = ctx.canvas.snapshot();
             buffer.clear_all();
-            buffer.draw_image(ctx.canvas.view(), 0.0, 0.0, width as f32, height as f32);
+            buffer.draw_image(&snapshot, 0.0, 0.0, width as f32, height as f32);
             buffer.submit();
             self.captured = true;
         }

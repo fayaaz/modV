@@ -79,10 +79,16 @@ impl UsageClass {
     fn usage_flags(self) -> wgpu::TextureUsages {
         use wgpu::TextureUsages as U;
         match self {
-            Self::GroupTarget => U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
-            Self::PipelineScratch => U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
+            Self::GroupTarget => {
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST
+            }
+            Self::PipelineScratch => {
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST
+            }
             Self::RowFadeScratch => U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_DST,
-            Self::TransitionScratch => U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
+            Self::TransitionScratch => {
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST
+            }
             Self::InputFrame => U::TEXTURE_BINDING | U::COPY_DST,
             Self::Fft => U::TEXTURE_BINDING | U::COPY_DST,
         }

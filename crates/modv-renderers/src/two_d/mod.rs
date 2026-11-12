@@ -69,7 +69,12 @@
 //! * **Clip** accepts the path's circle subpath (implemented analytically in
 //!   the fragment shader) or, for every other path, its axis-aligned
 //!   bounding box (the plan's stated minimum). `X-Drips.js:81-88` clips to a
-//!   circle, so the analytic circle path keeps its rounded notches.
+//!   circle, so the analytic circle path keeps its rounded notches. Canvas2D
+//!   `clip()` intersects with the active region, so the rect and circle are
+//!   accumulated (tighter rect, tightest circle) rather than replaced.
+//! * **`clearRect`** erases with a transparent-black `Replace` draw, so draws
+//!   recorded earlier in the same frame survive outside the rect and the
+//!   active clip still applies.
 //! * **Text** is shaped by cosmic-text and rasterised by swash into a
 //!   straight-alpha R8 mask (one texture per `fill_text` call, owned by the
 //!   command list until `submit`). `stroke_text` draws the same mask as a

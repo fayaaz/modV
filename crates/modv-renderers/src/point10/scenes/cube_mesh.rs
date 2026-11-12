@@ -39,8 +39,11 @@
 //! of three's `FrontSide` cull. For a closed convex solid the result is the
 //! same image (the nearest surface wins), and a winding slip can never hide
 //! the object — the same trade-off `AroundPlus` documents for its inverted
-//! torus. `SoundCube` is the one scene that opts out of the depth test to
-//! match the JS (`depthTest: false`); it still relies on this winding being
+//! torus. `SoundCube` also draws double-sided **with** this depth test: its JS
+//! material sets `depthTest: false`/`depthWrite: false`, but with `FrontSide`
+//! culling only the three front faces ever show, so the nearest-surface depth
+//! test gives the same image without depending on the winding convention (see
+//! `sound_cube.rs`'s deviations). It still relies on this winding being
 //! outward, which its tests assert.
 
 #![forbid(unsafe_code)]
@@ -376,15 +379,22 @@ pub fn trs(position: [f32; 3], rotation: [f32; 3], scaling: [f32; 3]) -> Mat4 {
     )
 }
 
-/// `PerspectiveCamera(fov, aspect, near, far).projectionMatrix`.
+/// `PerspectiveCamera(fov, aspect, near, far).projectionMatrix`, converted to
+/// wgpu's clip space.
+///
+/// three builds the GL matrix (`Matrix4.makePerspective`): it maps the view
+/// depth onto clip z `[-1, 1]` because WebGL clips to that range. wgpu clips
+/// to `[0, 1]`, so this is the same projection with the depth row remapped by
+/// `z' = (z + w) / 2` (near → 0, far → 1). x/y, and therefore the image, are
+/// unchanged.
 pub fn perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     let f = 1.0 / (fov_y_radians * 0.5).tan();
     let range = near - far;
     [
         [f / aspect.max(1e-6), 0.0, 0.0, 0.0],
         [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, (far + near) / range, -1.0],
-        [0.0, 0.0, (2.0 * far * near) / range, 0.0],
+        [0.0, 0.0, far / range, -1.0],
+        [0.0, 0.0, (far * near) / range, 0.0],
     ]
 }
 
@@ -565,12 +575,17 @@ mod tests {
         let point = transform_point(&model, [1.0, 0.0, 0.0]);
         assert!((point[0] - 3.0).abs() < 1e-6, "{point:?}");
 
-        // The perspective camera maps the near plane to -1 and far to +1.
+        // The perspective camera uses wgpu's clip-z range: near → 0, far → 1
+        // (the same x/y as three's GL matrix, so the image is unchanged).
         let projection = perspective(60_f32.to_radians(), 1.0, 0.1, 1000.0);
         let near = transform_point(&projection, [0.0, 0.0, -0.1]);
-        assert!((near[2] / near[3] + 1.0).abs() < 1e-5, "{near:?}");
+        assert!((near[2] / near[3]).abs() < 1e-5, "{near:?}");
         let far = transform_point(&projection, [0.0, 0.0, -1000.0]);
         assert!((far[2] / far[3] - 1.0).abs() < 1e-4, "{far:?}");
+        // Halfway in NDC (z = 0.5) is NOT halfway in view depth; assert the
+        // depth ordering is still monotonic instead.
+        let mid = transform_point(&projection, [0.0, 0.0, -10.0]);
+        assert!(mid[2] / mid[3] > 0.0 && mid[2] / mid[3] < 1.0, "{mid:?}");
 
         // A camera at +z looking at the origin sees the origin 5 units ahead.
         let view = look_at([0.0, 0.0, 5.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);

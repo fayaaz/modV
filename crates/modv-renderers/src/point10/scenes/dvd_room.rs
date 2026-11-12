@@ -877,6 +877,15 @@ impl DvdRoom {
         (BLOOM_BASE + self.smoke_bass * BLOOM_PER_BASS).min(BLOOM_MAX)
     }
 
+    /// The glass pane opacity (`DvdRoom.js:445`):
+    /// `0.34 + this.smBass * 0.06`, where the JS's `smBass` is smoothed from
+    /// `this._band(1, 9)` (the same value as [`DvdRoom::smoothed_bass`]) — not
+    /// the SmokeRoom bloom bass (`smoke_bass`, the mean of the first five
+    /// bins).
+    pub fn glass_opacity(&self) -> f32 {
+        0.34 + self.smoothed_bass * 0.06
+    }
+
     /// The palette colour at the current index, linear.
     pub fn logo_colour(&self) -> [f32; 3] {
         srgb_hex_to_linear(PALETTE[self.colour_index % PALETTE.len()])
@@ -1020,12 +1029,7 @@ impl DvdRoom {
                 camera_pos: [self.camera[0], self.camera[1], self.camera[2], 1.0],
                 logo_pos: [self.position[0], self.position[1], self.position[2], 1.0],
                 fire,
-                params: [
-                    0.34 + self.smoke_bass * 0.06,
-                    self.time,
-                    self.smoke_bass,
-                    0.0,
-                ],
+                params: [self.glass_opacity(), self.time, self.smoothed_bass, 0.0],
             }),
         );
         let (right, up) = self.billboard_basis();
@@ -1925,7 +1929,7 @@ struct GlassUniforms {
   camera_pos: vec4<f32>,
   logo_pos: vec4<f32>,
   fire: vec4<f32>,
-  // x opacity, y time, z smoke bass
+  // x opacity, y time, z smoothed bass (band(1,9), DvdRoom.js)
   params: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: GlassUniforms;
@@ -2048,6 +2052,40 @@ mod tests {
 
     fn close(a: f32, b: f32, tolerance: f32) {
         assert!((a - b).abs() < tolerance, "{a} != {b}");
+    }
+
+    #[test]
+    fn glass_opacity_uses_the_dvd_room_bass_band() {
+        // `DvdRoom.js:445`: `opacity = 0.34 + smBass * 0.06` where `smBass`
+        // is smoothed from `this._band(1, 9)`. The SmokeRoom bloom bass
+        // (`smoke_bass`, the mean of the first five bins) must not drive it:
+        // with bin 0 loud and bins 1..9 silent the bloom bass rises while the
+        // glass stays at its floor.
+        let mut scene = DvdRoom::new();
+        let mut payload = BandPayload::silent(44_100.0);
+        payload.freq_mag[0] = 1.0;
+        let mut bridge = AudioBridge::new();
+        bridge.update(0.1, Some(&payload), &Default::default());
+        scene.update(0.1, &bridge);
+        assert!(scene.smoke_bass > 0.0, "bin 0 drives the smoke bass");
+        assert!(scene.smoothed_bass.abs() < 1e-6, "band(1,9) is silent");
+        assert!(
+            (scene.glass_opacity() - 0.34).abs() < 1e-6,
+            "glass opacity must ignore the smoke bass"
+        );
+
+        // Bins 1..9 loud: `band(1, 9)` rises and the glass breathes.
+        let mut scene = DvdRoom::new();
+        let mut payload = BandPayload::silent(44_100.0);
+        for value in payload.freq_mag.iter_mut().take(9).skip(1) {
+            *value = 1.0;
+        }
+        let mut bridge = AudioBridge::new();
+        bridge.update(0.1, Some(&payload), &Default::default());
+        scene.update(0.1, &bridge);
+        assert!(scene.smoothed_bass > 0.0, "bins 1..9 drive smBass");
+        assert!((scene.glass_opacity() - (0.34 + scene.smoothed_bass * 0.06)).abs() < 1e-6);
+        assert!(scene.glass_opacity() > 0.34);
     }
 
     #[test]
