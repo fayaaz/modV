@@ -12,6 +12,8 @@ module.exports = [
       "out/**",
       "test-results/**",
       "tmp/**",
+      // Rust build artefacts can contain rustdoc-generated `.js`.
+      "crates/**",
       ".opencode/**",
       "src/renderer/src/v3-gl-ext.es.js",
     ],
