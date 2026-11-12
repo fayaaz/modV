@@ -98,8 +98,23 @@ renderer stays the default until the plan's M7.
 - Previews: the main panel reads the VMP1 preview ring; Gallery tiles and
   Scene hover cells use deferred `preview/module` and `preview/scene`
   requests (supervisor queue, answered ≤4/frame after present from isolated
-  LRU-cached instances). `state/sync` carries the `registered` module map so
-  the engine-mode Gallery is populated.
+  LRU-cached instances; filters preview over a generated test card).
+  `state/sync` carries the `registered` module map so the engine-mode Gallery
+  is populated.
+- Media (WS-10): `MediaHub` wraps `modv-media`'s GStreamer `VideoHub`
+  (cameras via v4l2, files via uridecodebin, portal screen nodes via
+  pipewiresrc, test patterns) behind `media/list-cameras|start-camera|
+  start-file|start-screen|stop-source|status`. The compositor uploads new
+  frames into per-source pooled textures and the Webcam module draws the
+  camera-like source selected by its 1-based `camera` prop (files excluded
+  from that order). Sources survive Scene applies, reconnect with backoff and
+  stop on shutdown. Engine-mode UI drives engine sources (no getUserMedia for
+  video); screen capture is gated until Electron exposes the portal node id.
+- Expressions/tweens/plugins: expressions run in-engine through Boa
+  (`crates/modv-engine/src/expressions.rs` + `modv-app/src/expressions.rs`),
+  applied at every JS `applyExpression` site; tweens are ported in
+  `modv-engine/src/tweens.rs`; JS plugin hooks run in a renderer-side host in
+  engine mode (`application/plugin-host.js`).
 
 ## Architecture (three execution contexts)
 

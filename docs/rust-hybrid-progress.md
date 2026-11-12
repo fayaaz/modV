@@ -12,8 +12,8 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1630 tests pass** (modv-app 241, modv-engine 425,
-  modv-ipc 42, modv-media 178, modv-render 22, modv-renderers 721).
+- Rust workspace: **1777 tests pass** (modv-app 283, modv-engine 438,
+  modv-ipc 42, modv-media 233, modv-render 22, modv-renderers 758).
 - Vitest: **947 tests pass** (includes the engine mirror-parity replay, the
   preview-client helpers and the engine audio payload shape).
 - Real-music analyser check (opt-in fixture): 12 s of the noiseblock radio
@@ -21,8 +21,8 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
   bass 0.85 / mid 0.48 / treble 0.30, beat envelope 1.0, tempo 160 BPM, lane
   spread 0.42 (`MODV_AUDIO_FIXTURE=… cargo test -p modv-media --test
   audio_stream_fixture`).
-- Packaged-engine smoke (CDP, `MODV_ENGINE=1`): the Gallery renders all **424**
-  registered modules (37 shader + 15 2D + 25 Point10 + 351 ISF) with engine
+- Packaged-engine smoke (CDP, `MODV_ENGINE=1`): the Gallery renders all **429**
+  registered modules (37 shader + 15 2D + 26 Point10 + 351 ISF) with engine
   thumbnails; Scene hover previews paint the hovered cell; BPM tweens animate
   (Chromantic Line `smoothing` 0.252 → 0.209 over 0.9 s); the status bar shows
   live FPS/size and the detected BPM.
@@ -109,7 +109,7 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       in the compositor; Ball renders through the packaged preview (CDP)
 - [x] Palette tween colours advance on the frame clock
 
-## M4 — Point10 — complete (25 of 25 scenes)
+## M4 — Point10 — complete (26 of 26 scene classes)
 
 - [x] Scene trait/SceneContext, AudioBridge + P10Audio, shared particle
       alpha/sprite + random, postfx chain (UnrealBloom/OutputPass/ShaderPass/
@@ -133,6 +133,11 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       seeded puffs, procedural logo)
 - [ ] Batch 5b in flight: GeometricTunnel (SSAO), RollingFire, SmokeRoom,
       LatentBackrooms (Afterimage)
+- [x] WebGPU/TSL fidelity: SmokeRoom, DvdRoom, RollingFire and BallOfFire now
+      run the JS GPU volume simulation + raymarch (compute passes, shadow
+      march, fire ramp); the puff/billboard substitutes are gone. BallOfFire
+      (frozen ball, transparent overlay) registered as the 26th scene.
+      AttractorParticles remains the fragment-MRT port (structurally matching)
 - [ ] Golden images (optional; behaviour parity is the priority), warm
       cache/instance eviction
 
@@ -177,6 +182,21 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       with a 24-frame JS reference fixture within 1 % and a real-music check
 - [x] Audio capture primitives: cpal input devices and a native PipeWire
       monitor stream (replaces `pw-record`), bounded queues, `AudioFeed`
+- [x] **Video/media capture in the engine (WS-10)**: GStreamer camera
+      enumeration and capture (v4l2), video files (uridecodebin, looping),
+      PipeWire portal screen nodes (pipewiresrc) and test patterns, newest-wins
+      frame slots; engine MediaHub uploads frames into pooled textures and the
+      Webcam module draws the selected 1-based camera source. Renderer UI
+      drives engine sources in engine mode (no getUserMedia/ImageCapture/
+      WebCodecs), shows status and reconnects. Validated with a real camera
+      (non-native 1000×700), a PipeWire screen node (1920×1080) and a file clip.
+      Screen capture in the UI is gated until Electron exposes the portal
+      PipeWire node id (the engine path is ready)
+- [x] Expressions: Boa-based `new Function` evaluation in the engine, applied
+      at every JS `applyExpression` site, with every-frame assignments and the
+      expressions/* actions
+- [x] Plugins: engine-mode JS plugin host in the renderer (hooks, props,
+      stores, UI extensions) forwarding writes to the engine
 - [x] Renderer → engine audio feed (default source): the pump forwards the
       full payload and beats; the engine drives shader/2D/ISF/Point10 audio
 - [x] Engine-side input-link evaluation: getter/state/mutation links,
@@ -198,13 +218,14 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 
 ## Known gaps (M7 sign-off)
 
-- **Engine stays opt-in (`MODV_ENGINE=1`).** WS-10 media capture (cameras,
-  screen/portal capture, video files via GStreamer) has not been ported; Web
-  Audio capture still lives in the renderer. Camera/Screen/Video modules
-  therefore render their legacy inputs only in the default renderer.
-- Expression assignments (the JS `new Function` per input) are not evaluated
-  by the engine; no default Scene uses them. JS plugins (`preprocessFrame`
-  hooks) are likewise renderer-only.
+- **Engine stays opt-in (`MODV_ENGINE=1`).** Cameras and video files are now
+  engine-owned, but engine-mode **screen capture** waits on an Electron API
+  that exposes the portal PipeWire node id (the GStreamer `pipewiresrc` path is
+  implemented and tested against a node). Video pause/playback-rate transport
+  is not modelled (restart the source). The built-in `grab-canvas` plugin
+  needs the worker's composited output canvas and is disabled with a reason.
+- Expressions and plugin hooks are now engine-supported; `osc` in expression
+  scope is empty until the engine owns OSC receive state.
 - Custom/third-party ISF transitions are not available: the six native
   transitions are ported, the picker filters unknown names to Fade.
 - The ISF corpus translates 351/351 fragments and 36/36 vertex sidecars with
