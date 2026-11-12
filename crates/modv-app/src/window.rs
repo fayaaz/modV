@@ -9,7 +9,7 @@
 //!
 //! M2 removed the M0 `ChromaticLine`/`SyntheticSine` demo from this path: the
 //! window now renders whatever the store describes (an empty state presents
-//! the near-black clear). `--audio-fixture` is still parsed for the M0
+//! the opaque black clear). `--audio-fixture` is still parsed for the M0
 //! headless/report path but has no effect here.
 //!
 //! Audio is owned by exactly one side. With the default `--audio-source
@@ -58,11 +58,14 @@ use crate::supervisor::{EngineSupervisor, PreviewKind};
 
 /// Most preview requests answered in one frame.
 ///
-/// Each answer can block on a GPU read-back (≤ 1 MiB at 512²), so a burst of
-/// hover requests rolls over to later frames instead of stalling present. The
-/// cap is shared by Gallery thumbnails (`preview/module`) and Scene hover
-/// cells (`preview/scene`).
-const MAX_PREVIEWS_PER_FRAME: usize = 4;
+/// Each answer can block on a GPU read-back (≤ 1 MiB at 512²; a cold
+/// volumetric Point10 thumbnail also builds pipelines/buffers), so a burst of
+/// Gallery requests must never stall presentation. One per frame at up to
+/// 120 Hz is far more than the visible-tile polling needs, and it keeps a
+/// single expensive miss out of any other frame's tail. The cap is shared by
+/// Gallery thumbnails (`preview/module`) and Scene hover cells
+/// (`preview/scene`).
+const MAX_PREVIEWS_PER_FRAME: usize = 1;
 
 /// Run the windowed event loop. Returns an error string on fatal failures
 /// (window creation, surface creation, event loop).

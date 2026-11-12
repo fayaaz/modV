@@ -53,7 +53,13 @@ use crate::store_ops::{Store, frames_presented_in};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(33); // ≤ 30 fps
-const SNAPSHOT_SAVE_EVERY_FRAMES: u64 = 120;
+/// Presented frames between state snapshots.
+///
+/// 600 frames is ~5 s at the engine's 120 Hz cadence (the earlier 120 was
+/// written for a 60 Hz design and ran a full JSON serialise + write once a
+/// second on the render thread). A crash loses at most five seconds of live
+/// state, the same order as the renderer's own persistence.
+const SNAPSHOT_SAVE_EVERY_FRAMES: u64 = 600;
 
 /// Most preview requests (`preview/module` + `preview/scene`) allowed to wait
 /// for the window loop.

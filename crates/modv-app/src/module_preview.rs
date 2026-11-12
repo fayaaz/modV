@@ -61,6 +61,8 @@
 //! window loop caps how many previews it answers per frame so a burst of hover
 //! requests cannot stall presentation.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value, json};
 
 use modv_engine::engine_state::ModuleInstance;
@@ -84,9 +86,20 @@ pub const MAX_PREVIEW_DIMENSION: u32 = 512;
 
 /// Number of `(module, width, height)` preview instances kept alive.
 ///
-/// Gallery layouts show a handful of tiles at once; four covers them without
-/// letting a long scroll accumulate Point10 scenes or shader pipelines.
-pub const MAX_CACHED_PREVIEWS: usize = 4;
+/// The Gallery only polls tiles inside the viewport now (~20 at once), so this
+/// covers the visible set and a little scroll headroom without accumulating
+/// hundreds of instances. Volumetric Point10 scenes are *not* retained (see
+/// [`ModulePreviews::volumetric_frames`]).
+pub const MAX_CACHED_PREVIEWS: usize = 24;
+
+/// Rendered frames cached for the volumetric Point10 scenes.
+///
+/// A volumetric instance owns eight 150x150x300 `Rgba16Float` textures
+/// (~432 MB). Rebuilding one per Gallery poll was the dominant engine-mode
+/// stutter (18–40 ms per miss while the 4-slot cache thrashed). A thumbnail is
+/// static in the Gallery, so the first frame is cached here and the temporary
+/// instance is disposed immediately.
+pub const MAX_VOLUMETRIC_FRAMES: usize = 32;
 
 /// Translated ISF pipelines kept by the preview runtime's bounded LRU.
 const ISF_PIPELINE_CACHE: usize = 4;
@@ -414,6 +427,9 @@ pub struct ModulePreviews {
     surfaces: TextureSurfaces,
     /// Cache, most recently used first.
     slots: Vec<PreviewSlot>,
+    /// Static thumbnails for the volumetric Point10 scenes, keyed by
+    /// `(module name, width, height)`. Their instances are never retained.
+    volumetric_frames: HashMap<(String, u32, u32), Vec<u8>>,
 }
 
 impl ModulePreviews {
@@ -447,6 +463,7 @@ impl ModulePreviews {
             executor,
             surfaces: TextureSurfaces::new(),
             slots: Vec::new(),
+            volumetric_frames: HashMap::new(),
         }
     }
 
@@ -461,6 +478,7 @@ impl ModulePreviews {
         // runtime exactly like the compositor's live one.
         self.isf_runtime =
             IsfRuntime::new(self.device.clone(), self.queue.clone(), ISF_PIPELINE_CACHE);
+        self.volumetric_frames.clear();
     }
 
     /// Number of cached `(module, size)` instances (test/diagnostic use).
@@ -490,6 +508,12 @@ impl ModulePreviews {
             return Err(PreviewError::ModuleNotFound(module_name.to_string()));
         }
 
+        let volumetric = matches!(registry.kind(module_name), Some(ModuleKind::Point10))
+            && Point10SceneKind::is_volumetric_name(module_name);
+        if volumetric {
+            return self.render_volumetric_frame(registry, module_name, width, height, frame);
+        }
+
         let index = match self
             .slots
             .iter()
@@ -516,6 +540,52 @@ impl ModulePreviews {
             height,
         )
         .map_err(PreviewError::Render)
+    }
+
+    /// Render (once) and cache a volumetric Point10 thumbnail.
+    ///
+    /// The temporary slot is disposed before returning, so the 432 MB volume
+    /// textures never stay resident per Gallery tile. Repeated polls are a map
+    /// lookup; the thumbnail is intentionally static, like a poster frame.
+    fn render_volumetric_frame(
+        &mut self,
+        registry: &ModuleRegistry,
+        module_name: &str,
+        width: u32,
+        height: u32,
+        frame: &FrameInfo,
+    ) -> Result<Vec<u8>, PreviewError> {
+        let key = (module_name.to_string(), width, height);
+        if let Some(pixels) = self.volumetric_frames.get(&key) {
+            return Ok(pixels.clone());
+        }
+
+        let index = self.create_slot(registry, module_name, width, height)?;
+        self.draw_slot(registry, index, frame)?;
+        let pixels = read_back_texture(
+            &self.device,
+            &self.queue,
+            &self.slots[index].target.texture,
+            width,
+            height,
+        )
+        .map_err(PreviewError::Render)?;
+
+        // Drop the huge instance immediately; only the RGBA8 frame is kept.
+        if let Some(position) = self
+            .slots
+            .iter()
+            .position(|slot| slot.matches(module_name, width, height))
+        {
+            let mut slot = self.slots.remove(position);
+            slot.dispose(&mut self.shader);
+        }
+
+        if self.volumetric_frames.len() >= MAX_VOLUMETRIC_FRAMES {
+            self.volumetric_frames.clear();
+        }
+        self.volumetric_frames.insert(key, pixels.clone());
+        Ok(pixels)
     }
 
     /// Build (and front-insert) a slot for `module_name`, evicting the least
@@ -693,6 +763,7 @@ impl ModulePreviews {
             executor,
             surfaces,
             slots,
+            ..
         } = self;
 
         let slot = &mut slots[index];

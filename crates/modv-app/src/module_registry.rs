@@ -284,6 +284,29 @@ pub enum Point10SceneKind {
 }
 
 impl Point10SceneKind {
+    /// Whether `name` is one of the four raymarched volume scenes.
+    ///
+    /// Their instances allocate ~432 MB of 3D textures, so Gallery thumbnails
+    /// must not keep them alive per tile. Name-based so the preview path can
+    /// classify without building a scene.
+    pub fn is_volumetric_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Point10 DVD Room"
+                | "Point10 Rolling Fire"
+                | "Point10 Ball Of Fire"
+                | "Point10 Smoke Room"
+        )
+    }
+
+    /// Whether this scene runs the full GPU volume simulation.
+    pub fn is_volumetric(&self) -> bool {
+        matches!(
+            self,
+            Self::DvdRoom(_) | Self::RollingFire(_) | Self::BallOfFire(_) | Self::SmokeRoom(_)
+        )
+    }
+
     /// Build a fresh scene for a registered wrapper name.
     ///
     /// `None` when `name` is not a ported scene — the compositor then skips the

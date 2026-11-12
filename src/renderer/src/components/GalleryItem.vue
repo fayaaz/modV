@@ -164,6 +164,11 @@ export default {
         inFlight: false,
         disposed: false,
         hovered: false,
+        // Only poll while the tile is near the viewport. The Gallery mounts
+        // every registered module (400+ tiles), and polling all of them was
+        // measured at ~150 preview requests/s — enough to keep the engine's
+        // render thread busy on thumbnail misses.
+        visible: false,
         failures: 0,
         // null → nothing pulled yet; the first frame is staggered so a fresh
         // Gallery does not enqueue hundreds of requests in one tick.
@@ -172,7 +177,30 @@ export default {
           performance.now() + Math.random() * GALLERY_INITIAL_SPREAD_MS,
       };
 
-      this.scheduleEnginePreview();
+      if (typeof IntersectionObserver === "function") {
+        this._previewObserver = new IntersectionObserver(
+          (entries) => {
+            const state = this._enginePreview;
+            if (!state || state.disposed) {
+              return;
+            }
+            const visible = entries.some((entry) => entry.isIntersecting);
+            if (visible === state.visible) {
+              return;
+            }
+            state.visible = visible;
+            if (visible) {
+              this.scheduleEnginePreview();
+            }
+          },
+          // Start fetching slightly before a tile scrolls in.
+          { root: null, rootMargin: "240px 0px" },
+        );
+        this._previewObserver.observe(canvas);
+      } else {
+        this._enginePreview.visible = true;
+        this.scheduleEnginePreview();
+      }
     },
 
     stopEnginePreview() {
@@ -186,6 +214,8 @@ export default {
         clearTimeout(state.timer);
         state.timer = null;
       }
+      this._previewObserver?.disconnect();
+      this._previewObserver = null;
 
       this._enginePreview = null;
     },
@@ -198,7 +228,10 @@ export default {
     /** Queue the next pull, honouring the current rate and any failure backoff. */
     scheduleEnginePreview() {
       const state = this._enginePreview;
-      if (!state || state.disposed || state.inFlight || state.timer !== null) {
+      if (!state || state.disposed || !state.visible) {
+        return;
+      }
+      if (state.inFlight || state.timer !== null) {
         return;
       }
 
@@ -223,6 +256,11 @@ export default {
     async pullEnginePreview() {
       const state = this._enginePreview;
       if (!state || state.disposed || state.inFlight) {
+        return;
+      }
+      if (!state.visible) {
+        // Scrolled out of view while the timer was queued; the observer will
+        // resume polling if it comes back.
         return;
       }
 
