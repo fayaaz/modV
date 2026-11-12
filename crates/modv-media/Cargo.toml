@@ -20,6 +20,14 @@ rustfft = "6.4.1"
 # Audio input-device enumeration and capture (WS-9). `cpal` is the
 # cross-platform host backend; on Linux it goes through ALSA.
 cpal = "0.17.3"
+# Video capture (WS-10): cameras (v4l2), video files (decodebin) and PipeWire
+# screen sources all go through one GStreamer graph, which is what the legacy
+# renderer's getUserMedia/getDisplayMedia/WebCodecs trio did in JS.
+# The 0.24 series targets GStreamer 1.26, the version in the engine image.
+# Aliased to the `gst*` names the gstreamer-rs examples use.
+gst = { package = "gstreamer", version = "0.24.5" }
+gst-app = { package = "gstreamer-app", version = "0.24.5" }
+gst-video = { package = "gstreamer-video", version = "0.24.5" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Native PipeWire monitor-source capture (WS-9), replacing the `pw-record`

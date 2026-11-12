@@ -78,6 +78,11 @@ RUN apt-get update \
       libatspi2.0-0t64 \
       libsecret-1-0 \
       libpipewire-0.3-0 \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-libav \
+      gstreamer1.0-pipewire \
       xvfb \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/electron \
@@ -101,6 +106,10 @@ RUN apt-get update \
       libasound2-dev \
       libudev-dev \
       libpipewire-0.3-dev \
+      libgstreamer1.0-dev \
+      libgstreamer-plugins-base1.0-dev \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
       libclang-dev \
       libxkbcommon-dev \
       libgl1-mesa-dev \
