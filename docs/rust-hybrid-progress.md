@@ -12,7 +12,7 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## Verification snapshot
 
-- Rust workspace: **1526 tests pass** (modv-app 215, modv-engine 413,
+- Rust workspace: **1538 tests pass** (modv-app 227, modv-engine 413,
   modv-ipc 32, modv-media 160, modv-render 21, modv-renderers 685).
 - Vitest: **947 tests pass** (includes the engine mirror-parity replay, the
   preview-client helpers and the engine audio payload shape).
@@ -129,7 +129,7 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
 - [ ] Golden images (optional; behaviour parity is the priority), warm
       cache/instance eviction
 
-## M5 — Scenes / performance — complete except shader transitions
+## M5 — Scenes / performance — complete
 
 - [x] scenes core logic (timing/rows/transition-pick/capture/preview-data/
       columns/cells/link-defaults) — 269 tests
@@ -150,9 +150,10 @@ supervisor mode, lost `engine/state` events, engine-mode renderer TypeErrors.
       queues (`Reply::Deferred`) and the window loop answers up to 4/frame
       from an isolated LRU-cached module instance (shader/2D/Point10/ISF)
 - [ ] Scene hover previews through `preview/scene` (in flight)
-- [ ] ISF shader scene transitions in flight: the six native effects
-      (crossfade/dissolve/pixelate/glitch/wipe/circle) with the outgoing frame
-      captured at transition start; Fade remains the performance-mode path
+- [x] Shader whole-Scene transitions: the six native effects (crossfade/
+      dissolve/pixelate/glitch/wipe/circle) as WGSL passes, the outgoing frame
+      captured at transition start, Fade fallback (performance mode always
+      fades), manual changes honour `allowedTransitions`
 - [x] Rename/removal migration for default Scenes: version-keyed rules,
       seeded-only renames (id/payload preserved) and removals, collision and
       idempotency handling, applied before seeding; the production table is
