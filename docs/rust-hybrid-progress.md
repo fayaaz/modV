@@ -93,8 +93,13 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 - [ ] shared/ + plane9 ports (P9Glsl, P9Audio), post-fx chain
       (RenderPass/UnrealBloom/ShaderPass/OutputPass/Afterimage/SSAO)
-- [ ] Point10 scene trait, instance pool, eviction, warm cache
-- [ ] 25 scenes ported (dependency order); golden images; prop round-trip
+- [x] Point10 scene trait, audio bridge, shared particle helpers, postfx chain
+      (UnrealBloom/OutputPass/Composer), compositor integration
+- [x] Chromatic Line, Chromatic Wave, Particle Field, Spiral Particles,
+      Waveform ported and rendering in the engine
+- [ ] Remaining 20 scenes (next batches: tunnels, cubes, water, WebGPU/TSL
+      scenes, SSAO/Afterimage); golden images vs the legacy renderer; warm
+      cache/instance eviction
 
 ## M5 — Scenes / performance
 
@@ -103,9 +108,11 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 - [x] default-scenes.js → JSON data (59 Scenes) + seeding/refresh/removal logic
 - [x] Scene apply/save/capture, playlist import/export, scenes.json
       persistence, row-name remap — engine-integrated, mirror deltas emitted
-- [ ] performance runtime (start/stop/tick, per-row dwell advance, crossfade
-      ghosts, whole-scene fade transitions)
+- [x] performance runtime (start/stop/tick, per-row dwell advance, crossfade
+      ghosts, row-fade blending assigned to both ids, whole-scene Fade for
+      manual changes during performance, event-driven deltas)
 - [ ] scene-preview frames to the UI (hover previews ≥ 25 fps)
+- [ ] ISF shader scene transitions (Fade is the runtime transition for now)
 
 ## M6 — Media
 
