@@ -1,1 +1,2 @@
-//! Renderer implementations (isf, shader, 2d, point10, three). See docs/rust-hybrid.md.
+//! Renderer implementations for the Rust engine. See docs/rust-hybrid.md.
+pub mod point10;
