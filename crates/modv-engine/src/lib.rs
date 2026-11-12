@@ -40,6 +40,12 @@
 //!   seeding/migration rules (`store/default-scenes.js`).
 //! - [`default_scene_migrations`] — version-keyed rename/removal migrations
 //!   for seeded default Scenes on defaults-version bumps.
+//!
+//! M7/WS-12 — expressions, tweens and plugins:
+//!
+//! - [`tweens`] — the anime.js frame pre-renderer, the easing catalogue and
+//!   the link-readable tween runtimes (`store/modules/tweens.js`,
+//!   `dataTypes.js` `tween` type).
 
 pub mod blend;
 pub mod default_scene_migrations;
@@ -59,3 +65,4 @@ pub mod scene_timing;
 pub mod scene_transition_pick;
 pub mod scenes_playlist;
 pub mod swap;
+pub mod tweens;

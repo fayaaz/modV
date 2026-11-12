@@ -142,10 +142,19 @@ pub struct Store {
     pub(crate) scenes_path: Option<std::path::PathBuf>,
     /// The Scene this store last applied (`applySceneNow`'s active Scene).
     pub(crate) applied_scene_id: Option<String>,
+    /// Monotonic counter bumped by every mutation of the Scene list or its row
+    /// mapping. Scene hover-preview caches compare it so an edited Scene never
+    /// shows a stale frame.
+    scene_list_revision: u64,
     /// Performance-mode runtime: per-row dwells, row crossfades and the
     /// whole-scene fade (`scenes.js` module-level `rowRuntime`,
     /// `rowTransitions` and `transition`).
     pub(crate) performance: crate::performance::PerformanceRuntime,
+    /// Tween runtime (WS-12): descriptors from `state.tweens` pre-rendered at
+    /// [`Store::fps`] and the current BPM. Input Links read and advance them.
+    pub(crate) tweens: modv_engine::tweens::TweenSet,
+    /// Tween frame rate (`fps/SET_FPS`; the JS `store.state.fps.fps`).
+    pub(crate) fps: f64,
     /// The current audio frame handed to modules and shader uniforms.
     ///
     /// Filled by `meyda/SET_BANDS` from the renderer's audio pump (see
@@ -225,7 +234,10 @@ impl Store {
             scenes: crate::scene_ops::ScenesState::default(),
             scenes_path,
             applied_scene_id: None,
+            scene_list_revision: 0,
             performance,
+            tweens: modv_engine::tweens::TweenSet::new(),
+            fps: 60.0,
             audio: AudioFrame::default(),
             beats: BeatsState::default(),
             link_smoothing: HashMap::new(),
@@ -249,6 +261,22 @@ impl Store {
     /// [`crate::compositor::FrameInfo`]).
     pub fn audio(&self) -> &AudioFrame {
         &self.audio
+    }
+
+    /// Revision of the Scene list and its row mapping.
+    ///
+    /// Bumped by every Scene mutation (hydrate, seed, import, remove, load,
+    /// capture, row rename). [`crate::scene_preview`] stores it with each
+    /// cached hover preview so an edited Scene rebuilds instead of serving a
+    /// stale frame.
+    pub fn scene_list_revision(&self) -> u64 {
+        self.scene_list_revision
+    }
+
+    /// Mark the Scene list (or the row-name mapping that selects its rows) as
+    /// changed.
+    pub(crate) fn touch_scene_list(&mut self) {
+        self.scene_list_revision = self.scene_list_revision.wrapping_add(1);
     }
 
     /// Remove and return the pending `{ type, payload }` records, in issue
@@ -296,6 +324,11 @@ impl Store {
             "beats/SET_BPM" => self.set_bpm(params),
             "beats/setBpm" => self.set_bpm_action(params),
             "beats/SET_KICK" => self.set_kick(params),
+            // ————————————————— FPS / tweens (WS-12) —————————————————
+            "fps/SET_FPS" => self.set_fps(params),
+            "tweens/ADD_TWEEN" => self.add_tween(params),
+            "tweens/REMOVE_TWEEN" => self.remove_tween_action(params),
+            "tweens/createTween" => self.create_tween(params),
             // ————————————————— Inputs (WS-1b) —————————————————
             "inputs/addInput" => self.add_input(params),
             "inputs/removeInput" => self.remove_input_action(params),
@@ -999,6 +1032,7 @@ impl Store {
         if let Some(bpm) = bpm {
             if (self.beats.bpm - bpm).abs() > f64::EPSILON {
                 self.beats.bpm = bpm;
+                self.update_tween_bpm(bpm);
                 self.deltas.push("beats/SET_BPM", json!({ "bpm": bpm }));
             }
         }
@@ -1254,6 +1288,160 @@ impl Store {
         self.set_focused_input(&Map::new())
     }
 
+    // ————————————————— FPS / tweens (WS-12) —————————————————
+
+    /// `fps/SET_FPS`: the tween frame rate (`store.state.fps.fps`).
+    ///
+    /// Rebuilds every tween so the recorded frame count matches the new rate,
+    /// preserving each tween's position fraction (`buildFrames`' `seek`).
+    fn set_fps(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let Some(fps) = params
+            .get("fps")
+            .and_then(Value::as_f64)
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+        else {
+            return Ok(Value::Null);
+        };
+        if (self.fps - fps).abs() <= f64::EPSILON {
+            return Ok(Value::Null);
+        }
+        self.fps = fps;
+        let bpm = self.bpm().max(1.0);
+        for (_, tween) in self.tweens.iter_mut() {
+            tween.rebuild(fps, bpm);
+        }
+        Ok(Value::Null)
+    }
+
+    /// `tweens/addTween`/`tweens/ADD_TWEEN`: store a descriptor and pre-render
+    /// it. The payload is either the descriptor itself or `{ tween }`.
+    fn add_tween(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let payload = params
+            .get("tween")
+            .and_then(Value::as_object)
+            .unwrap_or(params);
+        let value = Value::Object(payload.clone());
+        if value.get("id").and_then(Value::as_str).is_none() {
+            return Ok(Value::Null);
+        }
+        push_tween_json(&mut self.state.tweens, value.clone());
+        match self.tweens.upsert_json(&value, self.fps, self.bpm()) {
+            Ok(_) => {}
+            Err(error) => {
+                self.warn_once(
+                    "tween:add".to_string(),
+                    &format!("engine: WARN tweens/ADD_TWEEN ignored: {error}"),
+                );
+            }
+        }
+        Ok(value)
+    }
+
+    /// `tweens/REMOVE_TWEEN`.
+    fn remove_tween_action(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let Some(id) = params.get("id").and_then(Value::as_str) else {
+            return Ok(Value::Null);
+        };
+        self.remove_tween(id);
+        self.tweens.remove(id);
+        Ok(Value::Null)
+    }
+
+    /// `tweens/createTween` (`tweens.js:135-177`): the action the UI dispatches
+    /// when a link switches to a tween source. Builds the same descriptor the
+    /// JS stores (minus the pre-recorded `frames`, which stay in the runtime)
+    /// and returns it.
+    fn create_tween(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(crate::ids::uuid_v4);
+        let data = params
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![json!([0.0]), json!([1.0])]);
+        let mut descriptor = modv_engine::tweens::TweenDescriptor::new(&id, value_to_rows(&data));
+        if let Some(duration) = params.get("duration").and_then(Value::as_f64) {
+            descriptor.duration = duration;
+        }
+        if let Some(direction) = params.get("direction").and_then(Value::as_str) {
+            descriptor.direction = direction.to_string();
+        }
+        if let Some(easing) = params.get("easing").and_then(Value::as_str) {
+            descriptor.easing = easing.to_string();
+        }
+        if let Some(looping) = params.get("loop").and_then(Value::as_bool) {
+            descriptor.looping = looping;
+        }
+        if let Some(use_bpm) = params.get("useBpm").and_then(Value::as_bool) {
+            descriptor.use_bpm = use_bpm;
+        }
+        if let Some(division) = params.get("bpmDivision").and_then(Value::as_f64) {
+            descriptor.bpm_division = division;
+        }
+        if let Some(total) = params.get("durationAsTotalTime").and_then(Value::as_bool) {
+            descriptor.duration_as_total_time = total;
+        }
+        if let Some(steps) = params.get("steps").and_then(Value::as_f64) {
+            descriptor.steps = steps;
+        }
+        if let Some(is_gallery) = params.get("isGallery").and_then(Value::as_bool) {
+            descriptor.is_gallery = Some(is_gallery);
+        }
+
+        let value = descriptor.to_json();
+        push_tween_json(&mut self.state.tweens, value.clone());
+        self.tweens
+            .insert_descriptor(descriptor, self.fps, self.bpm());
+        self.deltas.push("tweens/ADD_TWEEN", value.clone());
+        Ok(value)
+    }
+
+    /// Register one tween descriptor in the runtime (Scene restore).
+    pub(crate) fn register_tween(&mut self, value: &Value) {
+        if let Err(error) = self.tweens.upsert_json(value, self.fps, self.bpm()) {
+            self.warn_once(
+                "tween:register".to_string(),
+                &format!("engine: WARN tween ignored: {error}"),
+            );
+        }
+    }
+
+    /// Reload the runtime from `state.tweens` (preset/scene replacement).
+    pub(crate) fn reload_tweens(&mut self) {
+        match modv_engine::tweens::TweenSet::load_from_json(
+            &self.state.tweens,
+            self.fps,
+            self.bpm(),
+        ) {
+            Ok(tweens) => self.tweens = tweens,
+            Err(error) => {
+                self.warn_once(
+                    "tween:load".to_string(),
+                    &format!("engine: WARN could not load tweens: {error}"),
+                );
+                self.tweens = modv_engine::tweens::TweenSet::new();
+            }
+        }
+    }
+
+    /// `tweens/updateBpm` (`tweens.js:183-216`): BPM tweens recompute their
+    /// recorded duration/frames; wall-clock tweens are untouched.
+    fn update_tween_bpm(&mut self, bpm: f64) {
+        let mut changed = false;
+        for (_, tween) in self.tweens.iter_mut() {
+            if tween.descriptor().use_bpm {
+                tween.update_bpm(bpm);
+                changed = true;
+            }
+        }
+        if changed {
+            self.state.tweens = self.tweens.to_json();
+        }
+    }
+
     /// Evaluate every Input Link against the current audio frame and apply the
     /// resulting writes (WS-9).
     ///
@@ -1268,6 +1456,7 @@ impl Store {
             &self.state,
             audio,
             &beats,
+            &mut self.tweens,
             &mut self.link_smoothing,
             &mut writes,
         );
@@ -1527,6 +1716,11 @@ impl Store {
     pub fn sync_state(&self) -> Value {
         let mut snapshot = self.snapshot();
         if let Value::Object(map) = &mut snapshot {
+            // The legacy worker registered module definitions locally; in
+            // engine mode nothing does, so the Gallery (and any surface that
+            // reads `state.modules.registered[name].meta`) is empty without
+            // this map. Sent once per connection, not per delta.
+            map.insert("registered".into(), self.registry.registered_modules());
             map.insert("scenes".into(), json!(self.scenes.scenes));
             map.insert("performance".into(), self.scenes.performance.clone());
             map.insert("defaultsSeeded".into(), json!(self.scenes.defaults_seeded));
@@ -1580,6 +1774,7 @@ impl Store {
         // Link smoothing/throttle state belongs to the replaced inputs.
         self.link_smoothing.clear();
         self.link_deltas.clear();
+        self.reload_tweens();
         Ok(())
     }
 
@@ -1605,6 +1800,51 @@ impl Store {
             eprintln!("{message}");
         }
     }
+}
+
+/// Append or replace a tween descriptor in the opaque `tweens` slot.
+fn push_tween_json(tweens: &mut Value, tween: Value) {
+    let id = tween.get("id").and_then(Value::as_str).map(str::to_string);
+    match tweens {
+        Value::Array(entries) => {
+            if let Some(id) = &id {
+                if let Some(existing) = entries
+                    .iter_mut()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                {
+                    *existing = tween;
+                    return;
+                }
+            }
+            entries.push(tween);
+        }
+        Value::Object(map) => {
+            if let Some(entries) = map.get_mut("tweens") {
+                push_tween_json(entries, tween);
+            } else if let Some(id) = id {
+                map.insert(id, tween);
+            }
+        }
+        _ => {
+            *tweens = Value::Array(vec![tween]);
+        }
+    }
+}
+
+/// `data: [[...]]` JSON → the descriptor's rows.
+fn value_to_rows(data: &[Value]) -> Vec<Vec<f64>> {
+    data.iter()
+        .map(|row| {
+            row.as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_f64)
+                        .collect::<Vec<f64>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// `framesPresented` from a snapshot document's `_engine` sidecar.
@@ -2651,6 +2891,153 @@ mod tests {
         assert!(
             module["props"].get("inputImage").is_some(),
             "the texture prop is registered so panels can show it"
+        );
+    }
+
+    #[test]
+    fn tween_links_resolve_from_the_runtime_and_advance_per_read() {
+        let mut store = Store::new();
+        store.state.modules.insert(
+            "m-tw".to_string(),
+            csv_module("m-tw", json!({ "enabled": true })),
+        );
+        store.state.modules.get_mut("m-tw").expect("module").props = json!({ "amount": 0.0 });
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({
+                    "id": "in-tw",
+                    "type": "action",
+                    "location": "modules/updateProp",
+                    "data": {"moduleId": "m-tw", "prop": "amount"},
+                }),
+            )
+            .expect("addInput");
+        store
+            .dispatch(
+                "inputs/createInputLink",
+                json!({
+                    "inputId": "in-tw",
+                    "type": "state",
+                    "location": "tweens.tweens['t1'].value[0]",
+                    "source": "tween",
+                    "min": null,
+                    "max": null,
+                }),
+            )
+            .expect("createInputLink");
+
+        let mut descriptor =
+            modv_engine::tweens::TweenDescriptor::new("t1", vec![vec![0.0], vec![1.0]]);
+        descriptor.use_bpm = false;
+        descriptor.duration = 100.0;
+        descriptor.looping = false;
+        descriptor.direction = "normal".to_string();
+        descriptor.easing = "linear".to_string();
+        store.state.tweens = json!([descriptor.to_json()]);
+        store.reload_tweens();
+
+        // Frame 0 is 0 (the prop is already 0); the next read advances to 1.
+        store.update_input_links(&AudioFrame::default(), Duration::ZERO);
+        assert_eq!(
+            store.state().modules["m-tw"].props["amount"],
+            json!(0.0),
+            "first read stays on frame 0"
+        );
+        store.update_input_links(&AudioFrame::default(), Duration::ZERO);
+        // 100 ms of a two-row (non-total) tween at 60 fps records three
+        // frames; the second read is one third of the way along.
+        let advanced = store.state().modules["m-tw"].props["amount"]
+            .as_f64()
+            .expect("number");
+        assert!(
+            (advanced - 1.0 / 3.0).abs() < 1e-5,
+            "the second read advanced the tween (got {advanced})"
+        );
+    }
+
+    #[test]
+    fn bpm_and_fps_changes_rebuild_tween_frames() {
+        let mut store = Store::new();
+        store.state.tweens = json!([modv_engine::scene_link_defaults::default_link_tween(
+            "t1", None
+        )]);
+        store.reload_tweens();
+        let frames_at_default = store.tweens.get("t1").expect("tween").frames().len();
+
+        store
+            .dispatch("beats/SET_BPM", json!({ "bpm": 60 }))
+            .expect("set bpm");
+        let slow = store.tweens.get("t1").expect("tween").frames().len();
+        assert!(
+            slow > frames_at_default,
+            "halving the BPM lengthens the tween ({frames_at_default} -> {slow})"
+        );
+        // `updateBpm` writes `calculatedBpm * data.length` for a per-row
+        // duration: (3600 / 60) * 32 * 2.
+        assert_eq!(store.state().tweens[0]["duration"], json!(3840));
+
+        store
+            .dispatch("fps/SET_FPS", json!({ "fps": 30 }))
+            .expect("set fps");
+        let half_rate = store.tweens.get("t1").expect("tween").frames().len();
+        assert!(
+            half_rate < slow,
+            "halving the frame rate halves the recorded frames"
+        );
+        assert_eq!(store.fps, 30.0);
+    }
+
+    #[test]
+    fn create_tween_stores_and_prerenders_the_descriptor() {
+        let mut store = Store::new();
+        store.drain_deltas();
+        let tween = store
+            .dispatch(
+                "tweens/createTween",
+                json!({
+                    "id": "created",
+                    "data": [[0], [1]],
+                    "duration": 400,
+                    "direction": "alternate",
+                    "easing": "easeInOutSine",
+                    "loop": true,
+                    "useBpm": false,
+                }),
+            )
+            .expect("createTween");
+        assert_eq!(tween["id"], json!("created"));
+        assert_eq!(store.state().tweens[0]["id"], json!("created"));
+        assert!(store.tweens.get("created").is_some());
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "tweens/ADD_TWEEN");
+
+        store
+            .dispatch("tweens/REMOVE_TWEEN", json!({ "id": "created" }))
+            .expect("remove tween");
+        assert!(!store.tweens.contains("created"));
+        assert_eq!(store.state().tweens, json!([]));
+    }
+
+    #[test]
+    fn sync_state_carries_the_registered_module_map() {
+        let store = Store::new();
+        let sync = store.sync_state();
+        let registered = sync["registered"]
+            .as_object()
+            .expect("state/sync includes registered modules");
+        assert!(
+            registered.len() >= 37 + 15 + 18,
+            "expected every built-in module, got {}",
+            registered.len()
+        );
+        assert_eq!(registered["Bands"]["meta"]["name"], json!("Bands"));
+        assert_eq!(registered["Bands"]["meta"]["type"], json!("shader"));
+        assert_eq!(registered["Ball"]["meta"]["type"], json!("2d"));
+        assert_eq!(
+            registered["Point10 Chromatic Line"]["meta"]["type"],
+            json!("2d")
         );
     }
 

@@ -61,14 +61,16 @@
 //! - **Performance runtime lives in [`crate::performance`].**
 //!   `scenes/startPerformance`, `scenes/stopPerformance`, `scenes/tick`,
 //!   `scenes/nextScene` and the row-level apply are wired there; partial-Scene
-//!   previews (`scenePreview/*`) remain M5d.
-//! - **Default-scene rename/removal migration is not applied.** Seeding uses
-//!   [`modv_engine::default_scenes::get_scenes_to_seed`] exactly; the
-//!   `get_default_scenes_to_replace`/`_to_remove` migration requires building
-//!   the replacement documents through the same snapshot path and is deferred
-//!   with the rest of the performance-state work.
-//! - **Scene preview frames are M5d.** Nothing here touches the preview
-//!   ring.
+//!   previews are served by `preview/scene` (see [`crate::scene_preview`]).
+//! - **Default-scene migrations run before seeding.** Seeded Scenes retired
+//!   between the persisted defaults version and the current one are renamed or
+//!   removed by
+//!   [`modv_engine::default_scene_migrations::ensure_default_scene_migration`]
+//!   first, so newly introduced definitions neither duplicate a renamed Scene
+//!   nor resurrect a removed one.
+//! - **Scene preview frames are rendered by `preview/scene`**, not here; the
+//!   store only exposes the Scene document and bumps the list revision that
+//!   invalidates the preview cache.
 //! - **No meyda smoothing id.** `createBassLink` asks
 //!   `meyda/getSmoothingId` for the feature smoothing argument; the engine has
 //!   no Meyda smoothing registry yet (WS-9/M6), so links are created with
@@ -90,7 +92,7 @@ use serde_json::{Map, Value, json};
 
 use modv_engine::default_scenes::{
     DEFAULTS_VERSION, LEGACY_DEFAULTS_VERSION, SceneDocument, get_default_scene_names_up_to,
-    get_scenes_to_seed, scene_key,
+    scene_key,
 };
 use modv_engine::engine_state::{
     GALLERY_GROUP_NAME, GROUP_ENABLED, Group, InheritFrom, ModuleInstance,
@@ -293,6 +295,25 @@ impl Store {
         &self.scenes
     }
 
+    /// The Scene document and row-name mapping a `preview/scene` request
+    /// needs.
+    ///
+    /// Looks the Scene up by id in the store's list (so unsaved/edited Scenes
+    /// are visible) and returns it with the current `performance.rowNames`
+    /// mapping, which is what resolves named rows for the cell preview.
+    /// `None` when no Scene has that id; the caller answers
+    /// `scene_not_found`.
+    pub fn scene_preview_document(&self, scene_id: &str) -> Option<(Value, Vec<String>)> {
+        let scene = self
+            .scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.get("id").and_then(Value::as_str) == Some(scene_id))?
+            .clone();
+        let row_names = normalize_row_names(self.scenes.performance.get("rowNames"));
+        Some((scene, row_names))
+    }
+
     /// The resolved `scenes.json` path, when the store has a state path.
     #[allow(dead_code)]
     pub fn scenes_path(&self) -> Option<&Path> {
@@ -339,6 +360,7 @@ impl Store {
         self.scenes.defaults_version = parsed.defaults_version;
         self.scenes.defaults_seeded = parsed.defaults_seeded;
         self.scenes.seeded_default_scenes = parsed.seeded_default_scenes;
+        self.touch_scene_list();
 
         self.emit_scene_list();
         self.emit_performance();
@@ -392,6 +414,7 @@ impl Store {
         self.scenes.defaults_version = parsed.defaults_version;
         self.scenes.defaults_seeded = parsed.defaults_seeded;
         self.scenes.seeded_default_scenes = parsed.seeded_default_scenes;
+        self.touch_scene_list();
 
         self.emit_performance();
         self.emit_defaults_metadata();
@@ -409,6 +432,26 @@ impl Store {
     pub fn ensure_default_scenes(&mut self) -> Result<Value, StoreError> {
         let current_version = self.scenes.defaults_version.max(0);
         let mut seeded = normalize_default_scene_name_list(&self.scenes.seeded_default_scenes);
+
+        // Rename/remove seeded Scenes that the defaults retired between the
+        // persisted version and this one *before* seeding, so the new
+        // definitions neither duplicate a renamed Scene nor resurrect a
+        // removed one. The plan's `seeds` are the still-missing defaults.
+        let plan = modv_engine::default_scene_migrations::ensure_default_scene_migration(
+            current_version,
+            DEFAULTS_VERSION,
+            &mut self.scenes.scenes,
+            &mut seeded,
+        );
+        if !plan.report.renamed.is_empty() || !plan.report.removed.is_empty() {
+            eprintln!(
+                "engine: INFO default Scene migration: {} renamed, {} removed, {} skipped",
+                plan.report.renamed.len(),
+                plan.report.removed.len(),
+                plan.report.skipped.len()
+            );
+        }
+
         let seeded_keys: HashSet<String> = seeded.iter().map(|name| scene_key(name)).collect();
         let existing_names: Vec<String> = self
             .scenes
@@ -420,7 +463,7 @@ impl Store {
         let existing_keys: HashSet<String> =
             existing_names.iter().map(|name| scene_key(name)).collect();
 
-        let definitions = get_scenes_to_seed(current_version, &seeded, &existing_names);
+        let definitions = plan.seeds;
         let mut added = Vec::new();
         let mut skipped_modules = 0usize;
 
@@ -458,6 +501,7 @@ impl Store {
         self.scenes.seeded_default_scenes = seeded;
         self.scenes.defaults_seeded = true;
         self.scenes.defaults_version = DEFAULTS_VERSION.max(current_version);
+        self.touch_scene_list();
 
         self.emit_scene_list();
         self.emit_defaults_metadata();
@@ -1050,6 +1094,7 @@ impl Store {
         }
 
         self.scenes.scenes[index] = updated.clone();
+        self.touch_scene_list();
         self.deltas.push("scenes/ADD_SCENE", updated.clone());
         self.persist_best_effort();
         Ok(json!({ "scene": updated }))
@@ -1092,6 +1137,7 @@ impl Store {
             Some(index) => self.scenes.scenes[index] = imported.clone(),
             None => self.scenes.scenes.push(imported.clone()),
         }
+        self.touch_scene_list();
         self.deltas.push("scenes/ADD_SCENE", imported.clone());
 
         if params.get("apply").and_then(Value::as_bool) == Some(true) {
@@ -1133,6 +1179,8 @@ impl Store {
             mode,
         )
         .map_err(|error| invalid(action, error.to_string()))?;
+
+        self.touch_scene_list();
 
         if let Some(performance) = &report.performance {
             self.scenes.performance = performance.clone();
@@ -1226,6 +1274,7 @@ impl Store {
             .scenes
             .retain(|scene| scene.get("id").and_then(Value::as_str) != Some(scene_id.as_str()));
         let removed = before != self.scenes.scenes.len();
+        self.touch_scene_list();
 
         self.deltas
             .push("scenes/REMOVE_SCENE", json!({ "sceneId": scene_id }));
@@ -1248,6 +1297,7 @@ impl Store {
             Value::Array(normalized.iter().cloned().map(Value::String).collect()),
         );
         self.remap_row_groups_for_names(&normalized);
+        self.touch_scene_list();
         self.emit_group_order();
         self.persist_best_effort();
         Ok(Value::Array(
@@ -1267,7 +1317,14 @@ impl Store {
             .get("config")
             .cloned()
             .unwrap_or_else(|| Value::Object(params.clone()));
-        self.scenes.performance = merge_performance(&self.scenes.performance, &data);
+        let merged = merge_performance(&self.scenes.performance, &data);
+        // A config update can carry `rowNames` (the grid mapping a preview
+        // resolves); a changed mapping invalidates cached Scene previews.
+        let row_names_changed = merged.get("rowNames") != self.scenes.performance.get("rowNames");
+        self.scenes.performance = merged;
+        if row_names_changed {
+            self.touch_scene_list();
+        }
         self.ensure_performance_runtime_keys();
         self.emit_performance();
         self.persist_best_effort();
@@ -1784,7 +1841,8 @@ impl Store {
                 object.insert("id".to_string(), json!(new_id));
             }
             push_tween(&mut self.state.tweens, value.clone());
-            self.deltas.push("tweens/ADD_TWEEN", value);
+            self.deltas.push("tweens/ADD_TWEEN", value.clone());
+            self.register_tween(&value);
         }
 
         for (old_id, link) in links {
@@ -1810,6 +1868,10 @@ impl Store {
             self.deltas
                 .push("inputs/ADD_INPUT_LINK", json!({ "inputLink": value }));
         }
+
+        // Keep the tween runtime in step with the document (collapses any
+        // stale entries and preserves descriptor order).
+        self.reload_tweens();
     }
 
     /// Active rows implied by the live Group stamps for one Scene

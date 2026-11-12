@@ -41,6 +41,7 @@ use serde_json::Value;
 
 use modv_engine::engine_state::EngineState;
 use modv_engine::inputs::{InputLink, InputLinkKind, resolve_input_link_value};
+use modv_engine::tweens::{TweenSet, parse_tween_link_location, resolve_tween_link};
 use modv_renderers::two_d::AudioFrame;
 
 /// Minimum spacing between Input Link deltas for one input.
@@ -127,6 +128,7 @@ pub fn evaluate_input_links(
     state: &EngineState,
     audio: &AudioFrame,
     beats: &BeatsState,
+    tweens: &mut TweenSet,
     smoothing: &mut HashMap<String, f64>,
     writes: &mut Vec<LinkWrite>,
 ) {
@@ -174,10 +176,17 @@ pub fn evaluate_input_links(
 
         let raw = match link.kind {
             InputLinkKind::Getter => resolve_getter(link, audio, smoothing),
-            InputLinkKind::State => link
-                .location
-                .as_deref()
-                .and_then(|path| resolve_state_path(state, beats, path)),
+            InputLinkKind::State => link.location.as_deref().and_then(|path| {
+                // Tween links read (and advance) the live tween first; a
+                // snapshot that carries a literal `value` still resolves
+                // through the generic path walker below.
+                if let Some((id, channel)) = parse_tween_link_location(path) {
+                    resolve_tween_link(tweens, &id, channel)
+                        .or_else(|| resolve_state_path(state, beats, path))
+                } else {
+                    resolve_state_path(state, beats, path)
+                }
+            }),
             InputLinkKind::Mutation => resolve_mutation(link, state, beats),
         };
 
@@ -623,12 +632,17 @@ mod tests {
     }
 
     fn evaluate(state: &EngineState) -> Vec<LinkWrite> {
+        evaluate_with_tweens(state, &mut TweenSet::new())
+    }
+
+    fn evaluate_with_tweens(state: &EngineState, tweens: &mut TweenSet) -> Vec<LinkWrite> {
         let mut smoothing = HashMap::new();
         let mut writes = Vec::new();
         evaluate_input_links(
             state,
             &audio(),
             &BeatsState::default(),
+            tweens,
             &mut smoothing,
             &mut writes,
         );
@@ -795,6 +809,7 @@ mod tests {
             &state,
             &audio(),
             &BeatsState::default(),
+            &mut TweenSet::new(),
             &mut smoothing,
             &mut writes,
         );
@@ -806,6 +821,7 @@ mod tests {
             &state,
             &audio(),
             &BeatsState::default(),
+            &mut TweenSet::new(),
             &mut smoothing,
             &mut writes,
         );
@@ -868,14 +884,28 @@ mod tests {
         };
         let mut smoothing = HashMap::new();
         let mut writes = Vec::new();
-        evaluate_input_links(&state, &audio(), &beats, &mut smoothing, &mut writes);
+        evaluate_input_links(
+            &state,
+            &audio(),
+            &beats,
+            &mut TweenSet::new(),
+            &mut smoothing,
+            &mut writes,
+        );
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].value, 1.0);
 
         // bpm path
         state.input_links.get_mut("input-kick").unwrap().location = Some("beats.bpm".to_string());
         writes.clear();
-        evaluate_input_links(&state, &audio(), &beats, &mut smoothing, &mut writes);
+        evaluate_input_links(
+            &state,
+            &audio(),
+            &beats,
+            &mut TweenSet::new(),
+            &mut smoothing,
+            &mut writes,
+        );
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].value, 128.0);
     }
@@ -963,6 +993,7 @@ mod tests {
                 bpm: 0.0,
                 kick: true,
             },
+            &mut TweenSet::new(),
             &mut smoothing,
             &mut writes,
         );
@@ -974,6 +1005,7 @@ mod tests {
             &state,
             &audio(),
             &BeatsState::default(),
+            &mut TweenSet::new(),
             &mut smoothing,
             &mut writes,
         );
@@ -1118,6 +1150,7 @@ mod tests {
             &state,
             &audio,
             &BeatsState::default(),
+            &mut TweenSet::new(),
             &mut smoothing,
             &mut writes,
         );
