@@ -98,7 +98,11 @@ class EngineProtocolClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`engine request "${method}" timed out after ${timeoutMs} ms`));
+        reject(
+          new Error(
+            `engine request "${method}" timed out after ${timeoutMs} ms`,
+          ),
+        );
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.socket.write(encodeFrame(KIND_REQUEST, Buffer.from(body, "utf8")));
@@ -111,7 +115,9 @@ class EngineProtocolClient extends EventEmitter {
       if (this.buffer.length < 5) return;
       const length = this.buffer.readUInt32LE(0);
       if (length > MAX_FRAME_BYTES) {
-        this._failProtocol(`declared frame length ${length} exceeds the 64 MiB cap`);
+        this._failProtocol(
+          `declared frame length ${length} exceeds the 64 MiB cap`,
+        );
         return;
       }
       if (this.buffer.length < 5 + length) return;
@@ -127,7 +133,9 @@ class EngineProtocolClient extends EventEmitter {
     try {
       message = JSON.parse(payload.toString("utf8"));
     } catch (error) {
-      this._failProtocol(`engine sent invalid JSON (kind ${kind}): ${error.message}`);
+      this._failProtocol(
+        `engine sent invalid JSON (kind ${kind}): ${error.message}`,
+      );
       return;
     }
 
@@ -184,4 +192,11 @@ class EngineProtocolClient extends EventEmitter {
   }
 }
 
-export { EngineProtocolClient, encodeFrame, KIND_REQUEST, KIND_RESPONSE, KIND_EVENT, MAX_FRAME_BYTES };
+export {
+  EngineProtocolClient,
+  encodeFrame,
+  KIND_REQUEST,
+  KIND_RESPONSE,
+  KIND_EVENT,
+  MAX_FRAME_BYTES,
+};

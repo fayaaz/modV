@@ -38,7 +38,10 @@ const silentLogger = { info() {}, warn() {}, error() {} };
 let launcherCount = 0;
 function makeLauncher(mode) {
   launcherCount += 1;
-  const launcher = path.join(tmpDir, `engine-launcher-${process.pid}-${launcherCount}.sh`);
+  const launcher = path.join(
+    tmpDir,
+    `engine-launcher-${process.pid}-${launcherCount}.sh`,
+  );
   fs.writeFileSync(
     launcher,
     `#!/bin/sh\nexport FAKE_ENGINE_MODE=${mode}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeEngine)} "$@"\n`,
@@ -70,7 +73,9 @@ async function waitForState(supervisor, wanted, timeoutMs = 10_000) {
     if (supervisor.getState() === wanted) return wanted;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`timed out waiting for engine state "${wanted}" (got "${supervisor.getState()}")`);
+  throw new Error(
+    `timed out waiting for engine state "${wanted}" (got "${supervisor.getState()}")`,
+  );
 }
 
 describe("EngineSupervisor", () => {
@@ -84,7 +89,9 @@ describe("EngineSupervisor", () => {
     const { supervisor } = makeTestSupervisor({ mode: "ok" });
     cleanup.push(() => supervisor.shutdown());
 
-    const running = new Promise((resolve) => supervisor.on("engine-state", (t) => t.state === "running" && resolve()));
+    const running = new Promise((resolve) =>
+      supervisor.on("engine-state", (t) => t.state === "running" && resolve()),
+    );
     void supervisor.start();
     await running;
 
@@ -104,11 +111,17 @@ describe("EngineSupervisor", () => {
     await supervisor.shutdown();
 
     expect(fs.existsSync(statePath)).toBe(true);
-    expect(JSON.parse(fs.readFileSync(statePath, "utf8"))).toEqual({ fake: true });
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8"))).toEqual({
+      fake: true,
+    });
   }, 15_000);
 
   it("restarts a crashing engine and gives up after the restart budget", async () => {
-    const { supervisor } = makeTestSupervisor({ mode: "crash", restartBudget: 3, restartDelayMs: 20 });
+    const { supervisor } = makeTestSupervisor({
+      mode: "crash",
+      restartBudget: 3,
+      restartDelayMs: 20,
+    });
     cleanup.push(() => supervisor.shutdown());
 
     void supervisor.start();

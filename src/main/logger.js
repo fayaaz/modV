@@ -46,7 +46,9 @@ function pruneLogFiles(directory) {
     const excess = files.length - MAX_LOG_FILES;
 
     for (let i = 0; i < excess; i += 1) {
-      fs.rmSync(path.join(directory, files[i]), { force: true });
+      // fs.rmSync throws in this Electron build when the path does not
+      // exist; unlink is the safer primitive for a known-regular file.
+      fs.unlinkSync(path.join(directory, files[i]));
     }
   } catch (e) {
     // Pruning is best effort, a failure here must not break logging.

@@ -153,6 +153,19 @@ pub fn parse() -> Cli {
         )
         .get_matches();
 
+    let socket = matches.get_one::<String>("socket").map(PathBuf::from);
+    let mut bench_seconds = *matches
+        .get_one::<f64>("bench-seconds")
+        .expect("clap default for bench-seconds");
+    // Supervisor mode (spawned by Electron with --socket): the engine runs
+    // until engine/shutdown, never on the M0 benchmark clock. An explicit
+    // --bench-seconds is still honoured.
+    if socket.is_some()
+        && matches.value_source("bench-seconds") == Some(clap::parser::ValueSource::DefaultValue)
+    {
+        bench_seconds = 0.0;
+    }
+
     Cli {
         width: *matches
             .get_one::<u32>("width")
@@ -164,16 +177,14 @@ pub fn parse() -> Cli {
         frames: matches.get_one::<u64>("frames").copied(),
         headless: matches.get_flag("headless"),
         bench: matches.get_flag("bench"),
-        bench_seconds: *matches
-            .get_one::<f64>("bench-seconds")
-            .expect("clap default for bench-seconds"),
+        bench_seconds,
         screenshot: matches.get_one::<String>("screenshot").map(PathBuf::from),
         audio_fixture: *matches
             .get_one::<f64>("audio-fixture")
             .expect("clap default for audio-fixture"),
         print_adapter: matches.get_flag("print-adapter"),
         log_adapter: matches.get_flag("log-adapter"),
-        socket: matches.get_one::<String>("socket").map(PathBuf::from),
+        socket,
         state: matches.get_one::<String>("state").map(PathBuf::from),
     }
 }

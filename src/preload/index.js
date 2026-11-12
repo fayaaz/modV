@@ -33,6 +33,9 @@ const engineApi = {
   requestPreview() {
     return ipcRenderer.invoke("engine/preview");
   },
+  getState() {
+    return ipcRenderer.invoke("engine/get-state");
+  },
   snapshot() {
     return ipcRenderer.invoke("engine/snapshot");
   },

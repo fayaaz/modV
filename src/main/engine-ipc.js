@@ -63,6 +63,11 @@ export function registerEngineIpc(getSupervisor) {
     return sup.client.request("state/dispatch", { type, payload });
   });
 
+  ipcMain.handle("engine/get-state", async () => {
+    const sup = getSupervisor();
+    return { state: sup ? sup.getState() : "stopped" };
+  });
+
   ipcMain.handle("engine/snapshot", async () => {
     const sup = getSupervisor();
     if (!sup?.isRunning()) return null;
@@ -130,5 +135,10 @@ export function registerEngineIpc(getSupervisor) {
 /** Channels registered by registerEngineIpc; exported for destroy() symmetry. */
 export const ENGINE_IPC_CHANNELS = {
   on: ["engine/enabled-sync", "engine/commit"],
-  handle: ["engine/dispatch", "engine/snapshot", "engine/preview"],
+  handle: [
+    "engine/dispatch",
+    "engine/snapshot",
+    "engine/preview",
+    "engine/get-state",
+  ],
 };

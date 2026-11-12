@@ -229,8 +229,33 @@ impl EngineSupervisor {
                     .unwrap_or("<missing>")
                     .to_string();
                 match dispatch_type.as_str() {
-                    "groups/createGroup"
-                    | "scenes/hydrateScenes"
+                    // M1: the engine has no store yet, but the caller's
+                    // result contract is "the created Group" — return a
+                    // plausible synthetic one until WS-1 lands.
+                    "groups/createGroup" => {
+                        let name = request
+                            .params
+                            .get("payload")
+                            .and_then(|p| p.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("New Group")
+                            .to_string();
+                        eprintln!(
+                            "engine: INFO dispatch groups/createGroup (synthetic result for M1)"
+                        );
+                        return Response::ok(
+                            request.id,
+                            json!({
+                                "id": uuid_v4(),
+                                "name": name,
+                                "modules": [],
+                                "enabled": 1,
+                                "alpha": 1,
+                                "hidden": false,
+                            }),
+                        );
+                    }
+                    "scenes/hydrateScenes"
                     | "scenes/ensureDefaultScenes"
                     | "osc/createServer"
                     | "metrics/SET_FPS_MEASURE" => {
@@ -359,6 +384,51 @@ fn load_snapshot(path: &Path) -> Option<Snapshot> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Minimal UUID v4 from /dev/urandom (the M1 engine has no uuid dependency).
+fn uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    match fs::File::open("/dev/urandom").and_then(|mut f| {
+        use std::io::Read;
+        f.read_exact(&mut bytes)
+    }) {
+        Ok(()) => {
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                bytes[0],
+                bytes[1],
+                bytes[2],
+                bytes[3],
+                bytes[4],
+                bytes[5],
+                bytes[6],
+                bytes[7],
+                bytes[8],
+                bytes[9],
+                bytes[10],
+                bytes[11],
+                bytes[12],
+                bytes[13],
+                bytes[14],
+                bytes[15]
+            )
+        }
+        Err(_) => {
+            // Fallback: time + pid entropy, hex-only. Fine for M1.
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!(
+                "{:08x}-0000-4000-8000-{:012x}",
+                std::process::id(),
+                nanos & 0xffffffffffff
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +532,34 @@ mod tests {
         assert_eq!(response.id, 42);
         assert!(response.ok);
         assert_eq!(response.result.unwrap()["framesPresented"], 3);
+    }
+
+    #[test]
+    fn create_group_dispatch_returns_synthetic_group() {
+        let (socket_path, state_path) = temp_paths("create-group");
+        let mut supervisor =
+            EngineSupervisor::new(socket_path.clone(), Some(state_path)).expect("supervisor binds");
+
+        let mut stream = UnixStream::connect(&socket_path).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let request = Request {
+            id: 11,
+            method: "state/dispatch".into(),
+            params: json!({ "type": "groups/createGroup", "payload": { "name": "Gallery" } }),
+        };
+        stream
+            .write_all(&request.into_frame())
+            .expect("write request");
+
+        let payload = read_response(&mut supervisor, &mut stream);
+        let response: Response = serde_json::from_slice(&payload).expect("response parses");
+        assert!(response.ok);
+        let result = response.result.expect("result present");
+        assert_eq!(result["name"], "Gallery");
+        assert!(result["id"].as_str().map(|s| s.len()).unwrap_or(0) >= 32);
+        assert_eq!(result["modules"], json!([]));
     }
 
     #[test]

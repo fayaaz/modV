@@ -18,7 +18,8 @@ import {
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "modv-protocol-test-"));
 let counter = 0;
-const tempSocket = () => path.join(tmpDir, `sock-${process.pid}-${counter++}.sock`);
+const tempSocket = () =>
+  path.join(tmpDir, `sock-${process.pid}-${counter++}.sock`);
 
 function frame(kind, payload) {
   return encodeFrame(kind, Buffer.from(JSON.stringify(payload), "utf8"));
@@ -47,7 +48,9 @@ function startStubEngine({ onRequest, sendOnConnect } = {}) {
         buffer = buffer.subarray(5 + length);
         received.push({ kind, payload: JSON.parse(payload.toString("utf8")) });
         if (onRequest) {
-          for (const response of onRequest(received[received.length - 1].payload)) {
+          for (const response of onRequest(
+            received[received.length - 1].payload,
+          )) {
             socket.write(response);
           }
         }
@@ -57,7 +60,9 @@ function startStubEngine({ onRequest, sendOnConnect } = {}) {
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(socketPath, () => resolve({ server, socketPath, received, sockets }));
+    server.listen(socketPath, () =>
+      resolve({ server, socketPath, received, sockets }),
+    );
   });
 }
 
@@ -67,7 +72,11 @@ describe("EngineProtocolClient", () => {
 
   afterEach(async () => {
     for (const client of clients.splice(0)) client.disconnect();
-    await Promise.all(servers.splice(0).map(({ server }) => new Promise((r) => server.close(r))));
+    await Promise.all(
+      servers
+        .splice(0)
+        .map(({ server }) => new Promise((r) => server.close(r))),
+    );
   });
 
   async function connectClient(socketPath) {
@@ -80,13 +89,19 @@ describe("EngineProtocolClient", () => {
   it("sends a framed request and resolves with the result", async () => {
     const { server, socketPath, received } = await startStubEngine({
       onRequest: (req) => [
-        frame(KIND_RESPONSE, { id: req.id, ok: true, result: { echoed: req.params } }),
+        frame(KIND_RESPONSE, {
+          id: req.id,
+          ok: true,
+          result: { echoed: req.params },
+        }),
       ],
     });
     servers.push({ server });
 
     const client = await connectClient(socketPath);
-    const result = await client.request("scenes/applyScene", { sceneId: "abc" });
+    const result = await client.request("scenes/applyScene", {
+      sceneId: "abc",
+    });
 
     expect(result).toEqual({ echoed: { sceneId: "abc" } });
     expect(received[0].kind).toBe(KIND_REQUEST);
@@ -107,7 +122,9 @@ describe("EngineProtocolClient", () => {
     servers.push({ server });
 
     const client = await connectClient(socketPath);
-    await expect(client.request("scenes/applyScene", { sceneId: "nope" })).rejects.toMatchObject({
+    await expect(
+      client.request("scenes/applyScene", { sceneId: "nope" }),
+    ).rejects.toMatchObject({
       code: "unknown_scene",
       message: "no such scene",
     });
@@ -118,13 +135,19 @@ describe("EngineProtocolClient", () => {
     servers.push({ server });
 
     const client = await connectClient(socketPath);
-    await expect(client.request("state/snapshot", null, 50)).rejects.toThrow(/timed out/);
+    await expect(client.request("state/snapshot", null, 50)).rejects.toThrow(
+      /timed out/,
+    );
   });
 
   it("buffers a response split mid-header without crashing", async () => {
     const { server, socketPath } = await startStubEngine({
       onRequest: (req) => {
-        const full = frame(KIND_RESPONSE, { id: req.id, ok: true, result: "done" });
+        const full = frame(KIND_RESPONSE, {
+          id: req.id,
+          ok: true,
+          result: "done",
+        });
         // Deliver only the first 3 bytes — the client must buffer, not parse.
         return [full.subarray(0, 3)];
       },
@@ -157,7 +180,10 @@ describe("EngineProtocolClient", () => {
   });
 
   it("emits engine-event for state/delta events", async () => {
-    const delta = { type: "groups/UPDATE_GROUP", payload: { id: "g1", alpha: 0.5 } };
+    const delta = {
+      type: "groups/UPDATE_GROUP",
+      payload: { id: "g1", alpha: 0.5 },
+    };
     const { server, socketPath } = await startStubEngine({
       sendOnConnect: frame(KIND_EVENT, { event: "state/delta", data: delta }),
     });

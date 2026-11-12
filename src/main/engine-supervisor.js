@@ -50,7 +50,13 @@ function defaultEngineBinary() {
     if (app.isPackaged) {
       return path.join(process.resourcesPath, "modv-engine");
     }
-    return path.join(app.getAppPath(), "crates", "target", "release", "modv-engine");
+    return path.join(
+      app.getAppPath(),
+      "crates",
+      "target",
+      "release",
+      "modv-engine",
+    );
   }
   // Outside Electron (unit tests): fall back to the dev path relative to cwd.
   return path.join(process.cwd(), "crates", "target", "release", "modv-engine");
@@ -155,7 +161,11 @@ class EngineSupervisor extends EventEmitter {
 
     // Give the engine a moment to exit, then force the issue if it has not.
     const deadline = Date.now() + this.shutdownWaitMs + 250;
-    while (this.child && this.child.exitCode === null && Date.now() < deadline) {
+    while (
+      this.child &&
+      this.child.exitCode === null &&
+      Date.now() < deadline
+    ) {
       await sleep(50);
     }
     if (this.child && this.child.exitCode === null) {
@@ -182,19 +192,35 @@ class EngineSupervisor extends EventEmitter {
     this._stopWatchdog();
     this._teardownClient();
 
-    fs.rmSync(this.socketPath, { force: true });
+    // NOTE: fs.rmSync throws in this Electron build when the path does not
+    // exist; check first and unlink instead.
+    try {
+      if (fs.existsSync(this.socketPath)) {
+        fs.unlinkSync(this.socketPath);
+      }
+    } catch (error) {
+      this.log.warn(
+        `engine: could not remove stale socket ${this.socketPath}: ${error.message}`,
+      );
+    }
 
     this._setState("starting");
     // The engine owns the snapshot file: it restores from it at startup and
     // flushes it on shutdown, so a restart needs no state bytes from us.
-    this.log.info(`starting engine: ${this.binaryPath} --socket ${this.socketPath} --state ${this.statePath}`);
+    this.log.info(
+      `starting engine: ${this.binaryPath} --socket ${this.socketPath} --state ${this.statePath}`,
+    );
 
     let child;
     try {
-      child = spawn(this.binaryPath, ["--socket", this.socketPath, "--state", this.statePath], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env },
-      });
+      child = spawn(
+        this.binaryPath,
+        ["--socket", this.socketPath, "--state", this.statePath],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env },
+        },
+      );
     } catch (error) {
       this.log.error(`failed to spawn the engine: ${error.message}`);
       this._scheduleRestart("spawn-failed");
@@ -212,7 +238,9 @@ class EngineSupervisor extends EventEmitter {
     });
 
     this.client = this._clientFactory();
-    this.client.on("protocol-error", (error) => this.log.error(`engine protocol error: ${error.message}`));
+    this.client.on("protocol-error", (error) =>
+      this.log.error(`engine protocol error: ${error.message}`),
+    );
     this.client.on("engine/heartbeat", () => {
       this.lastHeartbeat = Date.now();
     });
@@ -230,7 +258,10 @@ class EngineSupervisor extends EventEmitter {
     for (let attempt = 0; attempt < this.connectRetryLimit; attempt += 1) {
       if (this.state !== "starting") return false;
       try {
-        await this.client.connect(this.socketPath, Math.max(this.connectRetryMs * 2, 100));
+        await this.client.connect(
+          this.socketPath,
+          Math.max(this.connectRetryMs * 2, 100),
+        );
         this._onConnected();
         return true;
       } catch (_) {
@@ -268,10 +299,15 @@ class EngineSupervisor extends EventEmitter {
 
   _scheduleRestart(reason) {
     const now = Date.now();
-    this.restartTimestamps = [...this.restartTimestamps.filter((t) => now - t < RESTART_WINDOW_MS), now];
+    this.restartTimestamps = [
+      ...this.restartTimestamps.filter((t) => now - t < RESTART_WINDOW_MS),
+      now,
+    ];
 
     if (this.restartTimestamps.length > this.restartBudget) {
-      this.log.error(`engine restart budget exhausted (${this.restartBudget} in ${RESTART_WINDOW_MS / 1000}s)`);
+      this.log.error(
+        `engine restart budget exhausted (${this.restartBudget} in ${RESTART_WINDOW_MS / 1000}s)`,
+      );
       this._setState("fatal", "restart-budget-exhausted");
       return;
     }
@@ -289,7 +325,10 @@ class EngineSupervisor extends EventEmitter {
       if (Date.now() - this.lastHeartbeat > this.heartbeatTimeoutMs) {
         this.log.error("engine heartbeat lost; terminating");
         this._terminateChild("SIGTERM");
-        this._sigkillTimer = setTimeout(() => this._terminateChild("SIGKILL"), SIGKILL_DELAY_MS);
+        this._sigkillTimer = setTimeout(
+          () => this._terminateChild("SIGKILL"),
+          SIGKILL_DELAY_MS,
+        );
         this._sigkillTimer.unref?.();
       }
     }, HEARTBEAT_CHECK_MS);

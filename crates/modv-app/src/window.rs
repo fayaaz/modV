@@ -63,6 +63,7 @@ struct WindowedApp {
     done: bool,
     failed: bool,
     supervisor: Option<EngineSupervisor>,
+    consecutive_timeouts: u32,
 }
 
 // `FrameStats` contains no public Clone; store it in an Option so `finish()`
@@ -106,6 +107,7 @@ impl WindowedApp {
             done: false,
             failed: false,
             supervisor,
+            consecutive_timeouts: 0,
         }
         .with_socket_failure(socket_failed)
     }
@@ -212,14 +214,35 @@ impl WindowedApp {
                 self.request_redraw();
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Validation => {
-                eprintln!("error: failed to acquire a surface texture (timeout or validation)");
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                // Transient: the compositor did not signal the acquire fence in
+                // time (GPU contention). Skip the frame; only repeated
+                // timeouts in a row are fatal.
+                self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                if self.consecutive_timeouts == 1 || self.consecutive_timeouts % 60 == 0 {
+                    eprintln!(
+                        "engine: WARN surface acquire timed out ({} in a row); skipping frame",
+                        self.consecutive_timeouts
+                    );
+                }
+                if self.consecutive_timeouts >= 120 {
+                    eprintln!("error: surface acquire timed out 120 times in a row; engine stops");
+                    self.failed = true;
+                    event_loop.exit();
+                } else {
+                    self.request_redraw();
+                }
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                eprintln!("error: failed to acquire a surface texture (validation error)");
                 self.failed = true;
                 event_loop.exit();
                 return;
             }
         };
 
+        self.consecutive_timeouts = 0;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

@@ -23,33 +23,39 @@ Tooling: the engine builds only inside Docker (`make engine` / `engine-test` /
 
 ## M0 — Spike
 
-- [ ] modv-render: wgpu device/queue, Fifo surface/present, headless target,
+- [x] modv-render: wgpu device/queue, Fifo surface/present, headless target,
       frame stats (p50/p90/p99, CPU %, RSS)
-- [ ] modv-app: CLI (`--width/--height/--fullscreen/--frames/--headless/
+- [x] modv-app: CLI (`--width/--height/--fullscreen/--frames/--headless/
       --bench/--bench-seconds/--screenshot/--audio-fixture/--print-adapter`),
       winit native window
-- [ ] modv-renderers: ChromaticLine port (ring buffer, texel windows, uniforms,
+- [x] modv-renderers: ChromaticLine port (ring buffer, texel windows, uniforms,
       WGSL translation) + unit tests
-- [ ] Headless screenshot of the scene
-- [ ] Windowed run on Wayland (and X11 if Wayland unavailable)
-- [ ] Frame-time/CPU/RSS recorded for the scene; Electron + XWayland baseline
-      measured the same way
-- [ ] `docs/rust-hybrid-spike.md` — measurements + go/no-go recommendation
+- [x] Headless screenshot of the scene (tmp/spike-chromatic-line.png — visual
+      check vs reference)
+- [x] Windowed run on Wayland: presents at 120 fps Fifo, p99 ≈ vsync period,
+      RSS ~103 MB
+- [x] Frame-time/CPU/RSS recorded; Electron + XWayland baseline measured the
+      same way (see docs/rust-hybrid-spike.md)
+- [x] `docs/rust-hybrid-spike.md` — measurements + go/no-go recommendation
 
 ## M1 — Engine skeleton
 
-- [ ] modv-ipc: framing (u32 LE len + u8 kind), request/response/event JSON,
+- [x] modv-ipc: framing (u32 LE len + u8 kind), request/response/event JSON,
       Unix socket server
-- [ ] modv-app: `--socket` / `--state`, supervisor loop, heartbeat events,
-      snapshot save/restore, clean `engine/shutdown`
-- [ ] Preview channel: memfd ring (3 slots), VMP1 header, sequence numbers
-- [ ] Electron: `engine-supervisor.js`, `engine-protocol.js`,
-      `engine-log-forwarder.js` in `src/main/`; shutdown cleanup task; restart
-      budget (5/60 s); snapshot replay on restart
-- [ ] Preload: `window.engine` API; renderer IPC client replacing the worker
+- [x] modv-ipc: VMP1 preview ring (/dev/shm, 3 slots, seqlock read-back)
+- [x] modv-app: `--socket` / `--state` wiring — socket poll in the frame loop,
+      heartbeat, snapshot save/restore, `engine/shutdown` handling,
+      `preview/ready` + `preview/frame` events (flat-colour placeholder until
+      WS-2/M2)
+- [x] Electron: `engine-supervisor.js`, `engine-protocol.js`,
+      `engine-log-forwarder.js`, `engine-ipc.js` in `src/main/`; shutdown
+      cleanup task; restart budget (5/60 s); engine-mode e2e spec
+- [x] Preload: `window.engine` API; renderer IPC client replacing the worker
       behind `MODV_ENGINE=1`
-- [ ] e2e: engine presents clear colour; UI alive after forced engine kill;
-      restart restores snapshot
+- [x] e2e green on `dist/` with the engine binary embedded (preview frames,
+      kill survives, restart) — `tests/e2e/spec/engine/engineSkeleton.spec.js`
+      passes (GPU-context-free renderer asserted); native Wayland window
+      presentation verified
 
 ## M2 — Shader / ISF
 

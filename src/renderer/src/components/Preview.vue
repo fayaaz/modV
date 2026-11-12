@@ -70,6 +70,12 @@ export default {
   },
 
   mounted() {
+    if (!this.$modV.$worker) {
+      // Engine mode: the debug preview is a legacy worker surface; the
+      // engine presents output natively. Nothing to attach yet.
+      return;
+    }
+
     const { canvas } = this.$refs;
     const offscreen = canvas.transferControlToOffscreen();
 
@@ -97,6 +103,10 @@ export default {
 
   methods: {
     resize(e) {
+      if (!this.$modV.$worker) {
+        return;
+      }
+
       const { width } = e[0].contentRect;
 
       this.$modV.$worker.postMessage({

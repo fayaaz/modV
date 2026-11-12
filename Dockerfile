@@ -81,6 +81,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/electron \
     node node_modules/electron/install.js
+# The Rust engine needs libxkbcommon-x11 at runtime for the X11 fallback
+# (dlopened by winit's xkbcommon-dl); the base image does not ship it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libxkbcommon-x11-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # --- Rust engine (docs/rust-hybrid.md) -------------------------------------
 # Host has no Rust toolchain, so the engine is built entirely in Docker,
@@ -110,6 +115,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 # run without a display or a real adapter.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+# The engine needs libxkbcommon-x11 for the X11 fallback at runtime
+# (dlopened by winit's xkbcommon-dl).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libxkbcommon-x11-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Produces the engine binary copied into the packaging stages below. Kept as a

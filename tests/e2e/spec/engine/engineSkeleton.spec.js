@@ -46,7 +46,9 @@ test.describe("engine skeleton (MODV_ENGINE=1)", () => {
   test("engine presents frames, survives a kill and restarts", async () => {
     const latestBuild = resolveLatestBuild(path.resolve("./dist"));
     const appInfo = parseElectronApp(latestBuild.buildDir);
-    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "vmodv-e2e-engine-"));
+    const configDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "vmodv-e2e-engine-"),
+    );
     const cleanupDirs = [latestBuild.cleanupDir, configDir].filter(Boolean);
 
     const app = await electron.launch({
@@ -74,7 +76,9 @@ test.describe("engine skeleton (MODV_ENGINE=1)", () => {
           return originalGetContext.call(this, type, ...rest);
         };
         if (navigator.gpu?.requestAdapter) {
-          const originalRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+          const originalRequestAdapter = navigator.gpu.requestAdapter.bind(
+            navigator.gpu,
+          );
           navigator.gpu.requestAdapter = (...args) => {
             window.__gpuContexts.push("webgpu");
             return originalRequestAdapter(...args);
@@ -88,7 +92,9 @@ test.describe("engine skeleton (MODV_ENGINE=1)", () => {
 
       // The engine publishes preview frames on its own cadence; the renderer
       // counts them into window.__enginePreviewCount (engine-client.js).
-      const before = await page.evaluate(() => window.__enginePreviewCount || 0);
+      const before = await page.evaluate(
+        () => window.__enginePreviewCount || 0,
+      );
       await page.waitForFunction(
         (count) => (window.__enginePreviewCount || 0) > count,
         before,
@@ -125,7 +131,9 @@ test.describe("engine skeleton (MODV_ENGINE=1)", () => {
       expect(respawned).toBe(true);
 
       // The engine must keep publishing after the restart.
-      const afterKill = await page.evaluate(() => window.__enginePreviewCount || 0);
+      const afterKill = await page.evaluate(
+        () => window.__enginePreviewCount || 0,
+      );
       await page.waitForFunction(
         (count) => (window.__enginePreviewCount || 0) > count,
         afterKill,

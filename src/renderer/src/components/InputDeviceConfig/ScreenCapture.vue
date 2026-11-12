@@ -151,6 +151,12 @@ export default {
     },
 
     async _startFromStream(stream, nameOverride) {
+      if (!this.$modV.$worker) {
+        console.warn("screen capture is not wired to the engine yet (WS-10)");
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
       const [track] = stream.getVideoTracks();
       const fallbackId = `screen-${Date.now()}`;
       const displayLabel = nameOverride || (track && track.label) || fallbackId;

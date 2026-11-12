@@ -52,7 +52,11 @@ const server = net.createServer((socket) => {
       const request = JSON.parse(payload.toString("utf8"));
       let body = { id: request.id, ok: true, result: null };
       if (request.method === "state/snapshot") {
-        body = { id: request.id, ok: true, result: { fake: true, snapshot: true } };
+        body = {
+          id: request.id,
+          ok: true,
+          result: { fake: true, snapshot: true },
+        };
       } else if (request.method === "unknown/method") {
         body = {
           id: request.id,
@@ -73,7 +77,10 @@ const server = net.createServer((socket) => {
 const heartbeat = setInterval(() => {
   if (mode === "silent-heartbeat") return;
   const event = Buffer.from(
-    JSON.stringify({ event: "engine/heartbeat", data: { uptime: process.uptime(), frames: 1 } }),
+    JSON.stringify({
+      event: "engine/heartbeat",
+      data: { uptime: process.uptime(), frames: 1 },
+    }),
     "utf8",
   );
   const header = Buffer.allocUnsafe(5);

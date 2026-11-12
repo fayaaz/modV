@@ -19,6 +19,8 @@ export default class EngineClient {
     this.engine = window.engine;
     this._unsubscribe = { delta: null, state: null, preview: null };
     this._previewFrameCount = 0;
+    this._stateCallback = null;
+    this._stateFromInvoke = false;
 
     if (typeof window !== "undefined") {
       window.__enginePreviewCount = 0;
@@ -48,7 +50,21 @@ export default class EngineClient {
 
   /** Subscribe to lifecycle transitions ({ state, reason? }); returns unsubscribe fn. */
   onState(callback) {
+    this._stateCallback = callback;
     this._unsubscribe.state = this.engine.onEngineState(callback);
+
+    // The engine may have transitioned to "running" before the renderer
+    // subscribed (the event is not replayed). Pin the current state through
+    // the invoke fallback so a late subscriber still initialises.
+    this.engine
+      .getState?.()
+      .then((transition) => {
+        if (transition?.state === "running" && this._stateCallback) {
+          this._stateCallback({ state: "running" });
+        }
+      })
+      .catch(() => {});
+
     return this._unsubscribe.state;
   }
 

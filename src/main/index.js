@@ -39,7 +39,8 @@ logger.info("VmodV starting", {
 // set MODV_ENGINE=1 to run with the engine instead of the legacy worker.
 // The supervisor exists on the primary instance only; the restart budget and
 // snapshot restore are handled inside it (docs/rust-hybrid.md, WS-14).
-const engineSupervisor = process.env.MODV_ENGINE === "1" ? new EngineSupervisor() : null;
+const engineSupervisor =
+  process.env.MODV_ENGINE === "1" ? new EngineSupervisor() : null;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
