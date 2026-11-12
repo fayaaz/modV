@@ -65,11 +65,12 @@
 //!   [`crate::scene_ops`] (WS-8 / M5b) and the performance runtime in
 //!   [`crate::performance`] (M5c); Scene hover previews remain M5d.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
@@ -77,10 +78,14 @@ use modv_engine::delta::{DeltaStream, Mutation};
 use modv_engine::engine_state::{
     EngineState, GALLERY_GROUP_NAME, GROUP_DISABLED, Group, InheritFrom, ModuleInstance,
 };
+use modv_engine::inputs::{Input, InputLink};
 use modv_engine::preset::{PresetError, create_preset_from_state, load_preset_into_state};
 use modv_engine::props::{PropSchema, coerce_prop_value};
 use modv_renderers::two_d::AudioFrame;
 
+use crate::input_links::{
+    BeatsState, LINK_DELTA_EPSILON, LINK_DELTA_INTERVAL, LinkTarget, LinkWrite,
+};
 use crate::module_registry::ModuleRegistry;
 
 /// Version stamped into the on-disk snapshot document.
@@ -144,10 +149,31 @@ pub struct Store {
     /// The current audio frame handed to modules and shader uniforms.
     ///
     /// Filled by `meyda/SET_BANDS` from the renderer's audio pump (see
-    /// [`Store::set_bands`]). The engine performs no analysis yet (WS-9 / M6),
-    /// so wave/FFT/features stay zeroed.
+    /// [`Store::set_bands`]). The renderer owns the analysis (WS-9); the
+    /// engine stores the full payload — bands, damping lanes, the 16-cell
+    /// grid, wave, FFT magnitudes, sample rate and the Meyda scalars.
     audio: AudioFrame,
+    /// The tempo/kick state the Input Link evaluator reads (`beats.bpm`,
+    /// `beats.kick`).
+    beats: BeatsState,
+    /// Per-smoothing-id state for `meyda/getFeature` smoothing links
+    /// (`audio-features.js` `smoothedFeatures`), keyed by `args[1]`.
+    link_smoothing: HashMap<String, f64>,
+    /// Delta-throttle state for Input Link writes, keyed by input id.
+    link_deltas: HashMap<String, LinkDeltaState>,
     pub(crate) warned: HashSet<String>,
+}
+
+/// The newest value an Input Link wrote and when its delta was last sent.
+#[derive(Clone, Debug)]
+struct LinkDeltaState {
+    /// Timestamp (`Store::update_input_links`'s `now`) of the last delta.
+    last_emit: Option<Duration>,
+    /// The value carried by that delta.
+    last_value: f64,
+    /// The newest un-emitted delta payload (with its mutation type, flushed on
+    /// quit).
+    pending: Option<(&'static str, Value)>,
 }
 
 impl Default for Store {
@@ -201,6 +227,9 @@ impl Store {
             applied_scene_id: None,
             performance,
             audio: AudioFrame::default(),
+            beats: BeatsState::default(),
+            link_smoothing: HashMap::new(),
+            link_deltas: HashMap::new(),
             warned: HashSet::new(),
         }
     }
@@ -263,6 +292,18 @@ impl Store {
             "modules/updateActiveModule" => self.update_active_module(params),
             "modules/removeActiveModule" => self.remove_active_module(params),
             "meyda/SET_BANDS" => self.set_bands(params),
+            // ————————————————— Beats (WS-9) —————————————————
+            "beats/SET_BPM" => self.set_bpm(params),
+            "beats/setBpm" => self.set_bpm_action(params),
+            "beats/SET_KICK" => self.set_kick(params),
+            // ————————————————— Inputs (WS-1b) —————————————————
+            "inputs/addInput" => self.add_input(params),
+            "inputs/removeInput" => self.remove_input_action(params),
+            "inputs/createInputLink" => self.create_input_link(params),
+            "inputs/updateInputLink" => self.update_input_link(params),
+            "inputs/removeInputLink" => self.remove_input_link(params),
+            "inputs/setFocusedInput" => self.set_focused_input(params),
+            "inputs/clearFocusedInput" => self.clear_focused_input(),
             // ————————————————— Scenes (WS-8 / M5b) —————————————————
             "scenes/hydrateScenes" => self.hydrate_scenes(),
             "scenes/ensureDefaultScenes" => self.ensure_default_scenes(),
@@ -815,19 +856,29 @@ impl Store {
 
     // ————————————————— Audio —————————————————
 
-    /// `meyda/SET_BANDS` (`meyda.js:88-96`): the renderer's audio pump commits
-    /// `{ bass, mid, treble, cells }` over the control socket.
+    /// `meyda/SET_BANDS` (WS-9): the renderer's audio pump commits the full
+    /// analyser payload over the control socket.
     ///
-    /// Only the three AGC bands are taken. `cells` (the 16 log-spaced band
-    /// cells `audio-bands.js` publishes) has no slot in
-    /// [`modv_renderers::two_d::AudioFrame`] and no M3 module reads it; the
-    /// cells stay a renderer-side visualisation (WS-9). Wave, FFT and the
-    /// Meyda feature bag remain zeroed — real analysis lands with M6.
+    /// Accepted keys (camelCase wire names; unknown keys are ignored):
     ///
-    /// No delta is emitted: the renderer's mirror computed these values
-    /// itself, so echoing every audio frame back over the socket would be
-    /// pure traffic. Unknown keys are ignored so a richer band payload is
-    /// forward-compatible.
+    /// | key | shape |
+    /// |-----|-------|
+    /// | `bass`/`mid`/`treble` | finite number |
+    /// | `beat` | finite number |
+    /// | `lanes`/`rawLanes` | exactly 12 finite numbers |
+    /// | `cells`/`rawCells` | exactly 16 finite numbers |
+    /// | `wave` | up to 1024 finite numbers (-1..1) |
+    /// | `freqMag` | up to 1024 finite numbers |
+    /// | `byteFrequencyData` | up to 1024 numbers, clamped 0..255 |
+    /// | `byteTimeDomainData` | up to 1024 numbers; derives `wave` when no wave is sent |
+    /// | `sampleRate` | finite positive number, fallback 44 100 |
+    /// | Meyda scalars | `rms`, `zcr`, `energy`, `spectralCentroid`, `spectralFlatness`, `spectralSlope`, `spectralRolloff`, `spectralSpread`, `spectralSkewness`, `spectralKurtosis`, `perceptualSpread`, `perceptualSharpness` |
+    ///
+    /// A present-but-invalid number (`NaN`/`±∞`) becomes `0`; a wrong-length
+    /// `lanes`/`cells` array is ignored entirely so a malformed frame cannot
+    /// corrupt the live grid. Arrays shorter than their target are padded with
+    /// zeros; longer ones are truncated. No delta is emitted — the renderer's
+    /// mirror computed these values itself.
     fn set_bands(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
         // The renderer sends the bands object as the payload; accept a
         // `{ bands: {...} }` wrapper too.
@@ -845,7 +896,606 @@ impl Store {
         if let Some(treble) = finite_f32(bands.get("treble")) {
             self.audio.treble = treble;
         }
+        if let Some(beat) = scalar_field(bands.get("beat")) {
+            self.audio.beat = beat;
+        }
+
+        if let Some(lanes) = fixed_f32_array::<12>(bands.get("lanes")) {
+            self.audio.lanes = lanes;
+        }
+        if let Some(cells) = fixed_f32_array::<16>(bands.get("cells")) {
+            self.audio.cells = cells;
+        }
+        // The `raw` twin has no separate analyser frame in the wire payload
+        // today; the pump forwards `features.p10.raw.lanes/cells` explicitly.
+        if let Some(raw_lanes) = fixed_f32_array::<12>(bands.get("rawLanes")) {
+            self.audio.raw_lanes = raw_lanes;
+        } else if let Some(lanes) = fixed_f32_array::<12>(bands.get("lanes")) {
+            self.audio.raw_lanes = lanes;
+        }
+        if let Some(raw_cells) = fixed_f32_array::<16>(bands.get("rawCells")) {
+            self.audio.raw_cells = raw_cells;
+        } else if let Some(cells) = fixed_f32_array::<16>(bands.get("cells")) {
+            self.audio.raw_cells = cells;
+        }
+
+        let wave_changed = if let Some(wave) = padded_f32_array::<1024>(bands.get("wave")) {
+            self.audio.wave = wave;
+            true
+        } else if let Some(byte_wave) = padded_u8_array::<1024>(bands.get("byteTimeDomainData")) {
+            // The analyser's time-domain byte stream maps 0..255 to -1..1,
+            // exactly like `audio-bands.js` `_fillWave`.
+            for (sample, byte) in self.audio.wave.iter_mut().zip(byte_wave) {
+                *sample = (f32::from(byte) / 255.0) * 2.0 - 1.0;
+            }
+            true
+        } else {
+            false
+        };
+        if wave_changed {
+            self.audio.features.buffer = self.audio.wave.to_vec();
+        }
+
+        if let Some(freq_mag) = padded_f32_array::<1024>(bands.get("freqMag")) {
+            self.audio.freq_mag = freq_mag;
+        }
+        if let Some(frequency) = padded_u8_array::<1024>(bands.get("byteFrequencyData")) {
+            self.audio.byte_frequency_data = frequency;
+        }
+
+        if let Some(sample_rate) = scalar_field(bands.get("sampleRate")) {
+            if sample_rate > 0.0 {
+                self.audio.sample_rate = sample_rate;
+            }
+        }
+
+        let features = &mut self.audio.features;
+        if let Some(value) = scalar_field(bands.get("rms")) {
+            features.rms = value;
+        }
+        if let Some(value) = scalar_field(bands.get("zcr")) {
+            features.zcr = value;
+        }
+        if let Some(value) = scalar_field(bands.get("energy")) {
+            features.energy = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralCentroid")) {
+            features.spectral_centroid = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralFlatness")) {
+            features.spectral_flatness = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralSlope")) {
+            features.spectral_slope = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralRolloff")) {
+            features.spectral_rolloff = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralSpread")) {
+            features.spectral_spread = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralSkewness")) {
+            features.spectral_skewness = value;
+        }
+        if let Some(value) = scalar_field(bands.get("spectralKurtosis")) {
+            features.spectral_kurtosis = value;
+        }
+        if let Some(value) = scalar_field(bands.get("perceptualSpread")) {
+            features.perceptual_spread = value;
+        }
+        if let Some(value) = scalar_field(bands.get("perceptualSharpness")) {
+            features.perceptual_sharpness = value;
+        }
+
         Ok(Value::Null)
+    }
+
+    /// `beats/SET_BPM`: store the reported tempo (echoed to the mirror).
+    fn set_bpm(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let bpm = params
+            .get("bpm")
+            .and_then(Value::as_f64)
+            .filter(|bpm| bpm.is_finite() && *bpm >= 0.0);
+        if let Some(bpm) = bpm {
+            if (self.beats.bpm - bpm).abs() > f64::EPSILON {
+                self.beats.bpm = bpm;
+                self.deltas.push("beats/SET_BPM", json!({ "bpm": bpm }));
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    /// `beats/setBpm` (`beats.js:9-19`): only the active source may set BPM.
+    ///
+    /// The engine keeps `beatdetektor` as the default source; the renderer
+    /// only dispatches this action from that detector today.
+    fn set_bpm_action(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let source = params.get("source").and_then(Value::as_str);
+        if source.is_some_and(|source| source != "beatdetektor") {
+            return Ok(Value::Null);
+        }
+        self.set_bpm(params)
+    }
+
+    /// `beats/SET_KICK`: store the kick flag (echoed to the mirror).
+    fn set_kick(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let Some(kick) = params.get("kick").map(|value| bool_value(value, false)) else {
+            return Ok(Value::Null);
+        };
+        if self.beats.kick != kick {
+            self.beats.kick = kick;
+            self.deltas.push("beats/SET_KICK", json!({ "kick": kick }));
+        }
+        Ok(Value::Null)
+    }
+
+    /// Current tempo in BPM (0 until the beat detector reports one).
+    pub fn bpm(&self) -> f64 {
+        self.beats.bpm
+    }
+
+    /// The Input Link view of the kick: the explicit `beats/SET_KICK` flag, or
+    /// the analyser's kick envelope when no explicit flag has arrived yet.
+    pub fn kick(&self) -> bool {
+        self.beats.kick || self.audio.beat >= 0.5
+    }
+
+    /// The beat state an evaluator reads.
+    pub fn beats(&self) -> BeatsState {
+        BeatsState {
+            bpm: self.bpm(),
+            kick: self.kick(),
+        }
+    }
+
+    // ————————————————— Inputs (WS-1b) —————————————————
+
+    /// `inputs/addInput` (`inputs.js:106-113`) / the `inputs/ADD_INPUT`
+    /// mutation.
+    ///
+    /// Accepts either the action payload (`{ type, getLocation, location,
+    /// data }`) or a mutation-shaped `{ input: {...} }`. The UI omits `id`
+    /// (the Vuex action generates one with `uuidv4`), so the engine does the
+    /// same and returns the stored record.
+    fn add_input(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        const ACTION: &str = "inputs/addInput";
+        let payload = params
+            .get("input")
+            .and_then(Value::as_object)
+            .unwrap_or(params);
+        let mut input = payload.clone();
+        input
+            .entry("id".to_string())
+            .or_insert_with(|| json!(crate::ids::uuid_v4()));
+        input
+            .entry("type".to_string())
+            .or_insert_with(|| json!("action"));
+        input
+            .entry("data".to_string())
+            .or_insert_with(|| Value::Null);
+
+        let record: Input = serde_json::from_value(Value::Object(input))
+            .map_err(|error| invalid(ACTION, format!("invalid input record: {error}")))?;
+        let value = serde_json::to_value(&record)
+            .map_err(|error| invalid(ACTION, format!("input record: {error}")))?;
+        let id = record.id.clone();
+        self.state.inputs.insert(id, record);
+        self.deltas
+            .push("inputs/ADD_INPUT", json!({ "input": value }));
+        Ok(value)
+    }
+
+    /// `inputs/removeInput` (`inputs.js:116-134`).
+    fn remove_input_action(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let Some(input_id) = params.get("inputId").and_then(Value::as_str) else {
+            return Ok(json!(false));
+        };
+        if self.state.inputs.shift_remove(input_id).is_none() {
+            if !bool_field(params, "silent").unwrap_or(false) {
+                self.warn_once(
+                    format!("input:{input_id}"),
+                    &format!(
+                        "engine: WARN inputs/removeInput: no input with id {input_id} (ignored)"
+                    ),
+                );
+            }
+            return Ok(json!(false));
+        }
+        self.deltas
+            .push("inputs/REMOVE_INPUT", json!({ "inputId": input_id }));
+        Ok(json!(true))
+    }
+
+    /// `inputs/createInputLink` (`inputs.js:136-176`).
+    ///
+    /// JS defaults `min`/`max` to `0`/`1` in the action's destructuring, so an
+    /// absent bound is written as `0`/`1`; an explicit `null` (OSC links)
+    /// stays `null` and disables the range mapping.
+    fn create_input_link(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        const ACTION: &str = "inputs/createInputLink";
+        let Some(input_id) = params.get("inputId").and_then(Value::as_str) else {
+            return Ok(json!(false));
+        };
+        let Some(source) = params.get("source").and_then(Value::as_str) else {
+            self.warn_once(
+                format!("input-link-source:{input_id}"),
+                &format!("engine: WARN {ACTION}: no source for input {input_id} (link ignored)"),
+            );
+            return Ok(json!(false));
+        };
+        if !self.state.inputs.contains_key(input_id) {
+            self.warn_once(
+                format!("input-link-target:{input_id}"),
+                &format!("engine: WARN {ACTION}: no input with id {input_id} (link ignored)"),
+            );
+            return Ok(json!(false));
+        }
+
+        let mut link = Map::new();
+        link.insert("id".to_string(), json!(input_id));
+        link.insert(
+            "type".to_string(),
+            params
+                .get("type")
+                .cloned()
+                .unwrap_or_else(|| json!("state")),
+        );
+        if let Some(location) = params.get("location").filter(|value| !value.is_null()) {
+            link.insert("location".to_string(), location.clone());
+        }
+        if let Some(args) = params.get("args").filter(|value| !value.is_null()) {
+            link.insert("args".to_string(), args.clone());
+        }
+        link.insert("source".to_string(), json!(source));
+        link.insert(
+            "min".to_string(),
+            params.get("min").cloned().unwrap_or_else(|| json!(0)),
+        );
+        link.insert(
+            "max".to_string(),
+            params.get("max").cloned().unwrap_or_else(|| json!(1)),
+        );
+        if let Some(matcher) = params.get("match").filter(|value| !value.is_null()) {
+            link.insert("match".to_string(), matcher.clone());
+        }
+
+        let record: InputLink = serde_json::from_value(Value::Object(link))
+            .map_err(|error| invalid(ACTION, format!("invalid link record: {error}")))?;
+        let value = serde_json::to_value(&record)
+            .map_err(|error| invalid(ACTION, format!("link record: {error}")))?;
+        self.state.input_links.insert(input_id.to_string(), record);
+        self.deltas
+            .push("inputs/ADD_INPUT_LINK", json!({ "inputLink": value }));
+        Ok(json!(true))
+    }
+
+    /// `inputs/updateInputLink` (`inputs.js:178-180`).
+    fn update_input_link(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        const ACTION: &str = "inputs/updateInputLink";
+        let Some(input_id) = params.get("inputId").and_then(Value::as_str) else {
+            return Ok(Value::Null);
+        };
+        let Some(key) = params.get("key").and_then(Value::as_str) else {
+            return Ok(Value::Null);
+        };
+        let value = params.get("value").cloned().unwrap_or(Value::Null);
+        let Some(link) = self.state.input_links.get(input_id).cloned() else {
+            return Ok(Value::Null);
+        };
+
+        let mut raw = serde_json::to_value(&link)
+            .map_err(|error| invalid(ACTION, format!("link record: {error}")))?;
+        let Some(map) = raw.as_object_mut() else {
+            return Ok(Value::Null);
+        };
+        map.insert(key.to_string(), value.clone());
+        let updated: InputLink = serde_json::from_value(raw)
+            .map_err(|error| invalid(ACTION, format!("invalid link update: {error}")))?;
+        self.state.input_links.insert(input_id.to_string(), updated);
+        self.deltas.push(
+            "inputs/UPDATE_INPUT_LINK",
+            json!({ "inputId": input_id, "key": key, "value": value }),
+        );
+        Ok(Value::Null)
+    }
+
+    /// `inputs/removeInputLink` (`inputs.js:182-198`): removing a `tween`
+    /// source also drops its descriptor from the tween list.
+    fn remove_input_link(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let Some(input_id) = params.get("inputId").and_then(Value::as_str) else {
+            return Ok(json!(false));
+        };
+        if !self.state.inputs.contains_key(input_id) {
+            return Ok(json!(false));
+        }
+        let link = self.state.input_links.shift_remove(input_id);
+        self.deltas
+            .push("inputs/REMOVE_INPUT_LINK", json!({ "inputId": input_id }));
+
+        if link.as_ref().and_then(|link| link.source.as_deref()) == Some("tween") {
+            self.remove_tween(input_id);
+            self.deltas
+                .push("tweens/REMOVE_TWEEN", json!({ "id": input_id }));
+        }
+        Ok(json!(true))
+    }
+
+    /// Remove a tween descriptor by id from the opaque `tweens` slot.
+    fn remove_tween(&mut self, id: &str) {
+        match &mut self.state.tweens {
+            Value::Array(entries) => {
+                entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(id));
+            }
+            Value::Object(map) => {
+                if let Some(Value::Array(entries)) = map.get_mut("tweens") {
+                    entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(id));
+                } else {
+                    map.remove(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `inputs/setFocusedInput` (`inputs.js:98-104`).
+    fn set_focused_input(&mut self, params: &Map<String, Value>) -> Result<Value, StoreError> {
+        let id = params.get("id").cloned().unwrap_or(Value::Null);
+        let title = params.get("title").cloned().unwrap_or(Value::Null);
+        self.state.focused_input = json!({ "id": id, "title": title });
+        self.deltas.push(
+            "inputs/SET_FOCUSED_INPUT",
+            json!({ "id": id, "title": title }),
+        );
+        Ok(Value::Null)
+    }
+
+    /// `inputs/clearFocusedInput` (`inputs.js:102-104`).
+    fn clear_focused_input(&mut self) -> Result<Value, StoreError> {
+        self.set_focused_input(&Map::new())
+    }
+
+    /// Evaluate every Input Link against the current audio frame and apply the
+    /// resulting writes (WS-9).
+    ///
+    /// `now` is a monotonic timestamp (the window loop passes its frame clock);
+    /// it drives the 10 Hz delta throttle. The compositor renders from the
+    /// store immediately, so props react at the full frame rate; only the UI
+    /// mirror updates are throttled.
+    pub fn update_input_links(&mut self, audio: &AudioFrame, now: Duration) {
+        let beats = self.beats();
+        let mut writes = Vec::new();
+        crate::input_links::evaluate_input_links(
+            &self.state,
+            audio,
+            &beats,
+            &mut self.link_smoothing,
+            &mut writes,
+        );
+        self.apply_link_writes(writes, now);
+    }
+
+    /// Apply resolved writes: coerce, skip unchanged values, and emit at most
+    /// one delta per input every [`LINK_DELTA_INTERVAL`].
+    fn apply_link_writes(&mut self, writes: Vec<LinkWrite>, now: Duration) {
+        for write in writes {
+            match &write.target {
+                LinkTarget::Module {
+                    module_id,
+                    prop,
+                    path,
+                } => self.apply_module_link_write(&write, module_id, prop, path.as_deref(), now),
+                LinkTarget::ModuleMeta {
+                    module_id,
+                    meta_key,
+                } => self.apply_meta_link_write(&write, module_id, meta_key, now),
+                LinkTarget::Group { group_id, key } => {
+                    self.apply_group_link_write(&write, group_id, key, now)
+                }
+            }
+        }
+    }
+
+    fn apply_module_link_write(
+        &mut self,
+        write: &LinkWrite,
+        module_id: &str,
+        prop: &str,
+        path: Option<&str>,
+        now: Duration,
+    ) {
+        let Some(module) = self.state.modules.get(module_id) else {
+            return;
+        };
+        let module_name = module.module_name.clone();
+        let schema = self
+            .registry
+            .prop_schema(&module_name, prop)
+            .unwrap_or_default();
+
+        // Skip a write the prop already carries (f32 tolerance): the audio
+        // frames repeat values constantly and re-writing burns no GPU time but
+        // does churn the mirror.
+        let unchanged = prop_value(&module.props, prop, path)
+            .and_then(Value::as_f64)
+            .is_some_and(|current| (current - write.value).abs() <= LINK_DELTA_EPSILON);
+        if unchanged {
+            self.clear_link_pending(&write.input_id);
+            return;
+        }
+
+        let coerced = coerce_prop_value(&schema, &json!(write.value));
+        let Some(module) = self.state.modules.get_mut(module_id) else {
+            return;
+        };
+        set_prop_value(&mut module.props, prop, path, coerced.clone());
+
+        let payload = json!({
+            "moduleId": module_id,
+            "prop": prop,
+            "data": {
+                "value": coerced,
+                "type": schema.type_,
+                "path": path.unwrap_or_default(),
+            },
+        });
+        self.record_link_delta(
+            &write.input_id,
+            write.value,
+            "modules/UPDATE_ACTIVE_MODULE_PROP",
+            payload,
+            now,
+        );
+    }
+
+    /// Apply a link that targets a Module meta value (`alpha`, `enabled`, ...).
+    ///
+    /// `modules.js:564-590` (`updateMeta`) writes the value through unchanged
+    /// (after `applyExpression`, which the engine evaluates separately), so no
+    /// clamping happens here beyond the `enabled` boolean conversion.
+    fn apply_meta_link_write(
+        &mut self,
+        write: &LinkWrite,
+        module_id: &str,
+        meta_key: &str,
+        now: Duration,
+    ) {
+        let Some(module) = self.state.modules.get(module_id) else {
+            return;
+        };
+        let unchanged = module
+            .meta
+            .get(meta_key)
+            .and_then(Value::as_f64)
+            .is_some_and(|current| (current - write.value).abs() <= LINK_DELTA_EPSILON);
+        if unchanged {
+            self.clear_link_pending(&write.input_id);
+            return;
+        }
+
+        let value = match meta_key {
+            "enabled" => json!(write.value != 0.0),
+            _ => json!(write.value),
+        };
+        let Some(module) = self.state.modules.get_mut(module_id) else {
+            return;
+        };
+        let Some(meta) = module.meta.as_object_mut() else {
+            return;
+        };
+        meta.insert(meta_key.to_string(), value.clone());
+
+        self.record_link_delta(
+            &write.input_id,
+            write.value,
+            "modules/UPDATE_ACTIVE_MODULE_META",
+            json!({ "id": module_id, "metaKey": meta_key, "data": value }),
+            now,
+        );
+    }
+
+    fn apply_group_link_write(
+        &mut self,
+        write: &LinkWrite,
+        group_id: &str,
+        key: &str,
+        now: Duration,
+    ) {
+        let unchanged = key == "alpha"
+            && self
+                .state
+                .find_group(group_id)
+                .is_some_and(|group| (group.alpha - write.value).abs() <= LINK_DELTA_EPSILON);
+        if unchanged {
+            self.clear_link_pending(&write.input_id);
+            return;
+        }
+
+        let Some(group) = self.state.find_group_mut(group_id) else {
+            return;
+        };
+
+        let value = json!(write.value);
+        let applied = match key {
+            "alpha" => {
+                group.alpha = write.value;
+                true
+            }
+            "hidden" => {
+                group.hidden = write.value != 0.0;
+                true
+            }
+            "enabled" => {
+                group.enabled = write.value as i64;
+                true
+            }
+            _ => false,
+        };
+        if !applied {
+            return;
+        }
+
+        let payload = json!({ "groupId": group_id, "key": key, "data": value });
+        self.record_link_delta(
+            &write.input_id,
+            write.value,
+            "groups/UPDATE_GROUP_BY_KEY",
+            payload,
+            now,
+        );
+    }
+
+    /// Store the newest delta and push it when the throttle allows.
+    fn record_link_delta(
+        &mut self,
+        input_id: &str,
+        value: f64,
+        delta_type: &'static str,
+        payload: Value,
+        now: Duration,
+    ) {
+        let entry = self
+            .link_deltas
+            .entry(input_id.to_string())
+            .or_insert_with(|| LinkDeltaState {
+                last_emit: None,
+                last_value: value,
+                pending: None,
+            });
+
+        let due = match entry.last_emit {
+            None => true,
+            Some(last) => {
+                now.saturating_sub(last) >= LINK_DELTA_INTERVAL
+                    && (entry.last_value - value).abs() > LINK_DELTA_EPSILON
+            }
+        };
+
+        if due {
+            entry.last_emit = Some(now);
+            entry.last_value = value;
+            entry.pending = None;
+            self.deltas.push(delta_type, payload);
+        } else {
+            entry.pending = Some((delta_type, payload));
+        }
+    }
+
+    /// Drop a throttled delta whose value the store already carries again.
+    fn clear_link_pending(&mut self, input_id: &str) {
+        if let Some(entry) = self.link_deltas.get_mut(input_id) {
+            entry.pending = None;
+        }
+    }
+
+    /// Emit any deltas the throttle held back. Called when the engine is about
+    /// to snapshot/save, so the renderer mirror sees the final link values.
+    pub fn flush_link_deltas(&mut self) {
+        for entry in self.link_deltas.values_mut() {
+            let Some((delta_type, payload)) = entry.pending.take() else {
+                continue;
+            };
+            self.deltas.push(delta_type, payload);
+        }
     }
 
     // ————————————————— Snapshot / restore —————————————————
@@ -927,6 +1577,9 @@ impl Store {
     pub fn restore(&mut self, preset: &Value) -> Result<(), StoreError> {
         load_preset_into_state(&mut self.state, preset)?;
         self.deltas.drain();
+        // Link smoothing/throttle state belongs to the replaced inputs.
+        self.link_smoothing.clear();
+        self.link_deltas.clear();
         Ok(())
     }
 
@@ -1080,6 +1733,77 @@ fn finite_f32(value: Option<&Value>) -> Option<f32> {
         .map(|number| number as f32)
 }
 
+/// A scalar audio feature: absent → `None`; present but invalid → `Some(0)`.
+fn scalar_field(value: Option<&Value>) -> Option<f32> {
+    value.map(|value| {
+        value
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(|number| number as f32)
+            .unwrap_or(0.0)
+    })
+}
+
+/// A fixed-length `f32` array; a different length is ignored entirely.
+fn fixed_f32_array<const N: usize>(value: Option<&Value>) -> Option<[f32; N]> {
+    let entries = value?.as_array()?;
+    if entries.len() != N {
+        return None;
+    }
+    let mut out = [0.0; N];
+    for (slot, entry) in out.iter_mut().zip(entries) {
+        *slot = entry
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(|number| number as f32)
+            .unwrap_or(0.0);
+    }
+    Some(out)
+}
+
+/// A `f32` array of up to `N` entries, padded/truncated to `N`.
+fn padded_f32_array<const N: usize>(value: Option<&Value>) -> Option<[f32; N]> {
+    let entries = value?.as_array()?;
+    let mut out = [0.0; N];
+    for (slot, entry) in out.iter_mut().zip(entries) {
+        *slot = entry
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(|number| number as f32)
+            .unwrap_or(0.0);
+    }
+    Some(out)
+}
+
+/// A `u8` array of up to `N` entries, clamped to `0..=255` and padded.
+fn padded_u8_array<const N: usize>(value: Option<&Value>) -> Option<[u8; N]> {
+    let entries = value?.as_array()?;
+    let mut out = [0u8; N];
+    for (slot, entry) in out.iter_mut().zip(entries) {
+        let number = entry
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .unwrap_or(0.0);
+        *slot = number.clamp(0.0, 255.0) as u8;
+    }
+    Some(out)
+}
+
+/// Read `props[prop]` or the value at `path` inside `props[prop]`.
+fn prop_value<'a>(props: &'a Value, prop: &str, path: Option<&str>) -> Option<&'a Value> {
+    let mut current = props.get(prop)?;
+    let Some(path) = path else {
+        return Some(current);
+    };
+    for segment in parse_path(path) {
+        current = match segment {
+            PathSegment::Key(key) => current.get(key)?,
+            PathSegment::Index(index) => current.get(index)?,
+        };
+    }
+    Some(current)
+}
+
 fn int_value(value: &Value, fallback: i64) -> i64 {
     value
         .as_i64()
@@ -1163,7 +1887,7 @@ pub(crate) fn module_json(module: &ModuleInstance) -> Value {
 /// The JS mutation writes `props[prop] = value`, or `lodash.set(props[prop],
 /// path, value)` when a path is present (`modules.js:865-877`). Paths are
 /// produced by `dataTypes.js` inputs as `[key]` / `[index]` selectors.
-fn set_prop_value(props: &mut Value, prop: &str, path: Option<&str>, value: Value) {
+pub(crate) fn set_prop_value(props: &mut Value, prop: &str, path: Option<&str>, value: Value) {
     if !props.is_object() {
         *props = Value::Object(Map::new());
     }
@@ -1945,8 +2669,311 @@ mod tests {
         assert_eq!(store.audio().bass, 0.5);
         assert_eq!(store.audio().mid, 0.25);
         assert_eq!(store.audio().treble, 0.125);
-        // The renderer computed the bands, so no delta is echoed back.
+        // A wrong-length cells array is ignored rather than corrupting the
+        // grid; the renderer computed the bands, so no delta is echoed back.
+        assert_eq!(store.audio().cells, [0.0; 16]);
         assert!(store.drain_deltas().is_empty());
+    }
+
+    #[test]
+    fn set_bands_stores_the_full_analyser_payload() {
+        let mut store = Store::new();
+        let lanes: Vec<f64> = (0..12).map(|index| index as f64 / 100.0).collect();
+        let cells: Vec<f64> = (0..16).map(|index| 0.5 + index as f64 / 100.0).collect();
+        let raw_lanes: Vec<f64> = (0..12).map(|index| 1.0 + index as f64 / 100.0).collect();
+        let raw_cells: Vec<f64> = (0..16).map(|index| 2.0 + index as f64 / 100.0).collect();
+        let wave: Vec<f64> = (0..1024).map(|index| index as f64 / 1024.0).collect();
+        let freq: Vec<f64> = (0..1024).map(|index| index as f64).collect();
+
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({
+                    "bass": 0.5,
+                    "mid": 0.25,
+                    "treble": 0.75,
+                    "beat": 0.4,
+                    "lanes": lanes,
+                    "cells": cells,
+                    "rawLanes": raw_lanes,
+                    "rawCells": raw_cells,
+                    "wave": wave,
+                    "freqMag": freq,
+                    "byteFrequencyData": [1, 2, 300, -5],
+                    "sampleRate": 48000,
+                    "rms": 0.3,
+                    "zcr": 0.05,
+                    "energy": 0.9,
+                    "spectralCentroid": 1200.0,
+                    "spectralFlatness": 0.2,
+                    "spectralSlope": -0.1,
+                    "spectralRolloff": 3000.0,
+                    "spectralSpread": 800.0,
+                    "spectralSkewness": 0.4,
+                    "spectralKurtosis": 1.5,
+                    "perceptualSpread": 0.6,
+                    "perceptualSharpness": 0.7,
+                    "unknownKey": "ignored"
+                }),
+            )
+            .expect("meyda/SET_BANDS dispatches");
+
+        let audio = store.audio();
+        assert!((audio.lanes[0] - 0.0).abs() < 1e-6);
+        assert!((audio.lanes[11] - 0.11).abs() < 1e-6);
+        assert!((audio.cells[0] - 0.5).abs() < 1e-6);
+        assert!((audio.cells[15] - 0.65).abs() < 1e-6);
+        assert!((audio.raw_lanes[11] - 1.11).abs() < 1e-6);
+        assert!((audio.raw_cells[15] - 2.15).abs() < 1e-6);
+        assert!((audio.beat - 0.4).abs() < 1e-6);
+        assert!((audio.wave[0] - 0.0).abs() < 1e-6);
+        assert!((audio.wave[1023] - 1023.0 / 1024.0).abs() < 1e-6);
+        assert!((audio.freq_mag[1023] - 1023.0).abs() < 1e-6);
+        // Byte values are clamped, not wrapped; a short array pads with zero.
+        assert_eq!(&audio.byte_frequency_data[..4], &[1, 2, 255, 0]);
+        assert_eq!(audio.byte_frequency_data[1023], 0);
+        assert_eq!(audio.sample_rate, 48_000.0);
+        // `Waveform` reads `features.buffer`; it mirrors the wave.
+        assert_eq!(audio.features.buffer, audio.wave.to_vec());
+        assert!((audio.features.rms - 0.3).abs() < 1e-6);
+        assert!((audio.features.zcr - 0.05).abs() < 1e-6);
+        assert!((audio.features.energy - 0.9).abs() < 1e-6);
+        assert!((audio.features.spectral_centroid - 1200.0).abs() < 1e-6);
+        assert!((audio.features.spectral_flatness - 0.2).abs() < 1e-6);
+        assert!((audio.features.spectral_slope + 0.1).abs() < 1e-6);
+        assert!((audio.features.spectral_rolloff - 3000.0).abs() < 1e-6);
+        assert!((audio.features.spectral_spread - 800.0).abs() < 1e-6);
+        assert!((audio.features.spectral_skewness - 0.4).abs() < 1e-6);
+        assert!((audio.features.spectral_kurtosis - 1.5).abs() < 1e-6);
+        assert!((audio.features.perceptual_spread - 0.6).abs() < 1e-6);
+        assert!((audio.features.perceptual_sharpness - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_bands_ignores_bad_lengths_and_non_finite_values() {
+        let mut store = Store::new();
+        // Seed a valid grid.
+        let lanes: Vec<f64> = (0..12).map(|_| 0.5).collect();
+        let cells: Vec<f64> = (0..16).map(|_| 0.25).collect();
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({"lanes": lanes, "cells": cells, "sampleRate": 44100}),
+            )
+            .expect("dispatch");
+
+        // Wrong lengths must not replace the seeded grid.
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({
+                    "lanes": [1, 2, 3],
+                    "cells": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+                    "sampleRate": 0,
+                    "rms": "not a number"
+                }),
+            )
+            .expect("dispatch");
+
+        assert_eq!(store.audio().lanes, [0.5; 12]);
+        assert_eq!(store.audio().cells, [0.25; 16]);
+        // A non-positive sample rate keeps the previous (default) rate rather
+        // than storing zero; an unparsable scalar becomes 0.
+        assert_eq!(store.audio().sample_rate, 44_100.0);
+        assert_eq!(store.audio().features.rms, 0.0);
+    }
+
+    #[test]
+    fn set_bands_derives_wave_from_the_byte_time_domain_fallback() {
+        let mut store = Store::new();
+        store
+            .dispatch(
+                "meyda/SET_BANDS",
+                json!({"byteTimeDomainData": [0, 128, 255]}),
+            )
+            .expect("dispatch");
+
+        assert!((store.audio().wave[0] + 1.0).abs() < 1e-6);
+        assert!((store.audio().wave[1] - 0.003_921_569).abs() < 1e-5);
+        assert!((store.audio().wave[2] - 1.0).abs() < 1e-6);
+        // Unspecified tail bytes are zero, which maps to -1.
+        assert!((store.audio().wave[3] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beats_actions_store_bpm_and_kick_and_echo_deltas() {
+        let mut store = Store::new();
+        assert_eq!(store.bpm(), 0.0);
+        assert!(!store.kick());
+
+        store
+            .dispatch(
+                "beats/setBpm",
+                json!({"bpm": 128, "source": "beatdetektor"}),
+            )
+            .expect("setBpm dispatches");
+        assert_eq!(store.bpm(), 128.0);
+
+        store
+            .dispatch("beats/SET_KICK", json!({"kick": true}))
+            .expect("SET_KICK dispatches");
+        assert!(store.kick());
+
+        let deltas: Vec<String> = store
+            .drain_deltas()
+            .into_iter()
+            .map(|delta| delta.r#type)
+            .collect();
+        assert_eq!(deltas, vec!["beats/SET_BPM", "beats/SET_KICK"]);
+
+        // An equal value is not re-broadcast.
+        store
+            .dispatch("beats/SET_KICK", json!({"kick": true}))
+            .expect("SET_KICK dispatches");
+        assert!(store.drain_deltas().is_empty());
+
+        // A foreign BPM source cannot set the tempo.
+        store
+            .dispatch("beats/setBpm", json!({"bpm": 90, "source": "tap"}))
+            .expect("setBpm dispatches");
+        assert_eq!(store.bpm(), 128.0);
+    }
+
+    /// A preset with one module, one action input and one getter link.
+    fn link_preset(feature: &str) -> Value {
+        json!({
+            "groups": [],
+            "modules": {
+                "m1": {
+                    "$id": "m1",
+                    "$moduleName": "Bands",
+                    "meta": { "name": "Bands", "type": "shader", "enabled": true },
+                    "props": { "amount": 0.0 },
+                    "data": {},
+                    "$props": { "amount": { "id": "input-a", "type": "float" } }
+                }
+            },
+            "inputs": {
+                "focusedInput": { "id": null, "title": null },
+                "inputs": {
+                    "input-a": {
+                        "id": "input-a",
+                        "type": "action",
+                        "data": { "moduleId": "m1", "prop": "amount" },
+                        "getLocation": "modules.active[\"m1\"].props[\"amount\"]",
+                        "location": "modules/updateProp"
+                    }
+                },
+                "inputLinks": {
+                    "input-a": {
+                        "id": "input-a",
+                        "type": "getter",
+                        "location": "meyda/getFeature",
+                        "source": "meyda",
+                        "args": [feature]
+                    }
+                }
+            },
+            "expressions": { "assignments": {} },
+            "tweens": [],
+            "midi": {}
+        })
+    }
+
+    fn audio_with_bass(bass: f32) -> AudioFrame {
+        AudioFrame {
+            bass,
+            ..AudioFrame::default()
+        }
+    }
+
+    #[test]
+    fn input_links_write_module_props_from_audio() {
+        let mut store = Store::new();
+        store.restore(&link_preset("bass")).expect("preset loads");
+        store.drain_deltas();
+
+        store.update_input_links(&audio_with_bass(0.75), Duration::from_millis(0));
+
+        // Values are coerced through the prop schema; the registry's Bands
+        // `amount` prop is a plain float.
+        let amount = store.state().modules["m1"].props["amount"]
+            .as_f64()
+            .expect("amount is numeric");
+        assert!((amount - 0.75).abs() < 1e-6);
+        assert_eq!(store.drain_deltas().len(), 1);
+    }
+
+    #[test]
+    fn input_link_deltas_are_throttled_to_one_per_interval() {
+        let mut store = Store::new();
+        store.restore(&link_preset("bass")).expect("preset loads");
+        store.drain_deltas();
+
+        // First frame always emits.
+        store.update_input_links(&audio_with_bass(0.1), Duration::from_millis(0));
+        assert_eq!(store.drain_deltas().len(), 1);
+
+        // Within 100 ms the prop still updates (the compositor reads it) but
+        // no delta reaches the mirror.
+        store.update_input_links(&audio_with_bass(0.4), Duration::from_millis(50));
+        assert_eq!(store.drain_deltas().len(), 0);
+        assert!(
+            (store.state().modules["m1"].props["amount"]
+                .as_f64()
+                .unwrap()
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
+
+        // At 100 ms (and a >1e-3 change) exactly one delta goes out.
+        store.update_input_links(&audio_with_bass(0.6), Duration::from_millis(100));
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_PROP");
+        assert!((deltas[0].payload["data"]["value"].as_f64().unwrap() - 0.6).abs() < 1e-6);
+
+        // A pending within-interval value is flushed on request.
+        store.update_input_links(&audio_with_bass(0.9), Duration::from_millis(150));
+        assert_eq!(store.drain_deltas().len(), 0);
+        store.flush_link_deltas();
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert!((deltas[0].payload["data"]["value"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn input_links_skip_unchanged_values() {
+        let mut store = Store::new();
+        store.restore(&link_preset("bass")).expect("preset loads");
+        store.drain_deltas();
+
+        store.update_input_links(&audio_with_bass(0.5), Duration::from_millis(0));
+        assert_eq!(store.drain_deltas().len(), 1);
+
+        store.update_input_links(&audio_with_bass(0.500_000_1), Duration::from_millis(200));
+        assert_eq!(store.drain_deltas().len(), 0);
+    }
+
+    #[test]
+    fn input_links_write_sub_prop_paths() {
+        let mut preset = link_preset("bass");
+        preset["modules"]["m1"]["props"]["position"] = json!([0.0, 0.0]);
+        preset["inputs"]["inputs"]["input-a"]["data"] =
+            json!({ "moduleId": "m1", "prop": "position", "path": "[1]" });
+        preset["modules"]["m1"]["$props"]["position"] = json!({ "id": "input-a", "type": "float" });
+
+        let mut store = Store::new();
+        store.restore(&preset).expect("preset loads");
+        store.update_input_links(&audio_with_bass(0.25), Duration::from_millis(0));
+
+        // The registry's Bands module has no `position` prop, so the value is
+        // stored without coercion, exactly like `updateProp`'s fallback.
+        assert_eq!(
+            store.state().modules["m1"].props["position"],
+            json!([0.0, 0.25])
+        );
     }
 
     #[test]
@@ -2381,6 +3408,238 @@ mod tests {
         let mut nested = Value::Null;
         set_json_path(&mut nested, "[0].x", json!(true));
         assert_eq!(nested, json!([{"x": true}]));
+    }
+
+    /// A minimal module instance for tests that seed the state directly.
+    fn csv_module(id: &str, meta: Value) -> ModuleInstance {
+        ModuleInstance {
+            id: id.to_string(),
+            module_name: "Bands".to_string(),
+            meta,
+            props: json!({}),
+            data: json!({}),
+            dollar_props: json!({}),
+            status: Vec::new(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn add_input_returns_the_record_and_emits_the_mirror_delta() {
+        let mut store = Store::new();
+        let input = store
+            .dispatch(
+                "inputs/addInput",
+                json!({
+                    "type": "action",
+                    "getLocation": "modules.active[\"m\"].props.alpha",
+                    "location": "modules/updateProp",
+                    "data": { "moduleId": "m", "prop": "alpha" },
+                }),
+            )
+            .expect("addInput dispatches");
+        let id = input["id"].as_str().expect("id assigned").to_string();
+        assert_eq!(input["type"], json!("action"));
+        assert_eq!(
+            input["getLocation"],
+            json!("modules.active[\"m\"].props.alpha")
+        );
+        assert!(store.state().inputs.contains_key(&id));
+
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "inputs/ADD_INPUT");
+        assert_eq!(deltas[0].payload["input"]["id"], json!(id));
+
+        // The mutation-shaped `{ input }` payload is accepted too.
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({"input": {"id": "known", "type": "commit"}}),
+            )
+            .expect("addInput accepts a mutation payload");
+        assert!(store.state().inputs.contains_key("known"));
+    }
+
+    #[test]
+    fn create_input_link_defaults_bounds_and_requires_source_and_target() {
+        let mut store = Store::new();
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({"id": "input-1", "type": "action", "location": "modules/updateProp"}),
+            )
+            .expect("addInput");
+        store.drain_deltas();
+
+        assert_eq!(
+            store
+                .dispatch(
+                    "inputs/createInputLink",
+                    json!({"inputId": "missing", "source": "meyda", "type": "getter"}),
+                )
+                .expect("createInputLink"),
+            json!(false)
+        );
+        assert_eq!(
+            store
+                .dispatch(
+                    "inputs/createInputLink",
+                    json!({"inputId": "input-1", "type": "getter"}),
+                )
+                .expect("createInputLink"),
+            json!(false)
+        );
+
+        let created = store
+            .dispatch(
+                "inputs/createInputLink",
+                json!({
+                    "inputId": "input-1",
+                    "type": "getter",
+                    "location": "meyda/getFeature",
+                    "source": "meyda",
+                    "args": ["bass"],
+                }),
+            )
+            .expect("createInputLink");
+        assert_eq!(created, json!(true));
+
+        let link = &store.state().input_links["input-1"];
+        assert!(link.is_getter());
+        assert_eq!(link.args, Some(vec![json!("bass")]));
+        // JS destructuring defaults: absent bounds become 0/1.
+        assert_eq!(link.min, Some(0.0));
+        assert_eq!(link.max, Some(1.0));
+
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "inputs/ADD_INPUT_LINK");
+        assert_eq!(deltas[0].payload["inputLink"]["id"], json!("input-1"));
+    }
+
+    #[test]
+    fn update_and_remove_input_link_edit_the_record_and_drop_tweens() {
+        let mut store = Store::new();
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({"id": "input-2", "type": "action", "location": "modules/updateProp"}),
+            )
+            .expect("addInput");
+        store
+            .dispatch(
+                "inputs/createInputLink",
+                json!({
+                    "inputId": "input-2",
+                    "type": "state",
+                    "location": "beats.kick",
+                    "source": "tween",
+                }),
+            )
+            .expect("createInputLink");
+        store.state.tweens = json!([{"id": "input-2", "data": [[0], [1]]}]);
+        store.drain_deltas();
+
+        store
+            .dispatch(
+                "inputs/updateInputLink",
+                json!({"inputId": "input-2", "key": "min", "value": 2}),
+            )
+            .expect("updateInputLink");
+        assert_eq!(store.state().input_links["input-2"].min, Some(2.0));
+        assert_eq!(store.state().input_links["input-2"].max, Some(1.0));
+
+        store
+            .dispatch("inputs/removeInputLink", json!({"inputId": "input-2"}))
+            .expect("removeInputLink");
+        assert!(!store.state().input_links.contains_key("input-2"));
+        assert_eq!(store.state().tweens, json!([]));
+
+        let deltas = store.drain_deltas();
+        let names: Vec<&str> = deltas.iter().map(|delta| delta.r#type.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "inputs/UPDATE_INPUT_LINK",
+                "inputs/REMOVE_INPUT_LINK",
+                "tweens/REMOVE_TWEEN"
+            ]
+        );
+    }
+
+    #[test]
+    fn focused_input_round_trips_and_clears() {
+        let mut store = Store::new();
+        store
+            .dispatch(
+                "inputs/setFocusedInput",
+                json!({"id": "input-3", "title": "Gain"}),
+            )
+            .expect("setFocusedInput");
+        assert_eq!(
+            store.state().focused_input,
+            json!({"id": "input-3", "title": "Gain"})
+        );
+        store
+            .dispatch("inputs/clearFocusedInput", Value::Null)
+            .expect("clearFocusedInput");
+        assert_eq!(
+            store.state().focused_input,
+            json!({"id": null, "title": null})
+        );
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[1].r#type, "inputs/SET_FOCUSED_INPUT");
+    }
+
+    #[test]
+    fn meta_links_write_module_meta_and_emit_the_update_meta_delta() {
+        use std::time::Duration;
+        let mut store = Store::new();
+        store.state.modules.insert(
+            "m-meta".to_string(),
+            csv_module("m-meta", json!({ "alpha": 1.0, "enabled": true })),
+        );
+        store
+            .dispatch(
+                "inputs/addInput",
+                json!({
+                    "id": "input-meta",
+                    "type": "action",
+                    "location": "modules/updateMeta",
+                    "data": {"id": "m-meta", "metaKey": "alpha"},
+                }),
+            )
+            .expect("addInput");
+        store
+            .dispatch(
+                "inputs/createInputLink",
+                json!({
+                    "inputId": "input-meta",
+                    "type": "getter",
+                    "location": "meyda/getFeature",
+                    "source": "meyda",
+                    "args": ["bass"],
+                    "min": 0.2,
+                    "max": 0.8,
+                }),
+            )
+            .expect("createInputLink");
+        store.drain_deltas();
+
+        let mut audio = AudioFrame::default();
+        audio.bass = 0.5;
+        store.update_input_links(&audio, Duration::ZERO);
+
+        let module = store.state().modules.get("m-meta").expect("module");
+        assert!((module.meta["alpha"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+        let deltas = store.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].r#type, "modules/UPDATE_ACTIVE_MODULE_META");
+        assert_eq!(deltas[0].payload["id"], json!("m-meta"));
+        assert_eq!(deltas[0].payload["metaKey"], json!("alpha"));
+        assert!((deltas[0].payload["data"].as_f64().unwrap() - 0.5).abs() < 1e-6);
     }
 
     #[test]

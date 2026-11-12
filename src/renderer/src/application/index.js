@@ -30,6 +30,7 @@ import {
 } from "./media-inputs";
 import setupBeatDetektor from "./setup-beat-detektor";
 import setupMidi from "./setup-midi";
+import { buildEngineAudioPayload } from "./engine-audio-payload";
 import store from "./worker/store";
 import windowHandler from "./window-handler";
 import use from "./use";
@@ -821,14 +822,25 @@ class ModV {
         timeDomain ? timeDomain.slice(-constants.AUDIO_BUFFER_SIZE) : [],
       );
       if (this.engineMode) {
-        // Keep the UI's meters live by feeding the mirror directly; the
-        // engine owns analysis proper from WS-9 (M6).
+        // WS-9: the engine needs the whole analyser payload (damping lanes,
+        // the 16-cell grid, wave, FFT magnitudes, sample rate and the Meyda
+        // scalars), not just the three bands. The mirror gets the same small
+        // `{ bass, mid, treble, cells }` object the legacy worker's
+        // `meyda/SET_BANDS` mutation stores for the UI meters.
+        const enginePayload = buildEngineAudioPayload(features);
+
         this._store.commit("meyda/SET_BANDS", {
           bass: features.bass ?? 0,
           mid: features.mid ?? 0,
           treble: features.treble ?? 0,
           cells: features.p10?.cells || [],
         });
+        this.store.commit("meyda/SET_BANDS", enginePayload);
+        // `updateBeatDetektor` above already commits `beats/SET_KICK` and
+        // dispatches `beats/setBpm` through `this.store`, which is the engine
+        // facade in engine mode. The engine echoes those mutations back as
+        // deltas so the mirror's `beats` state (the UI meter and the
+        // `bpm !== bpm` guard) stays current.
       } else {
         this.$worker.postMessage({ type: "meyda", payload: features });
       }

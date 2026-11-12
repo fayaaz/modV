@@ -10,13 +10,15 @@
 //! M2 removed the M0 `ChromaticLine`/`SyntheticSine` demo from this path: the
 //! window now renders whatever the store describes (an empty state presents
 //! the near-black clear). `--audio-fixture` is still parsed for the M0
-//! headless/report path but has no effect here — M3 takes the audio frame from
-//! the store, where the renderer's audio pump writes it (`meyda/SET_BANDS`);
-//! the engine itself does no analysis yet (WS-9 / M6).
+//! headless/report path but has no effect here — the audio frame comes from
+//! the store, where the renderer's audio pump writes the full analyser payload
+//! (`meyda/SET_BANDS`, WS-9).
 //!
 //! Each frame also dispatches `scenes/tick` with the real frame delta before
 //! rendering (`worker/loop.js:94-111`), but only while performance mode is
-//! running or a crossfade is active, so idle frames stay cheap.
+//! running or a crossfade is active, so idle frames stay cheap. Input Links
+//! are evaluated between the state update and the render, so audio-reactive
+//! props are current in the same frame they were computed.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -49,6 +51,9 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))?;
+    // Flush the last <100 ms of Input Link deltas so the renderer mirror sees
+    // the final values before the socket closes.
+    app.store.flush_link_deltas();
     // Flush the snapshot on any exit path (window close, bench deadline,
     // engine/shutdown) so a supervisor restart restores the last state.
     if let Some(mut supervisor) = app.supervisor.take() {
@@ -280,15 +285,25 @@ impl WindowedApp {
             }
         }
 
+        // 1c. Evaluate Input Links against the frame the renderer just
+        // committed, then render with the updated props (`worker/loop.js`
+        // runs the link loop before the renderers). `now` is the monotonic
+        // frame clock; it drives the 10 Hz mirror-delta throttle.
+        let audio = self.store.audio().clone();
+        self.store.update_input_links(&audio, self.start.elapsed());
+        if let Some(supervisor) = &mut self.supervisor {
+            supervisor.broadcast_deltas(&mut self.store);
+        }
+
         let frame_info = FrameInfo {
             time_seconds: self.start.elapsed().as_secs_f32(),
             frame_index: self.frames_done,
             date: wall_clock_date(self.start.elapsed().as_secs_f32()),
-            // Interim audio source: the renderer's audio pump commits AGC
-            // bands over the control socket (`meyda/SET_BANDS`), so the store
-            // holds the latest frame. There is no engine-side analysis yet
-            // (WS-9 / M6); wave/FFT/features stay zeroed.
-            audio: self.store.audio().clone(),
+            // The renderer's audio pump commits the full analyser payload over
+            // the control socket (`meyda/SET_BANDS`, WS-9), so the store holds
+            // the latest frame: bands, damping lanes, the 16-cell grid, wave,
+            // FFT magnitudes, sample rate and the Meyda scalars.
+            audio,
             row_fades: self
                 .store
                 .performance_runtime()

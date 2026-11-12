@@ -153,17 +153,17 @@
 //! in later batches — a scene that needs bloom will grow a flag on its meta or
 //! schema and get a composer here, not a second render path.
 //!
-//! ### Interim audio mapping (M4; M6 replaces it)
+//! ### Audio mapping (WS-9)
 //!
-//! The engine has no analyser yet: `meyda/SET_BANDS` gives the store three AGC
-//! bands (plus a zeroed beat), and [`FrameInfo::audio`] carries them. The
-//! bridge wants the full `audio-bands.js` payload, so
-//! [`interim_band_payload`] synthesises it: each band is replicated across its
-//! four damping lanes and its grid cells ([`band_of_cell`]), `wave`/`freq_mag`
-//! are the store's (still zeroed) arrays, `sample_rate` is reported as
-//! 48 kHz, and the byte spectrum is whatever the frame carries (1024 zero bins
-//! today, so scenes see silence rather than "no analyser"). M6 replaces this
-//! function with the analyser's real payload and nothing else moves.
+//! The renderer performs the analysis and commits the full `audio-bands.js`
+//! payload through `meyda/SET_BANDS`; [`FrameInfo::audio`] carries it.
+//! [`interim_band_payload`] converts the store's [`AudioFrame`] into the
+//! `BandPayload` the Point10 bridge consumes — damping lanes, the 16-cell grid,
+//! the AGC-free raw twins, wave, linear FFT magnitudes, beat envelope, sample
+//! rate and the byte spectrum all come from the analyser, not a three-band
+//! replication. ISF modules with `audio`/`audioFFT` inputs get a per-instance
+//! 512×2 texture pair ([`IsfAudioTextures`]) uploaded every frame; 2D modules
+//! receive the frame through `ModuleContext`/`DrawContext`.
 //!
 //! ## ISF corpus (WS-4)
 //!
@@ -192,11 +192,11 @@
 //! texture prop's value cannot be turned into a GPU texture; the group-canvas
 //! default is the implemented behaviour for every image input.
 //!
-//! Audio inputs are **static**: no analyser feeds `audio`/`audioFFT` textures
-//! yet (WS-9/M6), so the runtime binds its 1×1 transparent dummy and the
-//! `_imgSize`/`_imgRect` uniforms describe that dummy. ISF shaders that read
-//! audio are frozen until the engine audio feed lands; their other inputs and
-//! passes still run.
+//! Audio inputs: documents that declare `audio`/`audioFFT` get a per-instance
+//! 512×2 RGBA8 texture pair ([`IsfAudioTextures`]) uploaded from
+//! [`FrameInfo::audio`] every frame — the time-domain wave and the byte
+//! frequency spectrum, exactly like `ISFAudio.js`. Documents without audio
+//! inputs never allocate the textures.
 //!
 //! Compile-on-activate cost: the first frame after a module is added runs the
 //! GLSL → WGSL translation and pipeline creation on the render thread. The
@@ -247,8 +247,7 @@ use modv_renderers::isf::{
     CompiledIsf, IsfDocument, IsfFrameUniforms, IsfRuntime, IsfValue, IsfValues,
 };
 use modv_renderers::point10::audio_bridge::{
-    AUDIO_SAMPLES, AudioBridge, BandPayload, LANES_PER_BAND, RawBands, ResponsivenessLevers,
-    band_of_cell,
+    AudioBridge, BandPayload, RawBands, ResponsivenessLevers,
 };
 use modv_renderers::point10::{Point10Scene, SceneContext};
 use modv_renderers::shader::ShaderModule;
@@ -334,12 +333,15 @@ pub struct FrameInfo {
     pub frame_index: u64,
     /// `[year, month (0-based), weekday (0 = Sunday), seconds]` — `iDate`.
     pub date: [f32; 4],
-    /// The engine's audio frame (AGC bands today; wave/FFT once M6 lands).
+    /// The engine's full audio frame (bands, lanes/cells, wave, FFT
+    /// magnitudes, sample rate and the Meyda scalars).
     ///
     /// Filled from [`Store::audio`](crate::store_ops::Store::audio), which the
     /// renderer's audio pump updates through `meyda/SET_BANDS`. Shader modules
     /// read the bands via [`FrameInfo::shader_audio`], 2D modules receive the
-    /// whole frame in `ModuleContext`/`DrawContext`.
+    /// whole frame in `ModuleContext`/`DrawContext`, ISF modules sample the
+    /// per-instance audio textures and the Point10 bridge takes
+    /// [`interim_band_payload`].
     pub audio: AudioFrame,
     /// Row crossfades running this frame (empty when performance is idle).
     pub row_fades: Vec<RowFadeInfo>,
@@ -348,11 +350,12 @@ pub struct FrameInfo {
 impl FrameInfo {
     /// The shader uniform view of [`Self::audio`].
     ///
-    /// `kick` stays `false`: beat detection is part of the audio analysis
-    /// milestone (WS-9 / M6), and `meyda/SET_BANDS` does not carry a beat flag.
+    /// `u_kick` is the analyser's kick envelope thresholded at 0.5 (the
+    /// renderer forwards `features.p10.beat`; the shader uniform is a boolean
+    /// in GLSL). `u_bass`/`u_mid`/`u_treble` are the AGC band features.
     pub fn shader_audio(&self) -> ShaderAudioUniforms {
         ShaderAudioUniforms {
-            kick: false,
+            kick: self.audio.beat >= 0.5,
             bass: self.audio.bass,
             mid: self.audio.mid,
             treble: self.audio.treble,
@@ -480,6 +483,146 @@ struct IsfInstance {
     size: Option<(u32, u32)>,
     /// `FrameInfo::time_seconds` of the previous frame, for `TIMEDELTA`.
     last_time: Option<f32>,
+    /// The `audio`/`audioFFT` texture pair, allocated only when the compiled
+    /// document declares audio inputs.
+    audio: Option<IsfAudioTextures>,
+}
+
+/// The two ISF audio input textures (`ISFAudio.js`).
+///
+/// The JS `ISFAudioTexture` is `fftSize` (512) wide by 2 rows, RGBA with
+/// `r = g = b = level` and `a = 255`. The analyser is mono here, so both rows
+/// carry the same data (the JS duplicate of left/right also collapses to the
+/// same values for a mono analysis). `audio` carries the time-domain wave,
+/// `audioFFT` the byte frequency spectrum.
+struct IsfAudioTextures {
+    /// Backing texture for `audio` (kept for the view's lifetime).
+    _wave: wgpu::Texture,
+    /// `audio` input view.
+    wave_view: wgpu::TextureView,
+    /// Backing texture for `audioFFT`.
+    _fft: wgpu::Texture,
+    /// `audioFFT` input view.
+    fft_view: wgpu::TextureView,
+    /// Row-major pixel upload buffer (`width * height * 4`).
+    pixels: Vec<u8>,
+    /// One `audio` row, reused every frame.
+    wave_row: Vec<u8>,
+    /// One `audioFFT` row, reused every frame.
+    fft_row: Vec<u8>,
+}
+
+impl IsfAudioTextures {
+    /// ISF's audio textures are `fftSize` wide by two rows.
+    const WIDTH: u32 = 512;
+    const HEIGHT: u32 = 2;
+
+    fn new(device: &wgpu::Device) -> Self {
+        let create = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: Self::WIDTH,
+                    height: Self::HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let wave = create("modv-isf-audio");
+        let fft = create("modv-isf-audio-fft");
+        Self {
+            wave_view: wave.create_view(&wgpu::TextureViewDescriptor::default()),
+            _wave: wave,
+            fft_view: fft.create_view(&wgpu::TextureViewDescriptor::default()),
+            _fft: fft,
+            pixels: vec![0; (Self::WIDTH * Self::HEIGHT * 4) as usize],
+            wave_row: vec![0; (Self::WIDTH * 4) as usize],
+            fft_row: vec![0; (Self::WIDTH * 4) as usize],
+        }
+    }
+
+    /// Upload one analyser frame into both textures.
+    ///
+    /// `audio` takes the last 512 wave samples (the renderer's
+    /// `byteTimeDomainData` is `timeDomain.slice(-AUDIO_BUFFER_SIZE)`); the
+    /// wave is `-1..1` and maps to `0..255`. `audioFFT` takes the first 512
+    /// byte frequency bins. Both rows duplicate the mono data.
+    fn upload(&mut self, queue: &wgpu::Queue, audio: &AudioFrame) {
+        let row_bytes = (Self::WIDTH * 4) as usize;
+        for (index, slot) in self.wave_row.iter_mut().enumerate() {
+            // RGBA cycle: r, g, b = level, a = 255.
+            if index % 4 == 3 {
+                *slot = 255;
+                continue;
+            }
+            let sample = 512 + index / 4;
+            let value = audio.wave.get(sample).copied().unwrap_or(0.0);
+            *slot = (((value.clamp(-1.0, 1.0) + 1.0) * 0.5) * 255.0).round() as u8;
+        }
+        for (index, slot) in self.fft_row.iter_mut().enumerate() {
+            if index % 4 == 3 {
+                *slot = 255;
+                continue;
+            }
+            *slot = audio
+                .byte_frequency_data
+                .get(index / 4)
+                .copied()
+                .unwrap_or(0);
+        }
+
+        for row in 0..Self::HEIGHT as usize {
+            self.pixels[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(&self.wave_row);
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self._wave,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes as u32),
+                rows_per_image: Some(Self::HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: Self::WIDTH,
+                height: Self::HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        for row in 0..Self::HEIGHT as usize {
+            self.pixels[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(&self.fft_row);
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self._fft,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes as u32),
+                rows_per_image: Some(Self::HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: Self::WIDTH,
+                height: Self::HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 }
 
 /// The GPU compositor: shader renderer, frame-graph executor, textures.
@@ -989,8 +1132,10 @@ impl Compositor {
             slot,
             &input_view,
             &self.group_sampler,
-            // No FFT texture yet (WS-9 / M6); passing `None` binds the
-            // renderer's 1×1 zero dummy and `u_fftResolution` must then be 1.0.
+            // The shader uniform block carries only bands/kick; no shader
+            // module in the registry declares `u_fft`, so the FFT texture slot
+            // stays on the renderer's 1×1 zero dummy and `u_fftResolution`
+            // must then be 1.0.
             None,
             None,
             frame.shader_audio(),
@@ -1401,8 +1546,8 @@ impl Compositor {
     /// instance's lifetime (the runtime's bounded LRU only caches the
     /// pipelines). Frame uniforms follow `ISFRenderer.setDateUniforms`:
     /// `FRAMEINDEX` is 1-based, `DATE` is `[year, month 1-based, day, seconds
-    /// since midnight]`. Audio inputs stay bound to the runtime's dummy
-    /// texture until the engine audio feed lands (WS-9/M6).
+    /// since midnight]`. Audio inputs sample the per-instance
+    /// [`IsfAudioTextures`] pair uploaded from the current [`FrameInfo`].
     fn render_isf_module(
         &mut self,
         module: &ModuleInstance,
@@ -1455,6 +1600,7 @@ impl Compositor {
                 target: None,
                 size: None,
                 last_time: None,
+                audio: None,
             });
 
         // The module target is output-sized and rebuilt when the output
@@ -1536,6 +1682,29 @@ impl Compositor {
             }
         }
 
+        // Allocate the audio input pair only for documents that declare
+        // `audio`/`audioFFT`, then upload the current analyser frame. The JS
+        // renderer creates these textures in `ISFRenderer` per instance and
+        // updates them every frame (`ISFAudio.js`).
+        if definition.document.has_audio() {
+            if self
+                .isf
+                .get(module_id)
+                .and_then(|instance| instance.audio.as_ref())
+                .is_none()
+            {
+                let audio = IsfAudioTextures::new(&self.device);
+                if let Some(instance) = self.isf.get_mut(module_id) {
+                    instance.audio = Some(audio);
+                }
+            }
+            if let Some(instance) = self.isf.get_mut(module_id) {
+                if let Some(audio_textures) = instance.audio.as_mut() {
+                    audio_textures.upload(&self.queue, &frame.audio);
+                }
+            }
+        }
+
         // Values present in the module's prop bag; the runtime fills anything
         // missing from the document defaults.
         let values = isf_values(&definition.document, &module.props);
@@ -1578,6 +1747,26 @@ impl Compositor {
             let Some(render_target) = instance.target.as_ref() else {
                 return Ok(());
             };
+            let audio_inputs: Vec<(&str, &wgpu::TextureView)> = instance
+                .audio
+                .as_ref()
+                .map(|audio| {
+                    definition
+                        .document
+                        .inputs
+                        .iter()
+                        .filter(|input| input.type_ == "audio" || input.type_ == "audioFFT")
+                        .map(|input| {
+                            let view = if input.type_ == "audioFFT" {
+                                &audio.fft_view
+                            } else {
+                                &audio.wave_view
+                            };
+                            (input.name.as_str(), view)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             isf_runtime
                 .draw(
                     compiled,
@@ -1586,9 +1775,7 @@ impl Compositor {
                     uniforms,
                     &values,
                     &image_inputs,
-                    // Audio inputs are static until WS-9/M6: the runtime binds
-                    // its 1x1 transparent dummy for them.
-                    &[],
+                    &audio_inputs,
                 )
                 .err()
         };
@@ -2546,58 +2733,29 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// `MAX_FRAME_SECONDS` in `point10/timing.js`.
 pub(crate) const MAX_POINT10_FRAME_SECONDS: f32 = 0.1;
 
-/// Sample rate reported by the interim audio payload.
-///
-/// The store's [`AudioFrame`] carries no sample rate yet (the renderer's
-/// `AudioBands` runs at the `AudioContext` rate); 48 kHz is the engine's
-/// assumption until the analyser lands in M6. No batch-1 scene reads it for
-/// anything but the chromatic ring-buffer append count
-/// (`ChromaticLine.js:168`), so a wrong value only changes how densely the
-/// wave texture is filled, never a pitch or a level.
-const INTERIM_SAMPLE_RATE: f32 = 48_000.0;
-
 /// Build the `audio-bands.js` payload the Point10 [`AudioBridge`] consumes from
-/// the engine's interim audio frame.
+/// the engine's [`AudioFrame`].
 ///
-/// M4 has no analyser: `meyda/SET_BANDS` publishes three AGC bands and the
-/// store keeps them in [`AudioFrame`]. The bridge's payload has twelve damping
-/// lanes (`[damping * 3 + band]`) and sixteen log-spaced cells, so each band is
-/// replicated across its own lanes and cells — bands 0/1/2 own cells `0..=4`,
-/// `5..=9` and `10..=15` ([`band_of_cell`]), and lanes `band`, `3 + band`,
-/// `6 + band`, `9 + band`. The replication gives every scene the same value
-/// across damping, i.e. the payload is already as smooth as the three-band
-/// source allows; the levers' `smoothing` still low-passes it per module.
+/// WS-9 makes this a faithful conversion: the renderer's analyser already
+/// produced the damping lanes, the 16-cell grid, the wave, the linear FFT
+/// magnitudes and the AGC-free twins, and `meyda/SET_BANDS` stores them on the
+/// frame. Only silent frames (before the first analyser result) carry zeros,
+/// which is exactly what the legacy bridge saw before its first `update`.
 ///
-/// `wave` and `freq_mag` are the frame's arrays (zeroed until M6) and the byte
-/// spectrum is the frame's 1024 bins (also zeroed today — non-empty, so scenes
-/// take the "silent audio" branch rather than the "no analyser" one). M6
-/// replaces this function with the real `AudioBands` payload; nothing else
-/// changes.
+/// `wave`/`freq_mag` are the renderer's 1024-sample arrays; the byte spectrum
+/// is the frame's 1024 bins (the analyser sends 512 and the store pads).
 pub(crate) fn interim_band_payload(audio: &AudioFrame) -> BandPayload {
-    let bands = [audio.bass, audio.mid, audio.treble];
-
-    let mut lanes = [0.0; LANES_PER_BAND * 3];
-    for damping in 0..LANES_PER_BAND {
-        for (band, value) in bands.iter().enumerate() {
-            lanes[damping * 3 + band] = *value;
-        }
-    }
-
-    let mut cells = [0.0; 16];
-    for (cell, store) in cells.iter_mut().enumerate() {
-        *store = bands[band_of_cell(cell)];
-    }
-
     BandPayload {
-        sample_rate: INTERIM_SAMPLE_RATE,
-        lanes,
-        cells,
+        sample_rate: audio.sample_rate,
+        lanes: audio.lanes,
+        cells: audio.cells,
         beat: audio.beat,
         wave: audio.wave,
-        freq_mag: [0.0; AUDIO_SAMPLES],
-        // The three-band source has no AGC-free twin, so `raw` mirrors the
-        // bands: `useAgc: false` must not silence every scene.
-        raw: RawBands { lanes, cells },
+        freq_mag: audio.freq_mag,
+        raw: RawBands {
+            lanes: audio.raw_lanes,
+            cells: audio.raw_cells,
+        },
         byte_frequency_data: audio.byte_frequency_data.to_vec(),
     }
 }
@@ -3151,7 +3309,8 @@ mod tests {
         assert_eq!(store.audio().bass, 0.75);
         assert_eq!(store.audio().mid, 0.5);
         assert_eq!(store.audio().treble, 0.25);
-        // The interim source carries bands only; wave/FFT stay silent.
+        // This payload carries bands only; wave/FFT stay at their default
+        // (zeroed) values until the full analyser payload arrives.
         assert!(store.audio().wave.iter().all(|sample| *sample == 0.0));
         assert_eq!(store.audio().beat, 0.0);
 
@@ -3165,7 +3324,7 @@ mod tests {
         assert_eq!(uniforms.bass, 0.75);
         assert_eq!(uniforms.mid, 0.5);
         assert_eq!(uniforms.treble, 0.25);
-        assert!(!uniforms.kick, "beat detection is WS-9 / M6");
+        assert!(!uniforms.kick, "no beat in this payload");
     }
 
     // ————————————————— Point10 scene path (M4) —————————————————
@@ -3263,6 +3422,55 @@ mod tests {
                 .get(&point10_texture_id("module-a"))
                 .is_none(),
             "reset drops the scene target"
+        );
+    }
+
+    #[test]
+    fn point10_chromatic_wave_reacts_to_the_audio_frame() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+
+        let render_with = |engine: &Engine, audio: AudioFrame| {
+            let mut compositor = Compositor::new(&engine.device, &engine.queue);
+            compositor.resize(POINT10_SIZE, POINT10_SIZE);
+            let state = point10_state("Point10 Chromatic Wave", json!({}));
+            for (index, time) in [(0_u64, 0.0_f32), (1, 1.0 / 60.0), (2, 2.0 / 60.0)] {
+                let frame = FrameInfo {
+                    time_seconds: time,
+                    frame_index: index,
+                    audio: audio.clone(),
+                    ..frame_info()
+                };
+                compositor
+                    .render_frame(&state, &frame)
+                    .expect("Chromatic Wave frame renders");
+            }
+            compositor.read_main_rgba8().expect("main reads back")
+        };
+
+        let silent = render_with(&engine, AudioFrame::default());
+
+        let mut loud = AudioFrame {
+            bass: 1.0,
+            mid: 1.0,
+            treble: 1.0,
+            beat: 1.0,
+            ..AudioFrame::default()
+        };
+        loud.cells = [1.0; 16];
+        loud.lanes = [1.0; 12];
+        for (index, sample) in loud.wave.iter_mut().enumerate() {
+            *sample = (index as f32 / 1024.0 * std::f32::consts::TAU * 8.0).sin() * 0.9;
+        }
+        for (index, bin) in loud.byte_frequency_data.iter_mut().enumerate() {
+            *bin = (index.min(255)) as u8;
+        }
+        let loud = render_with(&engine, loud);
+
+        assert_ne!(
+            silent, loud,
+            "the scene must react to the analyser frame (wave/bands), not render silence"
         );
     }
 
@@ -3572,6 +3780,77 @@ mod tests {
         );
         assert!(compositor.isf.contains_key("module-a"));
         assert!(compositor.isf["module-a"].compiled.is_some());
+        assert!(
+            compositor.isf["module-a"].audio.is_none(),
+            "Checkerboard declares no audio inputs, so no audio textures are allocated"
+        );
+    }
+
+    #[test]
+    fn isf_audio_input_samples_the_live_fft_texture() {
+        let Some(engine) = try_engine() else {
+            return;
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "modv-app-isf-audio-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Audio Probe.fs"),
+            r#"/*{
+                "CREDIT": "by test",
+                "VSN": "1.0.0",
+                "ISFVSN": "2",
+                "INPUTS": [
+                    { "NAME": "audioFFT", "TYPE": "audioFFT" }
+                ]
+            }*/
+            void main() {
+                gl_FragColor = IMG_NORM_PIXEL(audioFFT, vec2(0.01, 0.5));
+            }
+            "#,
+        )
+        .expect("shader written");
+
+        let registry = Arc::new(ModuleRegistry::build(Some(&dir)));
+        let mut compositor = isf_compositor(&engine, registry);
+        let state = isf_state(&[("module-a", "Audio Probe", json!({}))]);
+
+        let mut frame = frame_info();
+        frame.audio.byte_frequency_data[5] = 0;
+        compositor
+            .render_frame(&state, &frame)
+            .expect("dark frame renders");
+        assert!(
+            compositor.isf["module-a"].audio.is_some(),
+            "an audio input allocates the 512x2 texture pair"
+        );
+        let dark = compositor.read_main_rgba8().expect("main reads back");
+
+        frame.audio.byte_frequency_data[5] = 255;
+        compositor
+            .render_frame(&state, &frame)
+            .expect("bright frame renders");
+        let bright = compositor.read_main_rgba8().expect("main reads back");
+
+        assert_ne!(
+            dark, bright,
+            "changing the FFT bin the shader samples must change the output"
+        );
+        let dark_luma: u64 = dark.chunks_exact(4).map(|p| u64::from(p[0])).sum();
+        let bright_luma: u64 = bright.chunks_exact(4).map(|p| u64::from(p[0])).sum();
+        assert!(
+            bright_luma > dark_luma,
+            "the brighter FFT bin must raise the sampled channel"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -3645,40 +3924,65 @@ mod tests {
     }
 
     #[test]
-    fn interim_audio_payload_replicates_bands_across_lanes_and_cells() {
-        let audio = AudioFrame {
+    fn interim_audio_payload_forwards_the_real_analyser_grid() {
+        let mut audio = AudioFrame {
             bass: 0.5,
             mid: 0.25,
             treble: 0.75,
             beat: 0.4,
+            sample_rate: 48_000.0,
             ..AudioFrame::default()
         };
+        // Distinct values prove the payload is a conversion, not a band
+        // replication: every lane/cell keeps its own analyser value.
+        for (index, lane) in audio.lanes.iter_mut().enumerate() {
+            *lane = index as f32 / 100.0;
+        }
+        for (index, cell) in audio.cells.iter_mut().enumerate() {
+            *cell = 0.5 + index as f32 / 100.0;
+        }
+        for (index, lane) in audio.raw_lanes.iter_mut().enumerate() {
+            *lane = 1.0 + index as f32 / 100.0;
+        }
+        for (index, cell) in audio.raw_cells.iter_mut().enumerate() {
+            *cell = 2.0 + index as f32 / 100.0;
+        }
+        for (index, bin) in audio.freq_mag.iter_mut().enumerate() {
+            *bin = index as f32;
+        }
+        audio.wave[0] = -0.5;
+        audio.wave[1023] = 0.5;
+        audio.byte_frequency_data[0] = 200;
+
         let payload = interim_band_payload(&audio);
 
-        assert_eq!(payload.sample_rate, INTERIM_SAMPLE_RATE);
-        // Twelve lanes: `damping * 3 + band`, each band replicated.
-        assert_eq!(
-            payload.lanes,
-            [
-                0.5, 0.25, 0.75, // damping 0
-                0.5, 0.25, 0.75, // damping 1
-                0.5, 0.25, 0.75, // damping 2
-                0.5, 0.25, 0.75, // damping 3
-            ]
-        );
-        // Sixteen cells: bass owns 0..=4, mid 5..=9, treble 10..=15
-        // (`band_of_cell`).
-        assert_eq!(&payload.cells[0..5], &[0.5; 5]);
-        assert_eq!(&payload.cells[5..10], &[0.25; 5]);
-        assert_eq!(&payload.cells[10..16], &[0.75; 6]);
-        // `useAgc: false` must not silence the scenes: `raw` mirrors the bands.
-        assert_eq!(payload.raw.lanes, payload.lanes);
-        assert_eq!(payload.raw.cells, payload.cells);
+        assert_eq!(payload.sample_rate, 48_000.0);
+        assert_eq!(payload.lanes[0], 0.0);
+        assert_eq!(payload.lanes[11], 0.11);
+        assert_eq!(payload.cells[0], 0.5);
+        assert_eq!(payload.cells[15], 0.65);
+        assert_eq!(payload.raw.lanes[0], 1.0);
+        assert_eq!(payload.raw.cells[15], 2.15);
         assert_eq!(payload.beat, 0.4);
-        // Wave/FFT stay zeroed until M6, but the byte spectrum keeps the
-        // analyser's 1024 bins so scenes take the "silence" branch.
-        assert_eq!(payload.freq_mag, [0.0; AUDIO_SAMPLES]);
-        assert!(payload.wave.iter().all(|sample| *sample == 0.0));
-        assert_eq!(payload.byte_frequency_data, vec![0_u8; AUDIO_SAMPLES]);
+        assert_eq!(payload.wave[0], -0.5);
+        assert_eq!(payload.wave[1023], 0.5);
+        assert_eq!(payload.freq_mag[0], 0.0);
+        assert_eq!(payload.freq_mag[1023], 1023.0);
+        assert_eq!(payload.byte_frequency_data[0], 200);
+        assert!(
+            payload.byte_frequency_data[1023..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+
+    #[test]
+    fn silent_audio_payload_is_all_zeroes() {
+        let payload = interim_band_payload(&AudioFrame::default());
+        assert!(payload.lanes.iter().all(|value| *value == 0.0));
+        assert!(payload.cells.iter().all(|value| *value == 0.0));
+        assert!(payload.wave.iter().all(|value| *value == 0.0));
+        assert!(payload.freq_mag.iter().all(|value| *value == 0.0));
+        assert_eq!(payload.sample_rate, 44_100.0);
     }
 }

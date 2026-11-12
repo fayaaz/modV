@@ -9,6 +9,7 @@ mod compositor;
 mod fixtures;
 mod headless;
 mod ids;
+mod input_links;
 mod module_preview;
 mod module_registry;
 mod performance;

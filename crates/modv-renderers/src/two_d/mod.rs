@@ -85,10 +85,11 @@
 //! # Audio
 //!
 //! The engine (M2e) owns Meyda/audio analysis. This crate does not depend on
-//! `modv-media`, so [`AudioFrame`] is a minimal, decoupled mirror of the
-//! features the corpus reads: `features.zcr`, `features.rms`, `features.buffer`
-//! (`docs/rust-hybrid.md` WS-5 "Module contract") plus the band payload the
-//! scene/effect paths use.
+//! `modv-media`, so [`AudioFrame`] is a decoupled mirror of the analyser
+//! payload: the AGC bands, the Meyda feature bag (`features.zcr`,
+//! `features.rms`, `features.buffer` — `docs/rust-hybrid.md` WS-5 "Module
+//! contract"), the Point10 damping lanes/cells, wave, FFT magnitudes and
+//! sample rate (WS-9).
 
 #![forbid(unsafe_code)]
 
@@ -103,26 +104,45 @@ mod tests;
 pub use canvas::{Canvas, ClipShape, TextAlign, TextBaseline};
 pub use modules::{DrawContext, ModuleContext, TwoDModule, TwoDModuleMeta, TwoDProp, all_modules};
 
-/// Minimal audio payload for 2D modules.
+/// The full audio payload for modules and renderers.
 ///
-/// Mirrors the parts of Meyda's feature bag the 15 hand-written modules read
-/// (`docs/rust-hybrid.md` WS-5) plus the AGC band values used by the rest of
-/// the engine. Decoupled from `modv-media` on purpose: the engine adapter
-/// (M2e) fills this from the band payload / Meyda worker result.
+/// This is the Rust mirror of the object `audio-bands.js::update` returns plus
+/// the Meyda feature bag the renderer's audio pump forwards over the control
+/// socket (`meyda/SET_BANDS`). It is decoupled from `modv-media` on purpose:
+/// the renderer performs the analysis (`AudioBands` + Meyda) and the engine
+/// only stores/forwards the result (WS-9).
+///
+/// Array lengths accept the renderer's wire shapes: the wave is 1024 samples
+/// (the analyser's `fftSize`), `freq_mag` is 1024 linear FFT magnitudes, and
+/// the byte spectrum/time-domain arrays are `AUDIO_BUFFER_SIZE` (512) values
+/// padded to 1024. `byte_frequency_data` keeps the full 1024 slots so a
+/// larger FFT can be forwarded without a type change.
 #[derive(Clone, Debug)]
 pub struct AudioFrame {
-    /// AGC-normalised bass band, 0..1.
+    /// AGC-normalised bass band, 0..1 (the dB-mapped `features.bass`).
     pub bass: f32,
     /// AGC-normalised mid band, 0..1.
     pub mid: f32,
     /// AGC-normalised treble band, 0..1.
     pub treble: f32,
-    /// Beat flag for the current frame (0 or 1).
+    /// Beat envelope for the current frame, 0..1 (`features.p10.beat`).
     pub beat: f32,
     /// 1024 time-domain samples, -1..1 (the `features.buffer` analogue).
     pub wave: [f32; 1024],
     /// 1024 FFT bins, 0..255.
     pub byte_frequency_data: [u8; 1024],
+    /// 12 damping lanes, `[damping * 3 + band]` (`audio-bands.js` payload).
+    pub lanes: [f32; 12],
+    /// The 16 log-spaced band cells (`audio-bands.js` payload).
+    pub cells: [f32; 16],
+    /// AGC-free twin of [`Self::lanes`] (`payload.raw.lanes`).
+    pub raw_lanes: [f32; 12],
+    /// AGC-free twin of [`Self::cells`] (`payload.raw.cells`).
+    pub raw_cells: [f32; 16],
+    /// 1024 linear FFT magnitudes (`payload.freqMag`).
+    pub freq_mag: [f32; 1024],
+    /// Analyser sample rate in Hz (fallback 44 100).
+    pub sample_rate: f32,
     /// The Meyda feature bag subset the corpus reads.
     pub features: AudioFeatures,
 }
@@ -136,6 +156,12 @@ impl Default for AudioFrame {
             beat: 0.0,
             wave: [0.0; 1024],
             byte_frequency_data: [0; 1024],
+            lanes: [0.0; 12],
+            cells: [0.0; 16],
+            raw_lanes: [0.0; 12],
+            raw_cells: [0.0; 16],
+            freq_mag: [0.0; 1024],
+            sample_rate: 44_100.0,
             features: AudioFeatures::default(),
         }
     }
@@ -162,18 +188,30 @@ impl AudioFrame {
             beat: 1.0,
             wave,
             byte_frequency_data,
+            lanes: [0.6, 0.4, 0.3, 0.6, 0.4, 0.3, 0.6, 0.4, 0.3, 0.6, 0.4, 0.3],
+            cells: [
+                0.6, 0.6, 0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4, 0.4, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3,
+            ],
+            raw_lanes: [0.6, 0.4, 0.3, 0.6, 0.4, 0.3, 0.6, 0.4, 0.3, 0.6, 0.4, 0.3],
+            raw_cells: [
+                0.6, 0.6, 0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4, 0.4, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3,
+            ],
+            freq_mag: [0.0; 1024],
+            sample_rate: 44_100.0,
             features: AudioFeatures {
                 rms: 0.5,
                 zcr: 0.1,
                 energy: 0.25,
                 buffer: wave.to_vec(),
+                ..AudioFeatures::default()
             },
         }
     }
 }
 
 /// Meyda feature bag subset used by the corpus (`features.zcr`, `.rms`,
-/// `.energy`, `.buffer`).
+/// `.energy`, `.buffer`) plus the spectral/perceptual scalars the engine
+/// forwards for Input Links (WS-9).
 #[derive(Clone, Debug)]
 pub struct AudioFeatures {
     /// Root-mean-square amplitude, 0..1.
@@ -182,6 +220,24 @@ pub struct AudioFeatures {
     pub zcr: f32,
     /// Spectral energy, 0..1.
     pub energy: f32,
+    /// Spectral centroid (Hz).
+    pub spectral_centroid: f32,
+    /// Spectral flatness, 0..1.
+    pub spectral_flatness: f32,
+    /// Spectral slope.
+    pub spectral_slope: f32,
+    /// Spectral rolloff (Hz).
+    pub spectral_rolloff: f32,
+    /// Spectral spread.
+    pub spectral_spread: f32,
+    /// Spectral skewness.
+    pub spectral_skewness: f32,
+    /// Spectral kurtosis.
+    pub spectral_kurtosis: f32,
+    /// Perceptual spread.
+    pub perceptual_spread: f32,
+    /// Perceptual sharpness.
+    pub perceptual_sharpness: f32,
     /// 1024 time-domain samples (`features.buffer`; `Waveform.js:74` reads its
     /// length and values).
     pub buffer: Vec<f32>,
@@ -193,6 +249,15 @@ impl Default for AudioFeatures {
             rms: 0.0,
             zcr: 0.0,
             energy: 0.0,
+            spectral_centroid: 0.0,
+            spectral_flatness: 0.0,
+            spectral_slope: 0.0,
+            spectral_rolloff: 0.0,
+            spectral_spread: 0.0,
+            spectral_skewness: 0.0,
+            spectral_kurtosis: 0.0,
+            perceptual_spread: 0.0,
+            perceptual_sharpness: 0.0,
             buffer: vec![0.0; 1024],
         }
     }
