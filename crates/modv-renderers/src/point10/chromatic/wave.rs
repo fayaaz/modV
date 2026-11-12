@@ -26,7 +26,10 @@
 //! WGSL.
 #![forbid(unsafe_code)]
 
-use super::{ChromaticLineSim, TexelMapping, WAVE_BYTES, WAVE_N};
+use super::{
+    CHROMATIC_PROPS, ChromaticLineSim, TexelMapping, WAVE_BYTES, WAVE_N, sample_count,
+    upload_wave_texture,
+};
 use crate::point10::audio_bridge::{AUDIO_SAMPLES, AudioBridge, P10Audio};
 use crate::point10::{
     FULLSCREEN_TRIANGLE_WGSL, SceneContext, SceneMeta, SceneProp, read_scene_props,
@@ -60,17 +63,6 @@ pub struct ChromaticWaveUniforms {
     /// Trailing padding (keeps the span at 64 bytes).
     pub _pad3: [f32; 2],
 }
-
-/// `CHROMATIC_LINE_PROPS`, shared by the line and the wave (`sceneProps.js:84-88`).
-///
-/// The wave carries `amplitude` even though its shader has no `amp` uniform:
-/// the JS registry applies the same schema to both scenes and sets
-/// `scene.ampScale`, which ChromaticWave's `_audioUniforms` simply never reads.
-const CHROMATIC_PROPS: &[SceneProp] = &[
-    SceneProp::float("distortion", "Chroma", 0.05, 0.0, 0.5, 0.001),
-    SceneProp::float("amplitude", "Wave Amplitude", 1.0, 0.0, 3.0, 0.01),
-    SceneProp::float("glow", "Glow", 1.0, 0.0, 3.0, 0.01),
-];
 
 /// GPU resources built in [`crate::point10::Point10Scene::init`].
 struct WaveGpu {
@@ -175,19 +167,6 @@ impl ChromaticWave {
             time: self.time,
             _pad3: [0.0, 0.0],
         }
-    }
-
-    /// Number of new samples to append this frame.
-    ///
-    /// `ChromaticLine.js:168`: `Math.min(Math.round(this.rate * dt), this.p9.wave.length)`
-    /// with `this.rate = audio.ctx?.sampleRate || 44100`. A frame longer than
-    /// the 1024-sample (~23 ms) analyser window drops samples instead of
-    /// re-reading them.
-    fn sample_count(sample_rate: f32, dt: f32) -> usize {
-        if !dt.is_finite() || !sample_rate.is_finite() || dt <= 0.0 || sample_rate <= 0.0 {
-            return 0;
-        }
-        ((sample_rate * dt).round() as usize).min(AUDIO_SAMPLES)
     }
 }
 
@@ -307,7 +286,7 @@ impl crate::point10::Point10Scene for ChromaticWave {
         // Seed the texture with the wave's silence texel (0), then the first
         // frame overwrites it.
         let silence = self.sim.compute_bytes(TexelMapping::Energy);
-        write_wave(queue, &wave_texture, &silence);
+        upload_wave_texture(queue, &wave_texture, &silence);
 
         self.size = (ctx.width, ctx.height);
         self.gpu = Some(WaveGpu {
@@ -340,7 +319,7 @@ impl crate::point10::Point10Scene for ChromaticWave {
         // Append the genuinely new samples (the analyser's tail) so the
         // waveform scrolls in real time (`ChromaticLine.js:167-176`).
         if self.p9.has_audio() {
-            let k = Self::sample_count(audio.sample_rate, dt);
+            let k = sample_count(audio.sample_rate, dt);
             if k > 0 {
                 self.sim.append_wave_tail(&audio.wave[AUDIO_SAMPLES - k..]);
             }
@@ -350,7 +329,7 @@ impl crate::point10::Point10Scene for ChromaticWave {
             return;
         };
         let bytes = self.wave_bytes();
-        write_wave(&gpu.queue, &gpu.wave_texture, &bytes);
+        upload_wave_texture(&gpu.queue, &gpu.wave_texture, &bytes);
         let uniforms = self.uniforms();
         gpu.queue
             .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -400,28 +379,6 @@ impl crate::point10::Point10Scene for ChromaticWave {
     }
 }
 
-fn write_wave(queue: &wgpu::Queue, texture: &wgpu::Texture, bytes: &[u8; WAVE_BYTES]) {
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(WAVE_BYTES as u32),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width: WAVE_N as u32,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,9 +390,14 @@ mod tests {
         let wave = ChromaticWave::new();
         // Silence -> 0, not the line's 191 bias (`ChromaticWave.js:59-61`).
         let bytes = wave.wave_bytes();
-        for texel in bytes.chunks_exact(4) {
-            assert_eq!(&texel[0..3], &[0, 0, 0], "silence must read as 0 energy");
-            assert_eq!(texel[3], 255, "alpha stays opaque");
+        for i in 0..WAVE_N {
+            let o = i * 4;
+            assert_eq!(
+                &bytes[o..o + 3],
+                &[0, 0, 0],
+                "silence must read as 0 energy"
+            );
+            assert_eq!(bytes[o + 3], 255, "alpha stays opaque");
         }
     }
 
@@ -482,17 +444,6 @@ mod tests {
         assert_eq!(defaults.distortion, 0.05);
         assert_eq!(defaults.amp_scale, 1.0);
         assert_eq!(defaults.glow_scale, 1.0);
-    }
-
-    #[test]
-    fn sample_count_matches_the_js_cap() {
-        // 60 fps at 44.1 kHz -> 735 samples; a 100 ms frame caps at the
-        // 1024-sample analyser window.
-        assert_eq!(ChromaticWave::sample_count(44_100.0, 1.0 / 60.0), 735);
-        assert_eq!(ChromaticWave::sample_count(44_100.0, 0.1), 1024);
-        assert_eq!(ChromaticWave::sample_count(44_100.0, 0.0), 0);
-        assert_eq!(ChromaticWave::sample_count(44_100.0, f32::NAN), 0);
-        assert_eq!(ChromaticWave::sample_count(0.0, 0.016), 0);
     }
 
     #[test]

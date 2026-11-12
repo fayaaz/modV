@@ -33,12 +33,11 @@
 //!
 //! ChromaticLine was ported ahead of this batch (`chromatic_line.rs`, a
 //! fixture-driven port with its own `SyntheticSine`); it now shares its
-//! ring-buffer simulation with ChromaticWave through [`chromatic`], and its
-//! public API is unchanged. [`all_scenes`] registers the four **batch 1**
-//! scenes because those are the ones on the shared bridge/postfx contract;
-//! ChromaticLine joins the registry when its update path is switched from the
-//! sine fixture to [`audio_bridge::AudioBridge`] (its existing tests pin the
-//! fixture behaviour, so that switch is a separate change).
+//! ring-buffer simulation with ChromaticWave through [`chromatic`] and its
+//! update path is bridge-driven like every other scene, so [`all_scenes`]
+//! registers it first, followed by the four **batch 1** scenes. `SyntheticSine`
+//! stays available for tests and the headless frame harness, but it only fills
+//! a `BandPayload` — the scene itself never reads it.
 //!
 //! # Scene contract
 //!
@@ -497,11 +496,13 @@ impl UnitQuad {
 
 /// Every Point10 scene implemented on the shared [`Point10Scene`] contract.
 ///
-/// Order is the WS-7 port order, so the Gallery list is stable: batch 1 is
-/// `ChromaticWave, ParticleField, SpiralParticles, Waveform` (see the module
-/// docs). The remaining 21 scenes are added batch by batch.
+/// Order is the WS-7 port order, so the Gallery list is stable:
+/// `ChromaticLine, ChromaticWave, ParticleField, SpiralParticles, Waveform`
+/// (ChromaticLine was ported ahead of batch 1; the rest are batch 1 — see the
+/// module docs). The remaining 20 scenes are added batch by batch.
 pub fn all_scenes() -> Vec<Box<dyn Point10Scene>> {
     vec![
+        Box::new(chromatic::line::ChromaticLine::new()),
         Box::new(scenes::chromatic_wave::ChromaticWave::new()),
         Box::new(scenes::particle_field::ParticleField::new()),
         Box::new(scenes::spiral_particles::SpiralParticles::new()),
@@ -514,14 +515,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_the_batch_one_scenes() {
+    fn registry_has_the_port_order_scenes() {
         let scenes = all_scenes();
-        assert_eq!(scenes.len(), 4);
+        assert_eq!(scenes.len(), 5);
 
-        assert_eq!(scenes[0].name(), "Point10 Chromatic Wave");
-        assert_eq!(scenes[1].name(), "Point10 Particle Field");
-        assert_eq!(scenes[2].name(), "Point10 Spiral Particles");
-        assert_eq!(scenes[3].name(), "Point10 Waveform");
+        assert_eq!(scenes[0].name(), "Point10 Chromatic Line");
+        assert_eq!(scenes[1].name(), "Point10 Chromatic Wave");
+        assert_eq!(scenes[2].name(), "Point10 Particle Field");
+        assert_eq!(scenes[3].name(), "Point10 Spiral Particles");
+        assert_eq!(scenes[4].name(), "Point10 Waveform");
     }
 
     #[test]

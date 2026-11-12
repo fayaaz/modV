@@ -7,7 +7,9 @@ use modv_render::headless::{create_headless, read_back_rgba8};
 use modv_render::wgpu;
 use modv_render::{Engine, FrameStats};
 
+use modv_renderers::point10::audio_bridge::{AudioBridge, BandPayload};
 use modv_renderers::point10::chromatic_line::{ChromaticLine, SyntheticSine};
+use modv_renderers::point10::{Point10Scene, SceneContext};
 
 use crate::cli::Cli;
 use crate::report::{AdapterSummary, report_json};
@@ -17,14 +19,25 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
     let width = cli.width.max(1);
     let height = cli.height.max(1);
     let target = create_headless(&engine, width, height);
-    let mut scene = ChromaticLine::new(
+
+    // `ChromaticLine` is a `Point10Scene` now: `init` builds its pipelines for
+    // the headless target format and `draw` records into the caller's pass, so
+    // the near-black backdrop below is preserved.
+    let mut ctx = SceneContext::new(
         &engine.device,
         &engine.queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
     );
-    scene.resize(width, height);
+    ctx.resize(width, height);
+    let mut scene = ChromaticLine::new();
+    scene.init(&mut ctx);
+
+    // `--audio-fixture` feeds a deterministic sine through the same payload →
+    // bridge path live audio takes; without it the scene renders in silence.
     let mut fixture =
         (cli.audio_fixture > 0.0).then(|| SyntheticSine::new(cli.audio_fixture as f32));
+    let mut payload = BandPayload::silent(48_000.0);
+    let mut bridge = AudioBridge::new();
 
     let frames = cli.headless_frames();
     let mut stats = FrameStats::start();
@@ -39,7 +52,13 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
         last_frame = now;
         let dt_seconds = dt_duration.as_secs_f32();
 
-        scene.update(&engine.queue, dt_seconds, &mut fixture);
+        if let Some(sine) = fixture.as_mut() {
+            sine.fill_payload(&mut payload, dt_seconds);
+            bridge.update(dt_seconds, Some(&payload), &Default::default());
+        } else {
+            bridge.update(dt_seconds, None, &Default::default());
+        }
+        scene.update(dt_seconds, &bridge);
 
         let mut encoder = engine
             .device
@@ -69,7 +88,7 @@ pub fn run(cli: Cli, engine: Engine, adapter: AdapterSummary) -> Result<(), Stri
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            scene.render(&mut pass);
+            scene.draw(&mut pass);
         }
         engine.queue.submit(Some(encoder.finish()));
         stats.record_frame(dt_duration);

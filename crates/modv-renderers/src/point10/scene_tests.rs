@@ -63,9 +63,21 @@ fn render_two_frames(scene: &mut dyn Point10Scene, size: u32) -> Option<Vec<u8>>
 }
 
 #[test]
-fn chromatic_wave_renders() {
+fn chromatic_line_renders() {
     let mut scenes = all_scenes();
     let Some(pixels) = render_two_frames(scenes[0].as_mut(), SIZE) else {
+        return;
+    };
+    assert!(
+        any_lit(&pixels),
+        "ChromaticLine produced an empty frame at {SIZE}x{SIZE}"
+    );
+}
+
+#[test]
+fn chromatic_wave_renders() {
+    let mut scenes = all_scenes();
+    let Some(pixels) = render_two_frames(scenes[1].as_mut(), SIZE) else {
         return;
     };
     assert!(
@@ -106,7 +118,7 @@ fn spiral_particles_renders() {
 #[test]
 fn waveform_renders() {
     let mut scenes = all_scenes();
-    let Some(pixels) = render_two_frames(scenes[3].as_mut(), SIZE) else {
+    let Some(pixels) = render_two_frames(scenes[4].as_mut(), SIZE) else {
         return;
     };
     assert!(

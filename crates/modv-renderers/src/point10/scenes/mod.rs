@@ -7,8 +7,9 @@
 //! | [`spiral_particles`] | Spiral Particles | `scenes/SpiralParticles.js` |
 //! | [`waveform`] | Waveform | `scenes/Waveform.js` |
 //!
-//! ChromaticLine keeps its historical module ([`crate::point10::chromatic_line`])
-//! and its shared simulation ([`crate::point10::chromatic`]).
+//! ChromaticLine lives with its shared simulation in
+//! [`crate::point10::chromatic`] ([`crate::point10::chromatic::line`]) and is
+//! registered from there by [`crate::point10::all_scenes`].
 
 pub mod chromatic_wave;
 pub mod particle_field;

@@ -69,6 +69,7 @@
 use serde_json::{Map, Value, json};
 
 use modv_engine::props::PropSchema;
+use modv_renderers::point10::chromatic::line::ChromaticLine;
 use modv_renderers::point10::chromatic::wave::ChromaticWave;
 use modv_renderers::point10::scenes::particle_field::ParticleField;
 use modv_renderers::point10::scenes::spiral_particles::SpiralParticles;
@@ -136,6 +137,8 @@ pub struct Point10Definition {
 /// [`modv_renderers::point10::all_scenes`]; `every_registered_scene_constructs`
 /// fails when the two drift.
 pub enum Point10SceneKind {
+    /// `Point10 Chromatic Line` (`chromatic/line.rs`).
+    ChromaticLine(ChromaticLine),
     /// `Point10 Chromatic Wave` (`chromatic/wave.rs`).
     ChromaticWave(ChromaticWave),
     /// `Point10 Particle Field` (`scenes/particle_field.rs`).
@@ -153,6 +156,7 @@ impl Point10SceneKind {
     /// module exactly like an unregistered 2D module.
     pub fn create(name: &str) -> Option<Self> {
         Some(match name {
+            "Point10 Chromatic Line" => Self::ChromaticLine(ChromaticLine::new()),
             "Point10 Chromatic Wave" => Self::ChromaticWave(ChromaticWave::new()),
             "Point10 Particle Field" => Self::ParticleField(ParticleField::new()),
             "Point10 Spiral Particles" => Self::SpiralParticles(SpiralParticles::new()),
@@ -169,6 +173,7 @@ impl Point10SceneKind {
     /// (`adapter.js:797-800`).
     pub fn apply_props(&mut self, get: &mut dyn FnMut(&str) -> Option<f32>) {
         match self {
+            Self::ChromaticLine(scene) => scene.apply_props(|key| get(key)),
             Self::ChromaticWave(scene) => scene.apply_props(|key| get(key)),
             Self::ParticleField(scene) => scene.apply_props(|key| get(key)),
             Self::SpiralParticles(scene) => scene.apply_props(|key| get(key)),
@@ -181,6 +186,7 @@ impl Point10SceneKind {
 impl Point10Scene for Point10SceneKind {
     fn name(&self) -> &'static str {
         match self {
+            Self::ChromaticLine(scene) => scene.name(),
             Self::ChromaticWave(scene) => scene.name(),
             Self::ParticleField(scene) => scene.name(),
             Self::SpiralParticles(scene) => scene.name(),
@@ -190,6 +196,7 @@ impl Point10Scene for Point10SceneKind {
 
     fn init(&mut self, ctx: &mut modv_renderers::point10::SceneContext) {
         match self {
+            Self::ChromaticLine(scene) => scene.init(ctx),
             Self::ChromaticWave(scene) => scene.init(ctx),
             Self::ParticleField(scene) => scene.init(ctx),
             Self::SpiralParticles(scene) => scene.init(ctx),
@@ -199,6 +206,7 @@ impl Point10Scene for Point10SceneKind {
 
     fn resize(&mut self, width: u32, height: u32) {
         match self {
+            Self::ChromaticLine(scene) => scene.resize(width, height),
             Self::ChromaticWave(scene) => scene.resize(width, height),
             Self::ParticleField(scene) => scene.resize(width, height),
             Self::SpiralParticles(scene) => scene.resize(width, height),
@@ -208,6 +216,7 @@ impl Point10Scene for Point10SceneKind {
 
     fn update(&mut self, dt: f32, audio: &modv_renderers::point10::audio_bridge::AudioBridge) {
         match self {
+            Self::ChromaticLine(scene) => scene.update(dt, audio),
             Self::ChromaticWave(scene) => scene.update(dt, audio),
             Self::ParticleField(scene) => scene.update(dt, audio),
             Self::SpiralParticles(scene) => scene.update(dt, audio),
@@ -221,6 +230,7 @@ impl Point10Scene for Point10SceneKind {
         target: &modv_render::wgpu::TextureView,
     ) {
         match self {
+            Self::ChromaticLine(scene) => scene.render(encoder, target),
             Self::ChromaticWave(scene) => scene.render(encoder, target),
             Self::ParticleField(scene) => scene.render(encoder, target),
             Self::SpiralParticles(scene) => scene.render(encoder, target),
@@ -230,6 +240,7 @@ impl Point10Scene for Point10SceneKind {
 
     fn dispose(&mut self) {
         match self {
+            Self::ChromaticLine(scene) => scene.dispose(),
             Self::ChromaticWave(scene) => scene.dispose(),
             Self::ParticleField(scene) => scene.dispose(),
             Self::SpiralParticles(scene) => scene.dispose(),
@@ -239,6 +250,7 @@ impl Point10Scene for Point10SceneKind {
 
     fn props(&self) -> Vec<SceneProp> {
         match self {
+            Self::ChromaticLine(scene) => scene.props(),
             Self::ChromaticWave(scene) => scene.props(),
             Self::ParticleField(scene) => scene.props(),
             Self::SpiralParticles(scene) => scene.props(),
@@ -248,6 +260,7 @@ impl Point10Scene for Point10SceneKind {
 
     fn meta(&self) -> SceneMeta {
         match self {
+            Self::ChromaticLine(scene) => scene.meta(),
             Self::ChromaticWave(scene) => scene.meta(),
             Self::ParticleField(scene) => scene.meta(),
             Self::SpiralParticles(scene) => scene.meta(),
@@ -783,6 +796,10 @@ mod tests {
     fn registry_knows_the_point10_scenes() {
         let registry = ModuleRegistry::builtin();
         assert_eq!(
+            registry.kind("Point10 Chromatic Line"),
+            Some(ModuleKind::Point10)
+        );
+        assert_eq!(
             registry.kind("Point10 Chromatic Wave"),
             Some(ModuleKind::Point10)
         );
@@ -790,7 +807,7 @@ mod tests {
         // Point10 names are their own kind, not 2D modules.
         assert_eq!(registry.kind("Ball"), Some(ModuleKind::TwoD));
         assert_eq!(registry.kind("Point10 Not A Scene"), None);
-        assert_eq!(registry.point10_definitions().len(), 4);
+        assert_eq!(registry.point10_definitions().len(), 5);
     }
 
     #[test]
@@ -804,6 +821,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "Point10 Chromatic Line",
                 "Point10 Chromatic Wave",
                 "Point10 Particle Field",
                 "Point10 Spiral Particles",
