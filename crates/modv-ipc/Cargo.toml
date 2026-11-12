@@ -6,3 +6,7 @@ license.workspace = true
 description = "modV engine — see docs/rust-hybrid.md"
 
 [dependencies]
+libc = "0.2.191"
+memmap2 = "0.9.12"
+serde = "1.0.229"
+serde_json = "1.0.154"

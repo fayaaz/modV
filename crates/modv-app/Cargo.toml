@@ -11,4 +11,10 @@ name = "modv-engine"
 path = "src/main.rs"
 
 [dependencies]
+clap = "4.6.7"
+image = "0.25.10"
 modv-engine = { path = "../modv-engine" }
+modv-render = { version = "0.1.0", path = "../modv-render" }
+modv-renderers = { version = "0.1.0", path = "../modv-renderers" }
+serde_json = "1.0.154"
+winit = "0.30.13"
