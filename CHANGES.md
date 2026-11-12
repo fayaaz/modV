@@ -1,3 +1,4 @@
+- [x] Rust hybrid engine spike (docs/rust-hybrid.md, branch rust-hybrid; opt-in via MODV_ENGINE=1, default build unchanged): native winit/wgpu Vulkan window presenting on Wayland at vsync, Rust engine supervised by Electron (spawn, heartbeat watchdog, restart budget, snapshot restore), shared-memory preview channel, Point10 ChromaticLine ported to WGSL. M0/M1 landed with tests and a packaged engine inside the AppImage. See docs/rust-hybrid-spike.md for measurements and the go/no-go recommendation; not user-facing yet.
 - [x] Allow webcam picker to set resolution and framerate (done in 7377b94a)
 - [x] Allow performance mode with an autopilot that has a phrase change detector and transitions between scenes. (Scenes being a collection of layers) (done in 7377b94a, d5d4d521, 958a82e3)
 - [x] Import scenes to be able to use as layers from Point10 - my own custom visualiser (~/Documents/musicvis) - add levers to change music responsiveness (done in 7377b94a, 958a82e3)
